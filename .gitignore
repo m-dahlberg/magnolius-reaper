@@ -1,0 +1,14 @@
+# Test and demo audio — regenerable from the fixture generators in test/ and tools/.
+# Keeping it out of git is deliberate: it is ~172 MB and would dominate every clone.
+*.wav
+*.reapeaks
+peaks/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local caches and tool state
+.cache/
+.coverage-tmp/
+.claude/settings.local.json

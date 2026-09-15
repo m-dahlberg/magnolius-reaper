@@ -1,0 +1,394 @@
+desc:Variable Ratio Compressor (adaptive-ratio ceiling)
+// @description Variable Ratio Compressor
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   A compressor that solves for the ratio each passage needs instead of being
+//   told one. Lookahead finds the loudest upcoming peak, derives the exact
+//   ratio that lands it on the output ceiling, then holds that ratio across
+//   the passage.
+//
+//   Everything between threshold and ceiling is compressed at the same
+//   currently-valid ratio, so relative dynamics inside the passage survive
+//   instead of only the tips being flattened.
+//
+//   A sliding-min plus double-boxcar smoother makes the ceiling a hard
+//   guarantee rather than a target: no overshoot, so the safety clip is a
+//   genuine last resort.
+//
+//   A four-band version is available as Variable Ratio Compressor MB.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// Program-dependent compressor: lookahead finds the loudest upcoming peak,
+// derives the exact ratio that lands that peak on the output ceiling, then
+// holds that ratio across the passage. Everything between threshold and
+// ceiling is compressed at the same (currently valid) ratio, so relative
+// dynamics inside the passage survive instead of only the tips being flattened.
+//
+// Signal flow:
+//   env -> sliding max (lookahead) -> required ratio -> ratio ballistics
+//       -> static curve applied to instantaneous env -> gain
+//       -> sliding min (lookahead) -> 2x boxcar -> applied to delayed audio
+//
+// The sliding-min + double-boxcar pair is what makes the ceiling a hard
+// guarantee: at the output instant of any peak, every gain sample entering
+// the smoother has already "seen" that peak, so the smoothed gain can never
+// be higher than the gain that peak required.
+
+slider1:s_in=0<-12,24,0.1>Input Gain (dB)
+slider2:s_ceil=-0.3<-24,0,0.05>Output Ceiling (dB)
+slider3:s_thr=-18<-60,0,0.1>Threshold (dB)
+slider4:s_blend=100<0,100,0.1>Blend (% wet)
+slider5:s_comp=0<-20,20,0.1>Makeup Gain (dB)
+slider6:s_mkpos=1<0,1,1{Pre - ceiling holds,Post - ceiling is internal}>Makeup Position
+slider7:s_la=5<0.5,20,0.1>Lookahead (ms)
+slider8:s_rel=200<10,2000,1>Ratio Release (ms)
+slider9:s_maxr=200<2,1000,1>Max Ratio (:1)
+slider10:s_clip=1<0,1,1{Off,On}>Safety Clip
+
+in_pin:left
+in_pin:right
+out_pin:left
+out_pin:right
+
+@init
+
+DMAX    = 8192;              // must be a power of two
+MASK    = DMAX - 1;
+LN10_20 = 0.11512925464970229;   // ln(10)/20   dB -> linear exponent
+DB20    = 8.6858896380650366;    // 20/ln(10)   ln  -> dB
+
+dlyL = 0;
+dlyR = dlyL + DMAX;          // lookahead audio delay
+mxv  = dlyR + DMAX;          // max-deque values
+mxi  = mxv  + DMAX;          // max-deque sample indices
+mnv  = mxi  + DMAX;          // min-deque values
+mni  = mnv  + DMAX;          // min-deque sample indices
+ma1  = mni  + DMAX;          // boxcar stage 1
+ma2  = ma1  + DMAX;          // boxcar stage 2
+
+// ---- scrolling display history ----
+// One column per BIN samples. Each column stores the min/max of the (delayed,
+// time-aligned) input and of the output, plus the deepest gain and the highest
+// ratio seen in that bin. @gfx only reads; @sample only writes.
+HIST  = 1024;                // must be a power of two
+HMASK = HIST - 1;
+
+hIMIN = ma2   + DMAX;
+hIMAX = hIMIN + HIST;
+hOMIN = hIMAX + HIST;
+hOMAX = hOMIN + HIST;
+hG    = hOMAX + HIST;
+hR    = hG    + HIST;
+
+binlen = max(1, floor(srate * 0.005));   // 5 ms per column -> ~5 s of history
+
+rs         = 1;
+lastla     = -1;
+need_reset = 1;
+mtr        = 1;
+rmtr       = 1;
+
+@slider
+
+ceil_db = s_ceil;
+thr_db  = min(s_thr, s_ceil - 0.1);   // threshold must sit below the ceiling
+blend   = s_blend * 0.01;
+maxr    = s_maxr;
+
+ceil_lin = exp(ceil_db * LN10_20);
+ig       = exp(s_in * LN10_20);
+mk = exp(s_comp * LN10_20);
+
+// Pre:  makeup is folded into the ratio solve. The ceiling is a real ceiling, and
+//       positive makeup makes the compressor work harder to hold it while
+//       negative makeup lets it work less, since attenuation does the job instead.
+// Post: makeup is a plain output trim after everything. The ceiling becomes an
+//       internal target and the actual output peak lands at (ceiling + makeup),
+//       which sits below the ceiling for negative values.
+s_mkpos == 0 ? ( mk_pre = mk; mk_post = 1; ) : ( mk_pre = 1; mk_post = mk; );
+
+la = floor(s_la * 0.001 * srate + 0.5);
+la < 1 ? la = 1;
+la > DMAX - 8 ? la = DMAX - 8;
+W = la + 1;                            // detector window length
+
+box = floor(la * 0.5);
+box < 1 ? box = 1;                     // two cascaded boxcars, total span ~la
+
+relc = exp(-1 / max(1, s_rel * 0.001 * srate));
+
+pdc_delay  = la;
+pdc_bot_ch = 0;
+pdc_top_ch = 2;
+ext_tail_size = la + srate * 0.5;
+
+la != lastla ? ( lastla = la; need_reset = 1; );
+
+need_reset ? (
+  memset(dlyL, 0, DMAX * 2);           // dlyL and dlyR are contiguous
+  memset(ma1,  1, DMAX);
+  memset(ma2,  1, DMAX);
+  sum1 = box; sum2 = box;
+  b1p  = 0;   b2p  = 0;
+  mxh  = 0; mxt = 0; mxc = 0;
+  mnh  = 0; mnt = 0; mnc = 0;
+  n    = 0;
+  wp   = 0;
+  rp   = DMAX - la;
+  rs   = 1;
+
+  memset(hIMIN, 0, HIST * 4);          // hIMIN..hOMAX are contiguous
+  memset(hG, 1, HIST);
+  memset(hR, 1, HIST);
+  hw = 0; binN = 0;
+  binIMin = 0; binIMax = 0; binOMin = 0; binOMax = 0;
+  binG = 1; binR = 1;
+
+  need_reset = 0;
+);
+
+@sample
+
+// Input gain drives the entire plugin. The detector, the curve and the dry side
+// of the blend all see the boosted signal, so this pushes density, not level.
+l = spl0 * ig;
+r = spl1 * ig;
+
+dlyL[wp] = l;
+dlyR[wp] = r;
+
+a = max(abs(l), abs(r));     // stereo-linked peak detector
+
+// ---- sliding maximum over the lookahead window (monotonic deque) ----
+while (mxc > 0 && mxv[(mxt + MASK) & MASK] <= a) (
+  mxt = (mxt + MASK) & MASK;
+  mxc -= 1;
+);
+mxv[mxt] = a;
+mxi[mxt] = n;
+mxt = (mxt + 1) & MASK;
+mxc += 1;
+while (mxi[mxh] <= n - W) ( mxh = (mxh + 1) & MASK; mxc -= 1; );
+pk = mxv[mxh];
+
+// ---- ratio required to land that peak exactly on the ceiling ----
+// Blend and gain compensation are solved for, not bolted on afterwards:
+//   y = x*(1-blend) + x*g*mk*blend   and we want |y| = ceil at the peak
+//   => g = (ceil/pk - (1-blend)) / (blend*mk)
+// then invert the compressor curve to find the ratio that produces that g:
+//   g_dB = -(P-T)*(1 - 1/R)   =>   R = 1 / (1 + g_dB/(P-T))
+rt = 1;
+pk > 0.0000001 ? (
+  pk_db = log(pk) * DB20;
+  pk_db > thr_db ? (
+    greq = blend > 0.0001 ? (ceil_lin / pk - (1 - blend)) / (blend * mk_pre) : 2;
+    greq < 1 ? (
+      greq < 0.000001 ? greq = 0.000001;
+      gdb  = log(greq) * DB20;
+      den  = pk_db - thr_db;
+      rden = 1 + gdb / den;
+      rt   = rden > 0.000001 ? 1 / rden : maxr;   // <=0 means even inf:1 is short
+      rt > maxr ? rt = maxr;
+      rt < 1    ? rt = 1;
+    );
+  );
+);
+
+// ---- ratio ballistics: instant up (the sliding max already looked ahead),
+//      timed release. This hold is what makes the ratio program-dependent. ----
+rt > rs ? rs = rt : rs = rt + (rs - rt) * relc;
+
+// ---- static curve, applied to the instantaneous envelope ----
+g = 1;
+a > 0.0000001 ? (
+  a_db = log(a) * DB20;
+  a_db > thr_db ? (
+    g = exp( -(a_db - thr_db) * (1 - 1/rs) * LN10_20 );
+  );
+);
+
+// ---- sliding minimum of the gain over the same window ----
+while (mnc > 0 && mnv[(mnt + MASK) & MASK] >= g) (
+  mnt = (mnt + MASK) & MASK;
+  mnc -= 1;
+);
+mnv[mnt] = g;
+mni[mnt] = n;
+mnt = (mnt + 1) & MASK;
+mnc += 1;
+while (mni[mnh] <= n - W) ( mnh = (mnh + 1) & MASK; mnc -= 1; );
+gm = mnv[mnh];
+
+// ---- two cascaded boxcars: C1-continuous gain, no added audio latency ----
+b1p += 1; b1p >= box ? b1p = 0;
+sum1 += gm - ma1[b1p]; ma1[b1p] = gm;
+s1 = sum1 / box;
+
+b2p += 1; b2p >= box ? b2p = 0;
+sum2 += s1 - ma2[b2p]; ma2[b2p] = s1;
+gs = sum2 / box;
+
+gs > 1 ? gs = 1;             // guards long-run running-sum drift
+gs < 0 ? gs = 0;
+
+// ---- output ----
+xl = dlyL[rp];
+xr = dlyR[rp];
+
+ol  = xl * (1 - blend) + xl * gs * mk_pre * blend;
+orr = xr * (1 - blend) + xr * gs * mk_pre * blend;
+
+// The clip guards the internal ceiling, so it sits BEFORE post makeup.
+// Clipping after post makeup would simply eat the makeup and make it pointless.
+s_clip ? (
+  ol  = max(-ceil_lin, min(ceil_lin, ol));
+  orr = max(-ceil_lin, min(ceil_lin, orr));
+);
+
+ol  *= mk_post;
+orr *= mk_post;
+
+spl0 = ol;
+spl1 = orr;
+
+wp += 1; wp >= DMAX ? wp = 0;
+rp += 1; rp >= DMAX ? rp = 0;
+n  += 1;
+
+gs   < mtr  ? mtr  = gs : mtr  = gs + (mtr  - gs)  * 0.9995;
+rs   > rmtr ? rmtr = rs : rmtr = rs + (rmtr - rs) * 0.9995;
+
+// ---- display history: xl/xr are the delayed input, so they line up exactly
+//      with ol/orr and the scope shows cause and effect on the same column ----
+dhi = max(xl, xr);  dlo = min(xl, xr);
+dhi > binIMax ? binIMax = dhi;
+dlo < binIMin ? binIMin = dlo;
+
+dhi = max(ol, orr); dlo = min(ol, orr);
+dhi > binOMax ? binOMax = dhi;
+dlo < binOMin ? binOMin = dlo;
+
+gs < binG ? binG = gs;
+rs > binR ? binR = rs;
+
+binN += 1;
+binN >= binlen ? (
+  hIMIN[hw] = binIMin; hIMAX[hw] = binIMax;
+  hOMIN[hw] = binOMin; hOMAX[hw] = binOMax;
+  hG[hw]    = binG;    hR[hw]    = binR;
+  hw = (hw + 1) & HMASK;
+  binN = 0;
+  binIMin = 0; binIMax = 0; binOMin = 0; binOMax = 0;
+  binG = 1; binR = 1;
+);
+
+@gfx 680 300
+
+gfx_set(0.07, 0.07, 0.08, 1);
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+padl = 8; padr = 8; padt = 22; padb = 18;
+plotx = padl;
+ploty = padt;
+plotw = max(32, gfx_w - padl - padr);
+ploth = max(60, gfx_h - padt - padb);
+cy    = ploty + ploth * 0.5;
+
+GRRANGE = 24;                        // dB of reduction across the full height
+lmaxr   = log(max(maxr, 2));
+
+gfx_set(0.11, 0.11, 0.13, 1);
+gfx_rect(plotx, ploty, plotw, ploth);
+
+// horizontal guides at 0 and +/-0.5 amplitude
+gfx_set(0.18, 0.18, 0.21, 1);
+gfx_line(plotx, cy, plotx + plotw, cy);
+gfx_line(plotx, cy - ploth * 0.25, plotx + plotw, cy - ploth * 0.25);
+gfx_line(plotx, cy + ploth * 0.25, plotx + plotw, cy + ploth * 0.25);
+
+cols = min(plotw, HIST - 2);
+
+// ---- waveform: input behind, output in front ----
+i = 0;
+while (i < cols) (
+  ci = (hw - 1 - i) & HMASK;
+  px = plotx + plotw - 1 - i;
+
+  y0 = max(ploty, min(ploty + ploth, cy - hIMAX[ci] * ploth * 0.5));
+  y1 = max(ploty, min(ploty + ploth, cy - hIMIN[ci] * ploth * 0.5));
+  gfx_set(0.26, 0.30, 0.38, 1);
+  gfx_line(px, y0, px, y1);
+
+  y0 = max(ploty, min(ploty + ploth, cy - hOMAX[ci] * ploth * 0.5));
+  y1 = max(ploty, min(ploty + ploth, cy - hOMIN[ci] * ploth * 0.5));
+  gfx_set(0.52, 0.70, 0.92, 1);
+  gfx_line(px, y0, px, y1);
+
+  i += 1;
+);
+
+// ---- gain reduction overlay: hangs down from the top edge ----
+gfx_set(0.98, 0.58, 0.18, 1);
+i = 0; havep = 0;
+while (i < cols) (
+  ci = (hw - 1 - i) & HMASK;
+  px = plotx + plotw - 1 - i;
+  v  = -log(max(hG[ci], 0.000001)) * DB20;
+  v > GRRANGE ? v = GRRANGE;
+  py = ploty + v / GRRANGE * ploth;
+  havep ? gfx_line(px, py, ppx, ppy);
+  ppx = px; ppy = py; havep = 1;
+  i += 1;
+);
+
+// ---- ratio overlay: rises from the bottom edge, log scale to Max Ratio ----
+gfx_set(0.34, 0.86, 0.62, 1);
+i = 0; havep = 0;
+while (i < cols) (
+  ci = (hw - 1 - i) & HMASK;
+  px = plotx + plotw - 1 - i;
+  v  = log(max(hR[ci], 1)) / lmaxr;
+  v > 1 ? v = 1;
+  py = ploty + ploth - v * ploth;
+  havep ? gfx_line(px, py, ppx, ppy);
+  ppx = px; ppy = py; havep = 1;
+  i += 1;
+);
+
+// ---- legend strip ----
+grdb = -log(max(mtr, 0.000001)) * DB20;
+
+gfx_set(0.52, 0.70, 0.92, 1);
+gfx_x = padl; gfx_y = 5; gfx_drawstr("out");
+gfx_set(0.26, 0.30, 0.38, 1);
+gfx_drawstr(" / in");
+
+gfx_set(0.98, 0.58, 0.18, 1);
+gfx_x = padl + 70; gfx_y = 5;
+gfx_drawstr("GR ");  gfx_drawnumber(grdb, 1); gfx_drawstr(" dB");
+
+gfx_set(0.34, 0.86, 0.62, 1);
+gfx_x = padl + 190; gfx_y = 5;
+gfx_drawstr("ratio "); gfx_drawnumber(rmtr, 1); gfx_drawstr(":1");
+
+// ---- axis notes ----
+gfx_set(0.45, 0.45, 0.50, 1);
+gfx_x = padl; gfx_y = ploty + ploth + 4;
+gfx_drawnumber(cols * binlen / srate, 1); gfx_drawstr(" s");
+
+gfx_set(0.98, 0.58, 0.18, 0.55);
+gfx_x = plotx + plotw - 92; gfx_y = ploty + 3;
+gfx_drawstr("GR 0");
+gfx_x = plotx + plotw - 92; gfx_y = ploty + ploth - 13;
+gfx_drawnumber(GRRANGE, 0); gfx_drawstr(" dB");
+
+gfx_set(0.34, 0.86, 0.62, 0.55);
+gfx_x = plotx + plotw - 44; gfx_y = ploty + 3;
+gfx_drawnumber(maxr, 0); gfx_drawstr(":1");
+gfx_x = plotx + plotw - 44; gfx_y = ploty + ploth - 13;
+gfx_drawstr("1:1");

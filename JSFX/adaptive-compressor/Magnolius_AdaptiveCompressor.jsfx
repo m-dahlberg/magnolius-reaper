@@ -1,0 +1,286 @@
+desc:Adaptive Compressor (adaptive threshold, stereo)
+// @description Adaptive Compressor
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Stereo compressor whose threshold follows the loudness of the incoming
+//   audio, so one setting gives the same amount of compression whether the
+//   source arrives hot or quiet.
+//
+//   The threshold tracks a slow self-calibrating average of the programme:
+//   activeThreshold = Threshold + Strength * clamp(L_short - L_slow,
+//   +/-Range). Strength at 0% turns the adaptation off and leaves an ordinary
+//   fixed-threshold compressor.
+//
+//   Look Ahead delays the audio path and reports the delay via pdc_delay, so
+//   the threshold anticipates loudness that has not arrived yet.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - dynamics compressor
+// Stereo compressor whose threshold follows the loudness of the incoming
+// audio, so fixed settings give the same amount of compression regardless
+// of input level.
+//
+//   activeThreshold = Threshold + Strength * clamp(L_short - L_slow, +/-Range)
+//
+// L_short is measured over Window ms on the look-ahead (undelayed) signal,
+// L_slow is a slow (~8 s) self-calibrating average. The audio path is
+// delayed by Look Ahead ms and reported to REAPER via pdc_delay, so the
+// threshold anticipates upcoming loudness while attack/release act on
+// present audio.
+//
+// The compression core follows the Tukan Compressor 3 (BusTools) topology:
+// peak detection (at RMS Size 0), knee width proportional to the threshold,
+// gain slope (1-ratio)/ratio, and a decoupled release->attack gain smoother.
+//
+// Install: copy or symlink this file into REAPER's Effects folder
+// (Linux: ~/.config/REAPER/Effects/), then find it as "AdaptiveCOMP".
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+slider1:thresh_db=-20<-40,0,0.1>Threshold (dB)
+slider2:ratio=4<1,10,0.1>Ratio
+slider3:attack_ms=5<0.1,50,0.1>Attack (ms)
+slider4:release_ms=150<10,1000,1>Release (ms)
+slider5:knee_pct=50<0,100,1>Knee (%)
+slider6:rms_ms=0<0,100,0.5>RMS Size (ms, 0=peak)
+slider7:lookahead_ms=100<0,1000,1>Look Ahead (ms)
+slider8:window_ms=300<10,1000,1>Window (ms)
+slider9:speed_ms=200<0,1000,1>Speed (ms)
+slider10:range_db=6<0,10,0.1>Range (dB)
+slider11:strength_pct=100<0,100,1>Strength (%)
+slider12:autogain=1<0,1,1{Off,On}>Auto Gain
+slider13:manual_gain_db=0<-10,10,0.1>Manual Gain (dB)
+
+@init
+// ---- memory layout ----
+delaybuf  = 0;
+delaysize = (srate|0) + 4;             // samples of max look-ahead (1 s) + margin
+HIST_N    = 480;                       // history points for the @gfx graph (~8 s)
+hist_lvl  = delaybuf + delaysize*2;    // delay buffer is interleaved stereo
+hist_thr  = hist_lvl + HIST_N;
+hist_gr   = hist_thr + HIST_N;
+
+memset(delaybuf, 0, delaysize*2);
+i = 0;
+loop(HIST_N,
+  hist_lvl[i] = -60; hist_thr[i] = -60; hist_gr[i] = 0;
+  i += 1;
+);
+
+wpos = 0;
+
+// detector / envelope state
+ms_short   = 0;   // mean-square, Window ms (adaptation, look-ahead signal)
+ms_slow    = 0;   // mean-square, ~8 s slow average (adaptation anchor)
+ms_det     = 0;   // mean-square, RMS Size ms (compressor sidechain)
+offset     = 0;   // adaptive threshold offset (dB)
+yR         = 0;   // decoupled smoother, release stage (gain in dB, <= 0)
+yA         = 0;   // decoupled smoother, attack stage (gain in dB, <= 0)
+gr_env     = 0;   // gain reduction for meters/auto gain (dB, positive)
+makeup_env = 0;   // smoothed average GR for auto gain (dB, positive)
+active_thresh = thresh_db;
+
+warmup = srate;   // ~1 s: adapt the slow average quickly after reset
+
+// gfx history accumulation
+hist_pos = 0; hist_cnt = 0; hist_gr_acc = 0;
+
+SILENCE_MS = 0.000001;  // mean-square gate: -60 dBFS RMS
+
+@slider
+lookahead_smp = min((lookahead_ms * 0.001 * srate)|0, delaysize - 1);
+pdc_delay  = lookahead_smp;
+pdc_bot_ch = 0; pdc_top_ch = 2;
+
+atk_coef   = exp(-1 / (max(attack_ms, 0.02) * 0.001 * srate));
+rel_coef   = exp(-1 / (release_ms * 0.001 * srate));
+rms_coef   = rms_ms  > 0 ? exp(-1 / (rms_ms  * 0.001 * srate)) : 0;
+win_coef   = exp(-1 / (window_ms * 0.001 * srate));
+speed_coef = speed_ms > 0 ? exp(-1 / (speed_ms * 0.001 * srate)) : 0;
+slow_coef  = exp(-1 / (8 * srate));    // ~8 s self-calibrating average
+makeup_coef = exp(-1 / (3 * srate));   // ~3 s auto-gain smoothing
+
+strength = strength_pct * 0.01;
+slope = (1 - ratio) / ratio;           // gain slope in dB per dB overshoot (negative)
+
+hist_rate = max((8 * srate / HIST_N)|0, 1);  // graph covers ~8 s
+
+@block
+ext_gr_meter = -gr_env;
+
+@sample
+inl = spl0; inr = spl1;
+
+// ---- adaptation detector: runs on the incoming signal, which is
+// ---- Look Ahead ms in the future relative to the delayed output ----
+e = (inl*inl + inr*inr) * 0.5;
+ms_short = e + win_coef * (ms_short - e);
+l_short_db = 10 * log10(max(ms_short, 0.000000000001));
+
+// slow average: gated below -60 dBFS so silence doesn't drag it down;
+// adapts at Window speed during the first second after reset
+ms_short > SILENCE_MS ? (
+  ms_slow <= 0 ? ms_slow = ms_short;
+  c = warmup > 0 ? win_coef : slow_coef;
+  warmup > 0 ? warmup -= 1;
+  ms_slow = ms_short + c * (ms_slow - ms_short);
+);
+l_slow_db = 10 * log10(max(ms_slow, 0.000000000001));
+
+dev = min(max(l_short_db - l_slow_db, -range_db), range_db);
+target_off = strength * dev;
+offset = target_off + speed_coef * (offset - target_off);
+active_thresh = thresh_db + offset;
+
+// ---- audio delay line (look-ahead) ----
+delaybuf[wpos*2]   = inl;
+delaybuf[wpos*2+1] = inr;
+rp = wpos - lookahead_smp;
+rp < 0 ? rp += delaysize;
+dl = delaybuf[rp*2];
+dr = delaybuf[rp*2+1];
+wpos += 1;
+wpos >= delaysize ? wpos = 0;
+
+// ---- compressor sidechain: runs on the delayed (output) signal ----
+rms_ms > 0 ? (
+  de = (dl*dl + dr*dr) * 0.5;
+  ms_det = de + rms_coef * (ms_det - de);
+  det_db = 10 * log10(max(ms_det, 0.000000000001));
+) : (
+  p = max(abs(dl), abs(dr));
+  det_db = 20 * log10(max(p, 0.000001));
+);
+
+// ---- gain computer: knee width proportional to the active threshold ----
+kw  = abs(active_thresh * knee_pct * 0.02);
+tlo = active_thresh - kw * 0.5;
+thi = active_thresh + kw * 0.5;
+det_db <= tlo ? yG = 0 :
+det_db >= thi ? yG = slope * (det_db - active_thresh) : (
+  delta = det_db - tlo;
+  yG = delta * delta * slope / (kw * 2);
+);
+
+// ---- decoupled gain smoothing: follow deeper reduction instantly,
+// ---- release-smooth the recovery, then attack-smooth the result ----
+yR = min(yG, rel_coef * yR + (1 - rel_coef) * yG);
+yA = atk_coef * yA + (1 - atk_coef) * yR;
+gr_env = -yA;
+
+// ---- gain compensation ----
+makeup_env = gr_env + makeup_coef * (makeup_env - gr_env);
+makeup = (autogain ? makeup_env : 0) + manual_gain_db;
+
+gain = 10 ^ ((makeup - gr_env) / 20);
+spl0 = dl * gain;
+spl1 = dr * gain;
+
+// ---- meter history (one point per hist_rate samples) ----
+hist_gr_acc = max(hist_gr_acc, gr_env);
+hist_cnt += 1;
+hist_cnt >= hist_rate ? (
+  hist_lvl[hist_pos] = l_short_db;
+  hist_thr[hist_pos] = active_thresh;
+  hist_gr[hist_pos]  = hist_gr_acc;
+  hist_pos += 1;
+  hist_pos >= HIST_N ? hist_pos = 0;
+  hist_cnt = 0;
+  hist_gr_acc = 0;
+);
+
+@gfx 660 240
+gx = 10; gy = 10;
+gw = gfx_w - 150;
+gh = gfx_h - 20;
+gfx_setfont(1, "Arial", 14);
+
+// background
+gfx_set(0.09, 0.09, 0.11);
+gfx_rect(gx, gy, gw, gh);
+
+// gridlines every 10 dB (level scale: 0 .. -60 dB)
+db = 0;
+loop(7,
+  y = gy + (-db / 60) * gh;
+  gfx_set(0.25, 0.25, 0.28);
+  gfx_line(gx, y, gx + gw, y);
+  gfx_set(0.45, 0.45, 0.5);
+  gfx_x = gx + 3; gfx_y = y + 1;
+  db < 0 ? gfx_printf("%d", db);
+  db -= 10;
+);
+
+// static threshold and range bounds (faint reference lines)
+gfx_set(0.35, 0.3, 0.15);
+y = gy + (-max(min(thresh_db + range_db, 0), -60) / 60) * gh;
+gfx_line(gx, y, gx + gw, y);
+y = gy + (-max(min(thresh_db - range_db, 0), -60) / 60) * gh;
+gfx_line(gx, y, gx + gw, y);
+
+// traces
+i = 0; plyl = -1; plyt = -1; plyg = -1; plx = gx;
+loop(HIST_N,
+  idx = hist_pos + i;
+  idx >= HIST_N ? idx -= HIST_N;
+  x = gx + (i / (HIST_N - 1)) * gw;
+
+  // input loudness: filled from the bottom
+  lvl = max(min(hist_lvl[idx], 0), -60);
+  yl = gy + (-lvl / 60) * gh;
+  gfx_set(0.25, 0.42, 0.62, 0.5);
+  gfx_line(x, gy + gh, x, yl);
+
+  // gain reduction: drawn downward from the top (scale 0..24 dB)
+  gr = min(hist_gr[idx], 24);
+  yg = gy + (gr / 24) * gh;
+  gr > 0.01 ? (
+    gfx_set(0.85, 0.25, 0.25, 0.8);
+    plyg >= 0 ? gfx_line(plx, plyg, x, yg) : gfx_line(x - 1, yg, x, yg);
+  );
+  plyg = gr > 0.01 ? yg : -1;
+
+  // active threshold line
+  thr = max(min(hist_thr[idx], 0), -60);
+  yt = gy + (-thr / 60) * gh;
+  gfx_set(1, 0.7, 0.1);
+  plyt >= 0 ? gfx_line(plx, plyt, x, yt);
+  plyt = yt;
+
+  plx = x;
+  i += 1;
+);
+
+// ---- right panel ----
+px = gx + gw + 12;
+
+// GR bar meter (0..24 dB, top down)
+bx = px; bw = 22; bh = gh - 70; by = gy;
+gfx_set(0.09, 0.09, 0.11);
+gfx_rect(bx, by, bw, bh);
+grb = min(gr_env, 24) / 24;
+gfx_set(0.85, 0.25, 0.25);
+gfx_rect(bx, by, bw, grb * bh);
+gfx_set(0.4, 0.4, 0.45);
+gfx_line(bx, by, bx + bw, by);
+gfx_x = bx + bw + 4; gfx_y = by; gfx_printf("0");
+gfx_x = bx + bw + 4; gfx_y = by + bh - 12; gfx_printf("24");
+gfx_set(0.85, 0.25, 0.25);
+gfx_x = bx; gfx_y = by + bh + 6;
+gfx_printf("GR %.1f dB", gr_env);
+
+// readouts
+gfx_set(1, 0.7, 0.1);
+gfx_x = px; gfx_y = by + bh + 24;
+gfx_printf("Thr %.1f dB", active_thresh);
+gfx_set(0.6, 0.8, 0.6);
+gfx_x = px; gfx_y = by + bh + 42;
+gfx_printf("Gain %+.1f dB", (autogain ? makeup_env : 0) + manual_gain_db);

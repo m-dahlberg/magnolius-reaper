@@ -1,0 +1,941 @@
+desc:DeNoise (libspecbleach port)
+// @description DeNoise
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Spectral noise reduction. The algorithms are ported from libspecbleach by
+//   Luciano Dato (the library behind noise-repellent). JSFX cannot link native
+//   code, so this is a reimplementation in EEL2, not a wrapper.
+//
+//   Three modes: Denoise, Learn Noise Profile, and Adaptive. Learn a profile
+//   from a passage of noise alone, then denoise against it; or let Adaptive
+//   estimate the floor continuously.
+//
+//   Includes SPP-MMSE noise estimation, Berouti oversubtraction, residual
+//   whitening and NLM musical-noise smoothing. Profiles persist with the
+//   project via @serialize.
+//
+//   See also the offline DeNoise script, which derives the profile from an
+//   analysis of the whole file instead of a manual learn pass.
+//
+//   License: LGPL-2.1-or-later, matching libspecbleach. See the LICENSE file
+//   in this package's folder.
+// @changelog
+//   Initial ReaPack release
+
+// Spectral noise reduction for REAPER, algorithms ported from libspecbleach
+// (https://github.com/lucianodato/libspecbleach) by Luciano Dato.
+// License: LGPL-2.1-or-later. See LICENSE.
+
+slider1:mode=0<0,2,1{Denoise,Learn Noise Profile,Adaptive}>Mode
+slider2:reduction=10<0,40,0.1>Reduction dB
+slider3:strength=30<0,100,1>Strength
+slider4:smoothing=50<0,100,1>Smoothing
+slider5:residual=0<0,1,1{Off,On}>Residual Listen
+slider6:fftsel=1<0,2,1{1024,2048,4096}>FFT Size
+slider7:resetprof=0<0,1,1{Ready,Reset}>Reset Noise Profile
+slider8:gate_on=0<0,1,1{Off,On}>Gate
+slider9:gthresh=-50<-80,0,0.5>Gate Threshold dB
+slider10:gattack=5<0.1,300,0.1>Gate Attack ms
+slider11:ghold=100<0,1000,1>Gate Hold ms
+slider12:grelease=200<5,3000,1>Gate Release ms
+slider13:gmode=0<0,1,1{Gate,Expander}>Gate Mode
+slider14:gratio=3<1,20,0.1>Expander Ratio
+slider15:gauto=0<0,1,1{Manual,Auto Vocal}>Gate Auto Timing
+slider16:whitening=0<0,100,1>Residual Whitening %
+slider17:nlm=0<0,2,1{Off,Eco,Full}>Musical Noise Smoothing NLM
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+ext_noinit = 1;
+MAXFFT = 4096;
+HALFMAX = 2049;
+
+// FFT workspace stays at 0: power-of-two size, never crosses a 65536 boundary
+fftbuf  = 0;                    // 2*MAXFFT complex interleaved
+window  = 8192;                 // MAXFFT
+inringL = 12288;
+inringR = inringL + MAXFFT;
+olaL    = inringR + MAXFFT;
+olaR    = olaL + MAXFFT;
+gainL   = olaR + MAXFFT;
+gainR   = gainL + HALFMAX;
+profaccL = gainR + HALFMAX;     // accumulated power spectra while learning
+profaccR = profaccL + HALFMAX;
+sppNL   = profaccR + HALFMAX;   // SPP-MMSE previous noise PSD
+sppNR   = sppNL + HALFMAX;
+sppPL   = sppNR + HALFMAX;      // SPP-MMSE smoothed speech-presence prob
+sppPR   = sppPL + HALFMAX;
+specS   = sppPR + HALFMAX;      // per-frame power spectrum scratch
+prevSL  = specS + HALFMAX;      // previous smoothed spectrum (FIXED smoother)
+prevSR  = prevSL + HALFMAX;
+specN   = prevSR + HALFMAX;     // smoothed adaptive noise-floor scratch
+dispS   = specN + HALFMAX;      // @gfx-only copies, written in @block
+dispN   = dispS + HALFMAX;
+dispG   = dispN + HALFMAX;
+GTRING  = 1024;                 // gate GUI history: ~4.3 s at 240 slices/s
+gtEnvRing = dispG + HALFMAX;    // pre-gate detector peaks per slice
+gtGRRing  = gtEnvRing + GTRING; // minimum gate gain per slice
+whtWL   = gtGRRing + GTRING;    // whitening floor weights (noise_floor_manager)
+whtWR   = whtWL + HALFMAX;
+whtScr  = whtWR + HALFMAX;      // smoothed-profile scratch
+whtSel  = whtScr + HALFMAX;     // quickselect scratch (destructive)
+NLMFRMAX = 21;                  // SNR ring frames, Full config (past 16 + future 4 + 1)
+SPECFR  = 5;                    // complex-spectrum delay ring (future 4 + 1)
+snrRingL = whtSel + HALFMAX;    // per-frame SNR history for NLM
+snrRingR = snrRingL + NLMFRMAX * HALFMAX;
+specRingL = snrRingR + NLMFRMAX * HALFMAX;  // delayed complex spectra
+specRingR = specRingL + SPECFR * 2 * MAXFFT;
+noiseRingL = specRingR + SPECFR * 2 * MAXFFT; // noise spectra aligned with specRing
+noiseRingR = noiseRingL + SPECFR * HALFMAX;
+nlmAcc  = noiseRingR + SPECFR * HALFMAX;    // NLM weighted-sum accumulator
+nlmWsum = nlmAcc + HALFMAX;                 // NLM weight accumulator
+nlmSm   = nlmWsum + HALFMAX;                // smoothed SNR / smoothed magnitude
+nlmPtrs = nlmSm + HALFMAX;                  // per-call frame base-address table
+memtop  = nlmPtrs + 64;
+NLM_FUT = 4;                    // future search frames = 4 hops = 1 FFT of latency
+NLM_EPS = 0.000000001;          // NLM_SNR_NOISE_FLOOR_MIN
+
+NF_SMOOTH = 0.5;                // ADAPTIVE_NOISE_FLOOR_SMOOTHING
+
+// Berouti oversubtraction (suppression_engine.c, SUPPRESSION_BEROUTI_PER_BIN)
+ALPHA_MAX = 4;
+ALPHA_MIN = 1;
+SUP_LO_DB = -5;
+SUP_HI_DB = 20;
+
+// libspecbleach MIN_NUMBER_OF_WINDOWS_NOISE_AVERAGED
+MIN_LEARN_FRAMES = 5;
+EPSP = 10 ^ (-20);
+
+// SPP-MMSE constants (spp_mmse_noise_estimator.c / configurations.h)
+SPP_XI = 31.62;                 // fixed a priori SNR, 15 dB linear
+SPP_XIF = SPP_XI / (1 + SPP_XI);
+SPP_APOW = 0.8;                 // power spectrum smoothing
+SPP_SSPP = 0.9;                 // SPP smoothing for stagnation control
+SPP_CSPP = 0.1;
+SPP_CAP = 0.99;                 // max SPP to prevent locking
+SIL_THRESH = 10 ^ (-10);        // frame-energy silence threshold
+SPEC_EPS = 10 ^ (-12);
+
+// broadband output gate: peak detector 0.2 ms / 20 ms, 3 dB close hysteresis
+// in gate mode, expander floor -80 dB
+GT_HYST = 10 ^ (-3 / 20);
+GT_FLOOR = 0.0001;
+gt_datk = exp(-1 / (0.0002 * srate));
+gt_drel = exp(-1 / (0.02 * srate));
+gt_dispn = max(floor(srate / 240), 1);
+gt_gain = 1;
+gt_env = 0;
+gt_dispgr = 1;
+gt_dispenv = 0;
+gt_dispcnt = 0;
+
+function reset_profile() (
+  memset(profaccL, 0, HALFMAX);
+  memset(profaccR, 0, HALFMAX);
+  learn_frames = 0;
+);
+
+function nlm_reset() (
+  memset(snrRingL, 0, NLMFRMAX * HALFMAX);
+  memset(snrRingR, 0, NLMFRMAX * HALFMAX);
+  memset(specRingL, 0, SPECFR * 2 * MAXFFT);
+  memset(specRingR, 0, SPECFR * 2 * MAXFFT);
+  memset(noiseRingL, 0, SPECFR * HALFMAX);
+  memset(noiseRingR, 0, SPECFR * HALFMAX);
+  nlm_head = 0;
+  spec_head = 0;
+  nlm_fill = 0;
+);
+
+// NLM search-window configuration (configurations.h). Eco halves the patch,
+// frequency range and past range; the future range is fixed at 4 hops so the
+// added latency is one FFT size in both quality settings.
+function nlm_setup() (
+  nlm == 2 ? (
+    nlm_patch = 8;
+    nlm_freq = 8;
+    nlm_past = 16;
+  ) : (
+    nlm_patch = 4;
+    nlm_freq = 4;
+    nlm_past = 8;
+  );
+  nlm_hp = nlm_patch * 0.5;
+  nlm_frames = nlm_past + NLM_FUT + 1;
+  NLMPB = nlm_past + nlm_hp;    // table offset so index NLMPB+dt is >= 0
+  // deviation from the reference: normalize patch distances per term
+  // (relative to the 4x4 = 16-term patch) so the 8x8 Full patch is not
+  // inherently 4x stricter against the same 4h^2 threshold - unnormalized,
+  // Full rejects nearly all matches below ~15 kHz and barely smooths
+  nlm_dnorm = 16 / (nlm_patch * nlm_patch);
+  nlm_reset();
+);
+
+function setup_fft() local(wk) (
+  fft_size = fftsel == 0 ? 1024 : fftsel == 1 ? 2048 : 4096;
+  half = fft_size * 0.5;
+  hop = fft_size * 0.25;
+  wk = 0;
+  loop(fft_size,
+    window[wk] = 0.5 - 0.5 * cos(2 * $pi * wk / fft_size);
+    wk += 1;
+  );
+  memset(inringL, 0, MAXFFT);
+  memset(inringR, 0, MAXFFT);
+  memset(olaL, 0, MAXFFT);
+  memset(olaR, 0, MAXFFT);
+  memset(gainL, 1, HALFMAX);
+  memset(gainR, 1, HALFMAX);
+  memset(prevSL, 0, HALFMAX);
+  memset(prevSR, 0, HALFMAX);
+  memset(whtWL, 1, HALFMAX);
+  memset(whtWR, 1, HALFMAX);
+  wht_c0 = 0;
+  wht_c1 = 0;
+  wpos = 0;
+  hopcount = 0;
+  // hann^2 at 75% overlap sums to 1.5; ifft is unscaled by fft_size
+  outscale = (2 / 3) / fft_size;
+  reset_profile();              // bin layout changed; old profile is invalid
+  nlm_reset();                  // ring frames are per-bin-layout too
+);
+
+function update_params() (
+  gainfloor = 10 ^ (-reduction / 20);
+  wht_depth = 1 - gainfloor;      // damps whitening weights as reduction -> 0
+  wht_c0 = 0;                     // force weight recompute on next frame
+  wht_c1 = 0;
+  amax = ALPHA_MIN + (strength / 100) * (ALPHA_MAX - ALPHA_MIN);
+  smcoef = smoothing / 100;
+  gt_thr = 10 ^ (gthresh / 20);
+  gt_thrclose = gt_thr * GT_HYST;
+  // auto vocal timing: 1 ms attack; release is program-dependent, chosen per
+  // closing episode in @sample from how long the gate stayed open
+  gt_atkc = gauto ? exp(-1 / (0.001 * srate))
+                  : exp(-1 / (max(gattack, 0.1) * 0.001 * srate));
+  gt_relc = exp(-1 / (max(grelease, 5) * 0.001 * srate));
+  gt_holdsmp = floor(ghold * 0.001 * srate);
+  gt_ratio1 = gratio - 1;
+  // NLM h from the Smoothing slider. Noise-vs-noise patches sit ~2 distance
+  // per term, so mid-band smoothing needs h ~3 (reference default h=1 only
+  // ever smooths the top octaves); map 0..100 -> 0.5..5.0 so the default 50
+  // (h=2.75) reaches the speech band and 100 smooths hard everywhere.
+  nlm_h = 0.5 + (smoothing / 100) * 4.5;
+);
+
+last_fftsel = fftsel;
+last_nlm = nlm;
+nlm_setup();
+setup_fft();
+update_params();
+
+// noise_floor_manager_apply + mixing: clamp each gain to the (whitened)
+// reduction floor, then multiply the spectrum. The floored gain is written
+// back to gbuf so the display shows what was actually applied. At ~0 dB
+// reduction gains are forced to 1 (reference transparency guard).
+function apply_gains(gbuf, wbuf) local(bk, bm, g, gr, fl) (
+  bk = 0;
+  loop(half + 1,
+    g = gbuf[bk];
+    gainfloor >= 0.999 ? (
+      g = 1;
+    ) : (
+      fl = gainfloor * (1 + wht_depth * (wbuf[bk] - 1));
+      fl > 1 ? fl = 1;
+      g < fl ? g = fl;
+    );
+    gbuf[bk] = g;
+    gr = residual ? (1 - g) : g;
+    fftbuf[2 * bk] *= gr;
+    fftbuf[2 * bk + 1] *= gr;
+    (bk > 0 && bk < half) ? (
+      bm = fft_size - bk;
+      fftbuf[2 * bm] *= gr;
+      fftbuf[2 * bm + 1] *= gr;
+    );
+    bk += 1;
+  );
+);
+
+// SPP-MMSE per-frame noise PSD update (port of spp_mmse_noise_estimator_run).
+// specS holds this frame's power spectrum; nbuf/pbuf are per-channel state.
+// Returns the updated "initialized" flag.
+function spp_update(nbuf, pbuf, inited) local(bk, fe, prev, ratio, spp1, spp0, mmse) (
+  fe = 0;
+  bk = 0;
+  loop(half + 1,
+    fe += specS[bk];
+    bk += 1;
+  );
+  fe /= (half + 1);
+  inited == 0 ? (
+    fe < SIL_THRESH ? (
+      memset(nbuf, 0, half + 1);
+      0;
+    ) : (
+      memcpy(nbuf, specS, half + 1);
+      memset(pbuf, 0, half + 1);
+      1;
+    );
+  ) : (
+    fe >= SIL_THRESH ? (
+      bk = 0;
+      loop(half + 1,
+        prev = nbuf[bk];
+        ratio = specS[bk] / max(prev, SPEC_EPS);
+        spp1 = 1 / (1 + (1 + SPP_XI) * exp(-ratio * SPP_XIF));
+        pbuf[bk] > SPP_CAP ? spp1 = min(spp1, SPP_CAP);
+        spp0 = 1 - spp1;
+        mmse = spp0 * specS[bk] + spp1 * prev;
+        nbuf[bk] = SPP_APOW * prev + (1 - SPP_APOW) * mmse;
+        pbuf[bk] = SPP_SSPP * pbuf[bk] + SPP_CSPP * spp1;
+        bk += 1;
+      );
+    );
+    1;
+  );
+);
+
+// 3-point moving average blended at NF_SMOOTH (smooth_spectrum in
+// spectral_utils.c); used on the adaptive noise-floor copy in specN and on
+// the whitening profile scratch
+function smooth_spectrum_buf(buf) local(bk, prevv, cur) (
+  prevv = buf[0];
+  buf[0] = (buf[0] + buf[1]) * 0.5 * NF_SMOOTH + buf[0] * (1 - NF_SMOOTH);
+  bk = 1;
+  loop(half - 1,
+    cur = buf[bk];
+    buf[bk] = ((prevv + cur + buf[bk + 1]) / 3) * NF_SMOOTH + cur * (1 - NF_SMOOTH);
+    prevv = cur;
+    bk += 1;
+  );
+  buf[half] = (prevv + buf[half]) * 0.5 * NF_SMOOTH + buf[half] * (1 - NF_SMOOTH);
+);
+
+// median of buf[0..n-1] via iterative Hoare quickselect (destroys buf).
+// EEL2 has no recursion; quickselect only ever descends into one side, so a
+// while loop over [lo, hi] suffices.
+function qsel_median(buf, n) local(lo, hi, k, i, j, piv, tmp) (
+  k = floor(n * 0.5);
+  lo = 0;
+  hi = n - 1;
+  while (lo < hi) (
+    piv = buf[floor((lo + hi) * 0.5)];
+    i = lo;
+    j = hi;
+    while (i <= j) (
+      while (buf[i] < piv) ( i += 1; );
+      while (buf[j] > piv) ( j -= 1; );
+      i <= j ? (
+        tmp = buf[i]; buf[i] = buf[j]; buf[j] = tmp;
+        i += 1;
+        j -= 1;
+      );
+    );
+    k <= j ? ( hi = j; ) : k >= i ? ( lo = i; ) : ( lo = hi; );
+  );
+  buf[k];
+);
+
+// spectral_whitening_get_weights: valley-filling weights >= 1 anchored to the
+// median of the smoothed noise profile, so the reduction floor rises in the
+// profile's valleys and the residual comes out spectrally flat
+function compute_wht_weights(nsrc, nscale, wbuf) local(bk, wf, anchor, sv) (
+  wf = whitening / 100;
+  wf <= 0 ? (
+    memset(wbuf, 1, half + 1);
+  ) : (
+    bk = 0;
+    loop(half + 1,
+      whtScr[bk] = nsrc[bk] * nscale;
+      bk += 1;
+    );
+    smooth_spectrum_buf(whtScr);
+    memcpy(whtSel, whtScr, half + 1);
+    anchor = max(qsel_median(whtSel, half + 1), SPEC_EPS);
+    bk = 0;
+    loop(half + 1,
+      sv = whtScr[bk];
+      wbuf[bk] = sv > SPEC_EPS ? (anchor / sv) ^ wf : 1;
+      bk += 1;
+    );
+  );
+);
+
+// Per-bin gain pipeline, following spectral_denoiser_run order: Berouti
+// alpha from the raw spectrum (suppression_engine.c), rising-only temporal
+// smoothing (spectral_smoother.c FIXED), then Wiener subtraction of
+// alpha-scaled noise from the smoothed spectrum (gain_calculator.c).
+// nscale folds the running-mean divisor for the manual profile. In the NLM
+// path the input is already NLM-smoothed, so dosmooth=0 skips the FIXED
+// smoother (matching spectral_2d_denoiser_run, which has no time smoother).
+function wiener_gains(ssrc, nsrc, nscale, gbuf, sprev, dosmooth) local(bk, sp, np, snr_db, alpha, ssm, sn) (
+  bk = 0;
+  loop(half + 1,
+    sp = ssrc[bk];
+    np = nsrc[bk] * nscale;
+    snr_db = 10 * log10(sp / (np + SPEC_EPS));
+    alpha = snr_db <= SUP_LO_DB ? amax :
+            snr_db >= SUP_HI_DB ? ALPHA_MIN :
+            amax - (snr_db - SUP_LO_DB) / (SUP_HI_DB - SUP_LO_DB) * (amax - ALPHA_MIN);
+    dosmooth ? (
+      ssm = sp > sprev[bk] ? smcoef * sprev[bk] + (1 - smcoef) * sp : sp;
+      sprev[bk] = ssm;
+    ) : (
+      ssm = sp;
+    );
+    sn = np * alpha;
+    gbuf[bk] = sn > EPSP ? (ssm > sn ? (ssm - sn) / ssm : 0) : 1;
+    bk += 1;
+  );
+);
+
+// nlm_filter_process_generic (Lukin "Algorithm B"): smooth the target SNR
+// frame (NLM_FUT hops back) by averaging paste-blocks of similar patches
+// found across the time-frequency search window. Patch distances early-exit
+// once past the threshold (the reference computes them fully, then discards).
+// Result lands in nlmSm. Ring time offsets outside the window wrap around,
+// exactly like the reference get_frame() modulo indexing.
+function nlm_process(ring) local(dt, slot, tgt, bs, bc, lim, tsum, pf, hb, ih2, dth,
+                                 df, cc, safe, d, pr, tb0, cb0, diff, ft, fc, wgt, tb, cb) (
+  dt = -nlm_past - nlm_hp;
+  while (dt <= NLM_FUT + nlm_hp) (
+    // floor-modulo: EEL2 % sign behavior on negatives is not guaranteed
+    slot = nlm_head - NLM_FUT + dt;
+    slot -= floor(slot / nlm_frames) * nlm_frames;
+    nlmPtrs[NLMPB + dt] = ring + slot * HALFMAX;
+    dt += 1;
+  );
+  tgt = nlmPtrs[NLMPB];
+  memset(nlmAcc, 0, half + 1);
+  memset(nlmWsum, 0, half + 1);
+  bs = 0;
+  while (bs <= half) (
+    lim = half + 1 - bs;
+    lim > 8 ? lim = 8;
+    bc = bs + 4;
+    bc > half ? bc = half;
+    tsum = 0;
+    pf = 0;
+    loop(lim,
+      tsum += tgt[bs + pf];
+      pf += 1;
+    );
+    tsum >= 0.000001 ? (
+      // frequency-dependent smoothing: stronger toward Nyquist. ih2/dth
+      // fold in the per-term patch normalization (nlm_dnorm) so raw d is
+      // compared and weighted as d*dnorm against 4*hb^2
+      hb = nlm_h * (1 + 3 * (bc / half) * (bc / half));
+      ih2 = nlm_dnorm / (hb * hb);
+      dth = 4 * hb * hb / nlm_dnorm;
+      dt = -nlm_past;
+      while (dt <= NLM_FUT) (
+        df = -nlm_freq;
+        while (df <= nlm_freq) (
+          cc = bc + df;
+          cc < 0 ? cc = 0;
+          cc > half ? cc = half;
+          safe = bc >= nlm_hp && bc + nlm_hp <= half + 1 &&
+                 cc >= nlm_hp && cc + nlm_hp <= half + 1;
+          d = 0;
+          pr = 0;
+          while (pr < nlm_patch && d <= dth) (
+            tb0 = nlmPtrs[NLMPB + pr - nlm_hp];
+            cb0 = nlmPtrs[NLMPB + dt + pr - nlm_hp];
+            safe ? (
+              pf = 0;
+              loop(nlm_patch,
+                diff = tb0[bc - nlm_hp + pf] - cb0[cc - nlm_hp + pf];
+                d += diff * diff;
+                pf += 1;
+              );
+            ) : (
+              pf = 0;
+              loop(nlm_patch,
+                ft = bc + pf - nlm_hp;
+                ft < 0 ? ( ft = 0; );
+                ft > half ? ( ft = half; );
+                fc = cc + pf - nlm_hp;
+                fc < 0 ? ( fc = 0; );
+                fc > half ? ( fc = half; );
+                diff = tb0[ft] - cb0[fc];
+                d += diff * diff;
+                pf += 1;
+              );
+            );
+            pr += 1;
+          );
+          d <= dth ? (
+            wgt = exp(-d * ih2);
+            cb0 = nlmPtrs[NLMPB + dt];
+            pf = 0;
+            loop(lim,
+              tb = bs + pf;
+              cb = tb + df;
+              cb < 0 ? ( cb = 0; );
+              cb > half ? ( cb = half; );
+              nlmAcc[tb] += wgt * cb0[cb];
+              nlmWsum[tb] += wgt;
+              pf += 1;
+            );
+          );
+          df += 1;
+        );
+        dt += 1;
+      );
+    );
+    bs += 8;
+  );
+  pf = 0;
+  loop(half + 1,
+    nlmSm[pf] = nlmWsum[pf] > 0.0000000001 ? nlmAcc[pf] / nlmWsum[pf] : tgt[pf];
+    pf += 1;
+  );
+);
+
+// whitening weights follow the active noise profile; recomputed every 8th
+// frame per channel (the adaptive floor moves slowly) and immediately after
+// any parameter change (update_params zeroes the counters)
+function refresh_wht(nsrc, nscale, wbuf, ch) local(wcnt) (
+  wcnt = ch == 0 ? wht_c0 : wht_c1;
+  wcnt <= 0 ? (
+    compute_wht_weights(nsrc, nscale, wbuf);
+    wcnt = 8;
+  );
+  wcnt -= 1;
+  ch == 0 ? wht_c0 = wcnt : wht_c1 = wcnt;
+);
+
+function process_channel(ring, ola, gbuf, pacc, nbuf, pbuf, sprev, wbuf, snrring, specring, noisering, ch)
+  local(fk, rp, bk, nvalid, nsrcb, nsc, sbase, dnb, snb, dslot, sv) (
+  rp = wpos;                    // oldest sample in the ring
+  fk = 0;
+  loop(fft_size,
+    fftbuf[2 * fk] = ring[rp] * window[fk];
+    fftbuf[2 * fk + 1] = 0;
+    rp += 1;
+    rp >= fft_size ? rp = 0;
+    fk += 1;
+  );
+  fft(fftbuf, fft_size);
+  fft_permute(fftbuf, fft_size);
+
+  bk = 0;
+  loop(half + 1,
+    specS[bk] = fftbuf[2 * bk] * fftbuf[2 * bk] +
+                fftbuf[2 * bk + 1] * fftbuf[2 * bk + 1];
+    bk += 1;
+  );
+
+  // per-mode noise bookkeeping; nsrcb/nsc describe the active noise spectrum
+  nvalid = 0;
+  mode == 1 ? (
+    // learning: accumulate mean power profile (audio path stays untouched)
+    bk = 0;
+    loop(half + 1,
+      pacc[bk] += specS[bk];
+      bk += 1;
+    );
+  ) :
+  mode == 2 ? (
+    ch == 0 ? (sppInit0 = spp_update(nbuf, pbuf, sppInit0);)
+            : (sppInit1 = spp_update(nbuf, pbuf, sppInit1););
+    memcpy(specN, nbuf, half + 1);
+    smooth_spectrum_buf(specN);
+    nsrcb = specN;
+    nsc = 1;
+    nvalid = 1;
+  ) : (
+    learn_frames >= MIN_LEARN_FRAMES ? (
+      nsrcb = pacc;
+      nsc = 1 / learn_frames;
+      nvalid = 1;
+    );
+  );
+
+  nlm ? (
+    // 2D pipeline (spectral_2d_denoiser_run): push the current frame's
+    // complex spectrum, noise estimate and SNR, then denoise the frame from
+    // NLM_FUT hops ago so the smoother sees its future. All modes route
+    // through the same delay so actual latency always equals reported PDC.
+    sbase = specring + spec_head * 2 * MAXFFT;
+    memcpy(sbase, fftbuf, 2 * fft_size);
+    dnb = noisering + spec_head * HALFMAX;
+    snb = snrring + nlm_head * HALFMAX;
+    nvalid ? (
+      bk = 0;
+      loop(half + 1,
+        sv = nsrcb[bk] * nsc;
+        dnb[bk] = sv;
+        snb[bk] = specS[bk] / max(sv, NLM_EPS);
+        bk += 1;
+      );
+    ) : (
+      memset(dnb, 0, half + 1);
+      memset(snb, 1, half + 1);
+    );
+    dslot = (spec_head + 1) % SPECFR;         // oldest slot = NLM_FUT back
+    memcpy(fftbuf, specring + dslot * 2 * MAXFFT, 2 * fft_size);
+    (nvalid && nlm_fill + 1 >= nlm_frames) ? (
+      nlm_process(snrring);
+      dnb = noisering + dslot * HALFMAX;
+      bk = 0;
+      loop(half + 1,
+        nlmSm[bk] *= max(dnb[bk], NLM_EPS);   // reconstruct magnitude
+        bk += 1;
+      );
+      refresh_wht(dnb, 1, wbuf, ch);
+      // deviation from spectral_2d_denoiser_run: keep the 1D pipeline's
+      // rising-only FIXED smoother on top of the NLM-smoothed magnitude.
+      // The NLM distance threshold admits few matches at low frequencies
+      // (freq_scale ~1 there), so without it LF gains chatter worse than
+      // the non-NLM path.
+      wiener_gains(nlmSm, dnb, 1, gbuf, sprev, 1);
+    ) : (
+      memset(gbuf, 1, half + 1);              // warmup: delayed passthrough
+    );
+  ) : (
+    nvalid ? (
+      refresh_wht(nsrcb, nsc, wbuf, ch);
+      wiener_gains(specS, nsrcb, nsc, gbuf, sprev, 1);
+    ) : (
+      memset(gbuf, 1, half + 1);
+    );
+  );
+  apply_gains(gbuf, wbuf);
+
+  fft_ipermute(fftbuf, fft_size);
+  ifft(fftbuf, fft_size);
+
+  fk = 0;
+  loop(fft_size,
+    ola[fk] += fftbuf[2 * fk] * window[fk] * outscale;
+    fk += 1;
+  );
+);
+
+@slider
+fftsel != last_fftsel ? (
+  last_fftsel = fftsel;
+  setup_fft();
+);
+resetprof != last_resetprof ? (
+  last_resetprof = resetprof;
+  resetprof == 1 ? reset_profile();
+);
+nlm != last_nlm ? (
+  last_nlm = nlm;
+  nlm_setup();
+);
+gate_on != last_gate_on ? (
+  last_gate_on = gate_on;
+  memset(gtEnvRing, 0, GTRING);
+  memset(gtGRRing, 1, GTRING);
+  gt_gain = 1;
+  gt_env = 0;
+  gt_openst = 0;
+  gt_holdcnt = 0;
+  gt_opentime = 0;
+  gt_closing = 0;
+);
+update_params();
+
+@block
+// entering learn mode starts a fresh capture; entering adaptive mode seeds
+// the SPP-MMSE state from the manual profile when one exists (set_state)
+mode != last_mode ? (
+  mode == 1 ? reset_profile();
+  mode == 2 ? (
+    learn_frames >= MIN_LEARN_FRAMES ? (
+      seedscale = 1 / learn_frames;
+      seedi = 0;
+      loop(half + 1,
+        sppNL[seedi] = max(profaccL[seedi] * seedscale, SPEC_EPS);
+        sppNR[seedi] = max(profaccR[seedi] * seedscale, SPEC_EPS);
+        seedi += 1;
+      );
+      memset(sppPL, 0, HALFMAX);
+      memset(sppPR, 0, HALFMAX);
+      sppInit0 = 1;
+      sppInit1 = 1;
+    ) : (
+      sppInit0 = 0;
+      sppInit1 = 0;
+    );
+  );
+  last_mode = mode;
+);
+// NLM adds NLM_FUT hops = one FFT of lookahead; constant per nlm setting
+pdc_delay = nlm ? fft_size * 2 : fft_size;
+pdc_bot_ch = 0;
+pdc_top_ch = 2;
+
+// refresh @gfx display copies (left channel); @gfx never touches live buffers
+di = 0;
+mode == 1 ? (
+  dls = max(learn_frames, 1);
+  loop(half + 1,
+    dispS[di] = specS[di];
+    dispN[di] = profaccL[di] / dls;
+    dispG[di] = 1;
+    di += 1;
+  );
+) : (
+  dhave = mode == 2 ? 2 : (learn_frames >= MIN_LEARN_FRAMES ? 1 : 0);
+  dnscale = dhave == 1 ? 1 / learn_frames : 1;
+  loop(half + 1,
+    dispS[di] = prevSL[di];
+    dispN[di] = dhave == 2 ? sppNL[di] : dhave == 1 ? profaccL[di] * dnscale : 0;
+    dispG[di] = residual ? (1 - gainL[di]) : gainL[di];  // gainL is post-floor
+    di += 1;
+  );
+);
+
+@sample
+out0 = olaL[hopcount];
+out1 = olaR[hopcount];
+inringL[wpos] = spl0;
+inringR[wpos] = spl1;
+wpos += 1;
+wpos >= fft_size ? wpos = 0;
+hopcount += 1;
+hopcount >= hop ? (
+  memcpy(olaL, olaL + hop, fft_size - hop);
+  memset(olaL + fft_size - hop, 0, hop);
+  memcpy(olaR, olaR + hop, fft_size - hop);
+  memset(olaR + fft_size - hop, 0, hop);
+  process_channel(inringL, olaL, gainL, profaccL, sppNL, sppPL, prevSL, whtWL,
+                  snrRingL, specRingL, noiseRingL, 0);
+  process_channel(inringR, olaR, gainR, profaccR, sppNR, sppPR, prevSR, whtWR,
+                  snrRingR, specRingR, noiseRingR, 1);
+  mode == 1 ? learn_frames += 1;
+  nlm ? (
+    nlm_head += 1;
+    nlm_head >= nlm_frames ? nlm_head = 0;
+    spec_head += 1;
+    spec_head >= SPECFR ? spec_head = 0;
+    nlm_fill < nlm_frames ? nlm_fill += 1;
+  );
+  hopcount = 0;
+);
+gate_on ? (
+  gt_in = max(abs(out0), abs(out1));
+  gt_env = gt_in > gt_env ? gt_in + gt_datk * (gt_env - gt_in)
+                          : gt_in + gt_drel * (gt_env - gt_in);
+  gmode == 0 ? (
+    gt_openst ? (gt_env < gt_thrclose ? gt_openst = 0;)
+              : (gt_env >= gt_thr ? gt_openst = 1;);
+    gt_target = gt_openst;
+  ) : (
+    gt_target = gt_env >= gt_thr ? 1
+              : max((gt_env / gt_thr) ^ gt_ratio1, GT_FLOOR);
+  );
+  gt_target >= gt_gain ? (
+    gt_gain = gt_target + gt_atkc * (gt_gain - gt_target);
+    gt_holdcnt = gt_holdsmp;
+    gt_closing = 0;
+    gt_env >= gt_thr ? gt_opentime += 1;
+  ) : (
+    gt_holdcnt > 0 ? gt_holdcnt -= 1 : (
+      gt_closing == 0 ? (
+        // longer tails after real phrases, fast cuts after short bursts
+        gt_relc_use = gauto ?
+          exp(-1 / (min(0.06 + gt_opentime / srate * 0.34, 0.4) * srate)) :
+          gt_relc;
+        gt_opentime = 0;
+        gt_closing = 1;
+      );
+      gt_gain = gt_target + gt_relc_use * (gt_gain - gt_target);
+    );
+  );
+  out0 *= gt_gain;
+  out1 *= gt_gain;
+  gt_in > gt_dispenv ? gt_dispenv = gt_in;
+  gt_gain < gt_dispgr ? gt_dispgr = gt_gain;
+  gt_dispcnt += 1;
+  gt_dispcnt >= gt_dispn ? (
+    gtEnvRing[gt_dpos] = gt_dispenv;
+    gtGRRing[gt_dpos] = gt_dispgr;
+    gt_dpos += 1;
+    gt_dpos >= GTRING ? gt_dpos = 0;
+    gt_dispenv = 0;
+    gt_dispgr = 1;
+    gt_dispcnt = 0;
+  );
+);
+spl0 = out0;
+spl1 = out1;
+
+@serialize
+// noise profile persists with the project; profile bins are only valid for
+// the FFT size they were captured at, so a mismatch on load discards them
+ser_reading = file_avail(0) >= 0;
+ser_fft = fft_size;
+file_var(0, ser_fft);
+file_var(0, learn_frames);
+file_mem(0, profaccL, HALFMAX);
+file_mem(0, profaccR, HALFMAX);
+ser_reading && ser_fft != fft_size ? reset_profile();
+
+@gfx 720 470
+// all @gfx variables are g_-prefixed: audio-thread names must never be reused
+g_top = 26;
+g_bot = 18;
+g_gateh = gate_on ? 124 : 0;      // gate panel claims the bottom strip
+g_h = gfx_h - g_top - g_bot - g_gateh;
+g_w = gfx_w - 44;
+g_x0 = 40;
+g_nyq = srate * 0.5;
+g_norm = (fft_size * 0.25) ^ 2;   // Hann coherent gain: 0 dB = full-scale sine
+g_range = 110;                    // dB span shown
+
+gfx_set(0.07, 0.08, 0.1, 1);
+gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_setfont(0);
+
+// header
+gfx_set(0.85, 0.85, 0.85, 1);
+gfx_x = g_x0; gfx_y = 7;
+gfx_drawstr("Spectral DeNoise v0.8   FFT ");
+gfx_drawnumber(fft_size, 0);
+mode == 1 ? (
+  gfx_set(1, 0.55, 0.2, 1);
+  gfx_drawstr("   LEARNING ");
+  gfx_drawnumber(learn_frames, 0);
+  gfx_drawstr(" frames");
+) : mode == 2 ? (
+  gfx_set(0.4, 0.8, 1, 1);
+  gfx_drawstr("   ADAPTIVE");
+) : (
+  learn_frames >= MIN_LEARN_FRAMES ? (
+    gfx_set(0.5, 0.9, 0.5, 1);
+    gfx_drawstr("   profile ");
+    gfx_drawnumber(learn_frames, 0);
+    gfx_drawstr(" frames");
+  ) : (
+    gfx_set(0.9, 0.4, 0.4, 1);
+    gfx_drawstr("   NO PROFILE - set Mode to Learn over noise");
+  );
+);
+
+// dB grid
+g_db = -20;
+while (g_db > -g_range) (
+  g_y = g_top + (-g_db / g_range) * g_h;
+  gfx_set(0.18, 0.19, 0.22, 1);
+  gfx_line(g_x0, g_y, g_x0 + g_w, g_y);
+  gfx_set(0.45, 0.45, 0.5, 1);
+  gfx_x = 4; gfx_y = g_y - 4;
+  gfx_drawnumber(g_db, 0);
+  g_db -= 20;
+);
+// frequency grid at 100 / 1k / 10k
+g_f = 100;
+while (g_f < g_nyq) (
+  g_fx = g_x0 + log(g_f / 20) / log(g_nyq / 20) * g_w;
+  g_fx >= g_x0 ? (
+    gfx_set(0.18, 0.19, 0.22, 1);
+    gfx_line(g_fx, g_top, g_fx, g_top + g_h);
+    gfx_set(0.45, 0.45, 0.5, 1);
+    gfx_x = g_fx - 8; gfx_y = g_top + g_h + 4;
+    g_f >= 1000 ? (
+      gfx_drawnumber(g_f / 1000, 0);
+      gfx_drawstr("k");
+    ) : gfx_drawnumber(g_f, 0);
+  );
+  g_f *= 10;
+);
+
+// three curves from the @block-written display buffers
+g_curve = 0;
+loop(3,
+  g_curve == 0 ? gfx_set(0.55, 0.75, 1, 1) :    // input spectrum (smoothed)
+  g_curve == 1 ? gfx_set(1, 0.6, 0.25, 1) :     // noise floor
+                 gfx_set(0.45, 0.95, 0.5, 1);   // final gain
+  g_col = 0;
+  g_pbin = -1;
+  while (g_col < g_w) (
+    g_bin = floor(20 * ((g_nyq / 20) ^ (g_col / g_w)) / g_nyq * half + 0.5);
+    g_bin > half ? g_bin = half;
+    g_v = g_curve == 0 ? dispS[g_bin] : g_curve == 1 ? dispN[g_bin] : dispG[g_bin];
+    // take the loudest bin the column spans so narrow peaks stay visible
+    g_i = g_pbin + 1;
+    while (g_i <= g_bin) (
+      g_curve == 0 ? (dispS[g_i] > g_v ? g_v = dispS[g_i];) :
+      g_curve == 1 ? (dispN[g_i] > g_v ? g_v = dispN[g_i];) :
+                     (dispG[g_i] > g_v ? g_v = dispG[g_i];);
+      g_i += 1;
+    );
+    g_pbin = g_bin;
+    g_dbv = g_curve == 2 ? 20 * log10(max(g_v, 0.0000316))
+                         : 10 * log10(max(g_v, g_norm * 10 ^ (-14)) / g_norm);
+    g_dbv > 0 ? g_dbv = 0;
+    g_dbv < -g_range ? g_dbv = -g_range;
+    g_y = g_top + (-g_dbv / g_range) * g_h;
+    g_col == 0 ? (gfx_x = g_x0; gfx_y = g_y;)
+               : gfx_lineto(g_x0 + g_col, g_y);
+    g_col += 2;
+  );
+  g_curve += 1;
+);
+
+// gate panel: scrolling pre-gate waveform (dB), fixed threshold line, gain
+// reduction drawn downward from the top; newest slice at the right edge
+gate_on ? (
+  g_py = gfx_h - g_gateh + 4;
+  g_ph = g_gateh - 10;
+  g_grange = 80;
+  gfx_set(0.1, 0.11, 0.14, 1);
+  gfx_rect(g_x0, g_py, g_w, g_ph);
+  g_gdbl = -20;
+  while (g_gdbl > -g_grange) (
+    g_gy = g_py + (-g_gdbl / g_grange) * g_ph;
+    gfx_set(0.16, 0.17, 0.2, 1);
+    gfx_line(g_x0, g_gy, g_x0 + g_w, g_gy);
+    gfx_set(0.45, 0.45, 0.5, 1);
+    gfx_x = 4; gfx_y = g_gy - 4;
+    gfx_drawnumber(g_gdbl, 0);
+    g_gdbl -= 20;
+  );
+  g_ncols = min(g_w, GTRING);
+  g_c = 0;
+  while (g_c < g_ncols) (
+    g_idx = gt_dpos - g_ncols + g_c;
+    g_idx < 0 ? g_idx += GTRING;
+    g_edb = 20 * log10(max(gtEnvRing[g_idx], 0.0001));
+    g_edb > 0 ? g_edb = 0;
+    gfx_set(0.42, 0.62, 0.85, 1);
+    gfx_line(g_x0 + g_c, g_py + g_ph,
+             g_x0 + g_c, g_py + (-g_edb / g_grange) * g_ph);
+    g_grdb = -20 * log10(max(gtGRRing[g_idx], GT_FLOOR));
+    g_grdb > 0.1 ? (
+      g_grdb > g_grange ? g_grdb = g_grange;
+      gfx_set(1, 0.32, 0.28, 0.45);
+      gfx_line(g_x0 + g_c, g_py,
+               g_x0 + g_c, g_py + (g_grdb / g_grange) * g_ph);
+    );
+    g_c += 1;
+  );
+  g_ty = g_py + (-gthresh / g_grange) * g_ph;
+  gfx_set(1, 0.85, 0.3, 1);
+  gfx_line(g_x0, g_ty, g_x0 + g_w, g_ty);
+  g_idx = gt_dpos - 1;
+  g_idx < 0 ? g_idx += GTRING;
+  gfx_set(0.85, 0.85, 0.85, 1);
+  gfx_x = g_x0 + 6; gfx_y = g_py + 3;
+  gmode ? (
+    gfx_drawstr("EXPANDER 1:");
+    gfx_drawnumber(gratio, 1);
+  ) : gfx_drawstr("GATE");
+  gauto ? gfx_drawstr("  AUTO");
+  gfx_drawstr("   GR ");
+  gfx_drawnumber(-20 * log10(max(gtGRRing[g_idx], GT_FLOOR)), 1);
+  gfx_drawstr(" dB");
+);

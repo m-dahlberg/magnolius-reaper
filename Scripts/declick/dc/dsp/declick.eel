@@ -1,0 +1,654 @@
+// @noindex
+// Adaptive De-Click -- the EEL kernel.
+//
+// A port of Magnolius_DeClick.jsfx (itself a port of Paul Licameli's Audacity/Nyquist
+// De-Clicker) from a streaming real-time plugin to an offline, whole-file one.
+//
+// The one structural change, and the reason for everything else here: the
+// per-band step-peak envelopes are THRESHOLD-INDEPENDENT. They are the output
+// of the expensive part (nb bandpass filters per sample) and the input to the
+// cheap part (the Nyquist click test). So the plugin's 64-slot rings become
+// whole-file linear arrays, and detection becomes a pure function over them
+// that can be re-run on every slider move without touching the audio again.
+//
+// The plugin's serial `passes` become parallel step-grid PHASES, all analysed
+// from the input in one go and merged into a single gain envelope. Its real
+// benefit was the grid stagger, which this keeps; what it loses is
+// re-detection on repaired audio, which offline we do not need. At nphases==1
+// the two arrangements are identical, which is where the null test runs.
+//
+// Tasks (_TASK):
+//   0  setup    band coefficients, allocate for _NSTEPS, clear, report heap_ok
+//   1  analyse  consume a block: detection biquads -> step-peak accumulation
+//   2  detect   walk the envelopes -> histogram, events, gain envelopes
+//   3  render   consume a block: apply the gain envelopes -> _OUT
+//   4  reset    streaming state only (keeps the envelopes)
+//
+// In:   _IN _OUT _HEAP _RD _NSAMP _NCH _SRATE _TOTAL _NSTEPS _WAVB
+//       _NB _NPH _STEPSZ _FLO _FHI
+//       _SENS _CRACKLE _MAXSTEPS _SEP _XFADE _MAXCUT _ISOLATE _BLO _BHI
+//       _MAXEVENT _BREACH
+// Out:  heap_ok memtop ana_steps nev nev_kept cut_steps out_peak
+//       hist ckmax wmin wmax bandcnt bandsum ev      (buffer addresses)
+//       nhist hist_lo hist_bin maxev
+
+MAXB = 30;
+MAXP = 4;
+RISE = 1;                  // max rise/fall time in steps (fixed in the original)
+FLOORAMP = 0.00001;        // -100 dB guard added to band peaks, as in the original
+ABSTHRESH = 0.0000000001;  // -200 dB absolute floor (the original's fixed control)
+
+// When the event is over, in the band that carried it. Two references, and
+// the HIGHER of the two wins, because each alone has a failure mode:
+//
+//   DURREL  -12 dB below the candidate's own peak. Alone, this cannot
+//           terminate at all for an event whose overshoot is under 12 dB --
+//           there is no 12 dB drop to find -- so every marginal event would
+//           measure as sustained. That is the wrong way round: the events near
+//           the threshold are the ones a length test must judge fairly.
+//   DURRET  +6 dB over the mean level of the band across DURWIN_MS around the
+//           candidate. Wide enough that a fricative occupies well under half
+//           of it and so cannot set its own floor, which is what lets a
+//           sustained sound be recognised as one.
+DURREL = 0.25;
+DURRET = 2.0;
+DURWIN_MS = 200;
+
+// How far a band must stand over its own background to count as part of the
+// event's residual. 6 dB -- deliberately above the per-band detection bar
+// (det_thresh, half the threshold in dB), because the question here is not
+// "did this band take part" but "is the residual still present this high up".
+REACHOVER = 2.0;
+
+NHIST = 260;               // overshoot histogram: -5 .. 60 dB in 0.25 dB bins
+HIST_LO = -5;
+HIST_BIN = 0.25;
+// The file's own broadband step-peak level, as a histogram. Overshoot is a
+// ratio against a candidate's own local background, which is what makes this
+// detector robust to level -- and also why a passage holding no audio at all
+// still produces candidates: the dither fluctuating against itself. They never
+// survive a threshold, but they do dilute the distribution the threshold is
+// READ off. Nothing in the overshoot histogram can see that, because overshoot
+// is exactly the quantity that throws the level away.
+//
+// Accumulated during ANALYSIS, over `am`, so it is threshold-independent and
+// costs the detect path nothing. Lua reads the floor off it. See dc/silence.lua.
+NLHIST = 140;              // step level histogram: -140 .. 0 dBFS, 1 dB
+LHIST_LO = -140;
+LHIST_BIN = 1;
+MAXEV = 100000;            // events retained for take markers and the log
+
+function sinh_(x) ( (exp(x) - exp(-x)) * 0.5 );
+
+// ---------------------------------------------------------------- allocation
+// Bump allocator over the heap above the Lua-owned I/O region. Every task
+// addresses through the names set here; nothing outside knows a number.
+function halloc(n) local(r) ( r = memptr; memptr += n; r );
+
+function setup() local(b, fb, ft, fc, w0, sn, al, a0i, p, top) (
+  nch    = max(1, min(8, floor(_NCH + 0.5)));
+  nb     = max(1, min(MAXB, floor(_NB + 0.5)));
+  nph    = max(1, min(MAXP, floor(_NPH + 0.5)));
+  nsteps = max(8, floor(_NSTEPS + 0.5));
+  stepsz = max(1, floor(_STEPSZ + 0.5));
+  srate  = _SRATE;
+  wavb   = max(16, floor(_WAVB + 0.5));
+
+  flo = min(_FLO, _FHI);
+  fhi = max(_FLO, _FHI);
+  bandsok = fhi > flo * 1.001;
+  bw_oct = bandsok ? log(fhi/flo) / log(2) / nb : 1;
+
+  memptr = _HEAP;
+
+  // per-band coefficient tables
+  tb_fc     = halloc(MAXB);
+  tb_det_b0 = halloc(MAXB);   // detection bandpass (normalized; b1=0, b2=-b0)
+  tb_det_a1 = halloc(MAXB);
+  tb_det_a2 = halloc(MAXB);
+  tb_alpha  = halloc(MAXB);   // repair peaking alpha
+  tb_m2cos  = halloc(MAXB);   // repair -2*cos(w0)
+  tb_stag   = halloc(MAXP);   // per-phase step-grid stagger, samples
+
+  // detection scratch (one candidate step at a time)
+  dt_band   = halloc(MAXB);
+  dt_ratio  = halloc(MAXB);
+  skipun    = halloc(MAXB);   // per band, next step allowed to start a click
+
+  // ---- streaming state, cleared by task 4 ----
+  stream0 = memptr;
+  det_st  = halloc(nch*MAXB*4);   // 2 cascaded biquads x (s1,s2), shared by phases
+  sp_acc  = halloc(MAXP*nch*MAXB);
+  am_acc  = halloc(MAXP*nch);
+  sctr    = halloc(MAXP);         // samples until this phase's next step boundary
+  scount  = halloc(MAXP);         // steps completed on this phase
+  rep_st  = halloc(nch*MAXB*2);   // repair biquad state
+  rep_dy  = halloc(nch*MAXB*6);   // b0,b1,b2,a1,a2,lastgain
+  stream1 = memptr;
+
+  // ---- the envelope cache: what analysis produces and detection reads ----
+  sp = halloc(nph*nch*nb*nsteps);   // per-band step peaks
+  am = halloc(nph*nch*nsteps);      // broadband step peaks (crackle test)
+  env = halloc(nch*nb*nsteps);      // repair gain, dB, on the global step grid
+
+  // ---- display and reporting ----
+  wmin    = halloc(wavb);
+  wmax    = halloc(wavb);
+  ckmax   = halloc(wavb);           // max overshoot dB per waveform bucket
+  hist    = halloc(NHIST);
+  lhist   = halloc(NLHIST);
+  bandcnt = halloc(MAXB);
+  bandsum = halloc(MAXB);
+  ev      = halloc(MAXEV*4);        // pos_samples, overshoot dB, width, bandmask
+  memtop  = memptr;
+
+  b = 0;
+  while (b < nb) (
+    fb = flo * (fhi/flo)^(b/nb);
+    ft = flo * (fhi/flo)^((b+1)/nb);
+    fc = min(sqrt(fb*ft), 0.47*srate);
+    tb_fc[b] = fc;
+    w0 = 2*$pi*fc/srate;
+    sn = sin(w0);
+    // detection: constant-peak-gain bandpass, twice the band width
+    al = sn * sinh_(0.5*log(2) * (2*bw_oct) * w0/sn);
+    a0i = 1/(1+al);
+    tb_det_b0[b] = al*a0i;
+    tb_det_a1[b] = -2*cos(w0)*a0i;
+    tb_det_a2[b] = (1-al)*a0i;
+    // repair peaking: one band width
+    tb_alpha[b] = sn * sinh_(0.5*log(2) * bw_oct * w0/sn);
+    tb_m2cos[b] = -2*cos(w0);
+    b += 1;
+  );
+
+  p = 0;
+  while (p < MAXP) ( tb_stag[p] = floor(stepsz * p / nph); p += 1; );
+
+  memset(stream0, 0, memtop - stream0);
+  p = 0;
+  while (p < nch*MAXB) ( rep_dy[p*6+5] = 1000000; p += 1; );
+  p = 0;
+  while (p < nph) ( sctr[p] = tb_stag[p] + stepsz; p += 1; );
+
+  wbucket = max(1, ceil(_TOTAL / wavb));
+  apos = 0; wb_ctr = 0; wpos = 0;
+  wmin_acc = 2; wmax_acc = -2;
+  rpos = 0; out_peak = 0;
+  ana_steps = 0;
+  nev = 0; nev_kept = 0; cut_steps = 0;
+
+  // Two ADJACENT slots at the top. EEL redirects every out-of-range access to
+  // one shared scratch slot, so probing the two ends of a buffer passes even
+  // when the far end was never allocated: both writes land in the scratch and
+  // agree with each other. Neighbours catch it.
+  sp[0] = 1;
+  top = memtop - 2;
+  top[0] = 2; top[1] = 3;
+  heap_ok = (sp[0] == 1 && top[0] == 2 && top[1] == 3) ? 1 : 0;
+  top[0] = 0; top[1] = 0; sp[0] = 0;
+);
+
+// ------------------------------------------------------------------ analysis
+// One block of interleaved input. Runs the detection filter bank once per
+// channel (the phases see the same audio, so they share the filters and differ
+// only in where their step boundaries fall) and accumulates step peaks.
+function analyse() local(i, c, b, x, v, y1, y2, b0, a1, a2, st, k, p, s, base, dst,
+                        lv, lb) (
+  i = 0;
+  while (i < _NSAMP) (
+    c = 0;
+    while (c < nch) (
+      x = _IN[i*nch + c];
+      b = 0;
+      while (b < nb) (
+        b0 = tb_det_b0[b]; a1 = tb_det_a1[b]; a2 = tb_det_a2[b];
+        st = det_st + (c*MAXB + b)*4;
+        y1 = b0*x + st[0];
+        st[0] = -a1*y1 + st[1];
+        st[1] = -b0*x - a2*y1;
+        y2 = b0*y1 + st[2];
+        st[2] = -a1*y2 + st[3];
+        st[3] = -b0*y1 - a2*y2;
+        v = abs(y2);
+        p = 0;
+        while (p < nph) (
+          k = (p*nch + c)*MAXB + b;
+          v > sp_acc[k] ? ( sp_acc[k] = v; );
+          p += 1;
+        );
+        b += 1;
+      );
+      v = abs(x);
+      p = 0;
+      while (p < nph) (
+        k = p*nch + c;
+        v > am_acc[k] ? ( am_acc[k] = v; );
+        p += 1;
+      );
+      // waveform display buckets, over the input, all channels together
+      x > wmax_acc ? ( wmax_acc = x; );
+      x < wmin_acc ? ( wmin_acc = x; );
+      c += 1;
+    );
+
+    wb_ctr += 1;
+    wb_ctr >= wbucket ? (
+      wpos < wavb ? ( wmin[wpos] = wmin_acc; wmax[wpos] = wmax_acc; );
+      wpos += 1; wb_ctr = 0; wmin_acc = 2; wmax_acc = -2;
+    );
+
+    // step boundaries, per phase
+    p = 0;
+    while (p < nph) (
+      sctr[p] -= 1;
+      sctr[p] <= 0 ? (
+        s = scount[p];
+        s < nsteps ? (
+          c = 0;
+          while (c < nch) (
+            base = ((p*nch + c)*nb)*nsteps + s;
+            dst  = (p*nch + c)*MAXB;
+            b = 0;
+            while (b < nb) (
+              sp[base + b*nsteps] = sp_acc[dst + b] + FLOORAMP;
+              sp_acc[dst + b] = 0;
+              b += 1;
+            );
+            am[(p*nch + c)*nsteps + s] = am_acc[p*nch + c];
+            // The file's own level distribution, from one phase only -- the
+            // phases are staggered grids over the same audio, so counting all
+            // of them would say the same thing four times.
+            p == 0 ? (
+              lv = am_acc[p*nch + c] > 0
+                 ? 20*log10(am_acc[p*nch + c]) : LHIST_LO;
+              lb = floor((lv - LHIST_LO)/LHIST_BIN);
+              lb = max(0, min(NLHIST - 1, lb));
+              lhist[lb] += 1;
+            );
+            am_acc[p*nch + c] = 0;
+            c += 1;
+          );
+          scount[p] = s + 1;
+          p == 0 ? ( ana_steps = s + 1; );
+        );
+        sctr[p] = stepsz;
+      );
+      p += 1;
+    );
+    apos += 1;
+    i += 1;
+  );
+);
+
+// ----------------------------------------------------------------- detection
+// Port of the Nyquist test-click / test-click-boundary. cx_sp and cx_am point
+// at the current band's step-peak run and the broadband run. Out-of-range
+// reads return a value no background can be below, so no click is ever found
+// straddling the ends of the file.
+function sp_at(k) ( (k < 0 || k >= nsteps) ? 1000000000 : cx_sp[k] );
+function am_at(k) ( (k < 0 || k >= nsteps) ? 1000000000 : cx_am[k] );
+
+// Scan one side of a candidate. Leading side: base=n, dirn=-1 probes n-1, n-2,
+// ... Trailing side: base=n+w-1, dirn=+1 probes n+w, n+w+1, ...
+// Returns the background level, or -1 if no edge is found within RISE steps.
+// Sets tcb_len = the length of the quiet zone found (skewsep if fully quiet).
+function tcboundary(base, dirn, bar) local(r, found, v, bg, lim, ii, ambar, brk) (
+  found = 0; r = 0; bg = 0;
+  while (!found && r < RISE) (
+    r += 1;
+    v = sp_at(base + dirn*r);
+    v < bar ? ( found = 1; bg = v; );
+  );
+  found ? (
+    lim = max(0, skewsep - r);
+    tcb_len = skewsep;
+    ii = 0; ambar = 0; brk = 0;
+    while (ii < lim && !brk) (
+      v = sp_at(base + dirn*(r + 1 + ii));
+      (ambar || v >= bar) ? (
+        // once the edge of a neighbouring bump is seen, later steps pass only
+        // if the broadband amplitude is under the dense-click threshold
+        ambar = 1;
+        am_at(base + dirn*(r + 1 + ii)) >= crackle_amp ? (
+          tcb_len = r + ii;
+          brk = 1;
+        );
+      ) : (
+        v > bg ? ( bg = v; );
+      );
+      ii += 1;
+    );
+    bg;
+  ) : ( -1; );
+);
+
+// Test candidate step n. Returns the click width in steps (0 = no click) and
+// sets tc_ratio = min(foreground/bg_before, foreground/bg_after).
+function test_click(n) local(fg1, bg1, len1, w, fg2, maxfg, minfg, bgt, bg2, width, fgs, done) (
+  width = 0;
+  fg1 = sp_at(n);
+  bg1 = tcboundary(n, -1, fg1 / det_thresh);
+  bg1 >= 0 ? (
+    len1 = tcb_len;
+    len1 >= 2*sep - skewsep ? (
+      maxfg = 0; minfg = 1000000000; bg2 = 0; fgs = 0; done = 0;
+      w = 1;
+      while (w <= msteps && !done) (
+        fg2 = sp_at(n + w - 1);
+        fg2 > maxfg ? ( maxfg = fg2; );
+        fg2 < minfg ? ( minfg = fg2; );
+        bgt = tcboundary(n + w - 1, 1, fg2 / det_thresh);
+        (bgt >= 0 && len1 + tcb_len >= 2*sep && minfg > ABSTHRESH) ? (
+          fgs = maxfg; bg2 = bgt; width = w;   // set or extend the click end
+        ) : (
+          width ? ( done = 1; );
+        );
+        w += 1;
+      );
+      // The absolute floor is tested on the BROADBAND step peak, not on the
+      // band foreground: the question it answers is "was there any audio here
+      // at all", and a band peak carries the -100 dB FLOORAMP guard that makes
+      // every silent step look alike.
+      width ? (
+        am_at(n) > abs_floor ? (
+          tc_ratio = min(fgs/bg1, fgs/bg2);
+        ) : (
+          width = 0;      // no audio here: not a candidate, not a statistic
+        );
+      );
+    );
+  );
+  width;
+);
+
+// How long the event at step n lasts, in steps, measured in the band that
+// carried it: the run of steps around n that stay within DURREL of the
+// candidate's own peak. Peak-relative, so a quiet passage cannot stretch it,
+// and bounded at maxev_steps a side, because the only question asked of the
+// answer is whether it exceeds that -- so the walk stops as soon as it can.
+//
+// This is NOT what _MAXSTEPS does. That caps how wide the click itself may be;
+// this asks whether the sound the click sits in ever comes back down. A
+// fricative's onset is as short as a click's -- what differs is that 150 ms
+// later it is still going.
+function event_len(base, n) local(pk, lim, k, dl, dr, acc, cnt, lo, hi) (
+  lo = max(0, n - durwin); hi = min(nsteps - 1, n + durwin);
+  acc = 0; cnt = 0; k = lo;
+  while (k <= hi) ( acc += base[k]; cnt += 1; k += 1; );
+  pk = base[n];
+  lim = max(pk * DURREL, (cnt > 0 ? acc / cnt : 0) * DURRET);
+  dl = 0; k = n - 1;
+  while (k >= 0 && n - k <= maxev_steps && base[k] >= lim) ( dl += 1; k -= 1; );
+  dr = 0; k = n + 1;
+  while (k < nsteps && k - n <= maxev_steps && base[k] >= lim) ( dr += 1; k += 1; );
+  dl + dr + 1;
+);
+
+// Does the event's residual still stand over background at or above band
+// `bfrom`? This is the spectrum of what would be REMOVED, not of the signal:
+// each band is measured against its own local background, so the voice
+// underneath -- which dominates every absolute level in a vocal take and is
+// the same for a click and a consonant -- divides out.
+//
+// A mouth click is a step discontinuity: broadband, flat, and still clearly
+// present at the top of the spectrum. A plosive or a vowel onset is a
+// low-frequency event with nothing up there. Scanning downward from the top
+// and stopping at the first band that qualifies makes the common case -- a
+// real click, which qualifies immediately -- cost one band.
+function reaches(n, w, bfrom) local(b, j, bg, v, hit) (
+  hit = 0; b = nb - 1;
+  while (b >= bfrom && !hit) (
+    cx_sp = sp + ((reach_p*nch + reach_c)*nb + b)*nsteps;
+    bg = 0; j = 0;
+    while (j < skewsep) (
+      v = sp_at(n - 1 - j);     v > bg ? ( bg = v; );
+      v = sp_at(n + w + j);     v > bg ? ( bg = v; );
+      j += 1;
+    );
+    (bg > 0 && sp_at(n) >= bg * REACHOVER) ? ( hit = 1; );
+    b -= 1;
+  );
+  hit;
+);
+
+// Walk the whole envelope cache at the current threshold. Rebuilds the gain
+// envelopes, the overshoot histogram, the event list and the per-band tallies
+// from scratch every time -- there is no incremental state to get stale.
+function detect() local(p, c, b, n, k, w, wmax_w, maxr, bmaxr, ndet, kk, bnd, depth, eb,
+                        aa, bb, cc, kmin, kmax, kt, vv, nlo, nhi, o, hb, bmask,
+                        pos, evi, sk, cs) (
+  rel_thresh = 10^(_SENS/20);
+  det_thresh = sqrt(rel_thresh);   // per-band test at half threshold
+  // Steps whose broadband peak never reaches this hold no audio, so nothing
+  // found there is an event. The value is dBFS and therefore negative; 0 -- the
+  // value the kernel starts at -- disables the test.
+  abs_floor = _ABSFLOOR < 0 ? 10^(_ABSFLOOR/20) : 0;
+  crackle_amp = 10^(_CRACKLE/20);
+  msteps = max(1, min(10, floor(_MAXSTEPS + 0.5)));
+  sep = max(1, min(10, floor(_SEP + 0.5)));
+  skewsep = sep + floor(sep/3);
+  xfsamp = floor(srate * _XFADE * 0.001 + 0.5);
+  maxcut = -abs(_MAXCUT);
+  // Which bands take part. The band LAYOUT is fixed at analysis time, because
+  // it decides the envelopes; which of those bands detection listens to is
+  // free, so it rides here as an ordinary detect parameter and stays live.
+  blo = max(0, min(nb - 1, floor(_BLO + 0.5)));
+  bhi = max(blo, min(nb - 1, floor(_BHI + 0.5)));
+  // Max event length, in steps. 0 disables the test, which is what the null
+  // against the plugin runs at -- the plugin has no equivalent.
+  // -1 disables the reach test. Resolved to a band index in Lua, like _BLO
+  // and _BHI, so the panel and the kernel read the band layout from one place.
+  breach = floor(_BREACH + 0.5);
+  maxev_steps = _MAXEVENT > 0
+              ? max(1, floor(_MAXEVENT * srate / (stepsz * 1000) + 0.5)) : 0;
+  durwin = max(4, floor(DURWIN_MS * srate / (stepsz * 1000) + 0.5));
+
+  memset(env, 0, nch*nb*nsteps);
+  memset(hist, 0, NHIST);
+  memset(bandcnt, 0, MAXB);
+  memset(bandsum, 0, MAXB);
+  memset(ckmax, 0, wavb);
+  nev = 0; nev_kept = 0; cut_steps = 0;
+
+  nlo = skewsep + 1;
+  nhi = nsteps - msteps - skewsep - 2;
+
+  p = 0;
+  while (p < nph) (
+    c = 0;
+    while (c < nch) (
+      cx_am = am + (p*nch + c)*nsteps;
+      // reaches() addresses sp for itself. Named apart from anything in
+      // detect()'s local list on purpose: `cc` is already taken there for the
+      // crossfade denominator, and a global shadowed by a caller's local reads
+      // as 0 in the callee -- which silently made every reach test look at
+      // channel 0. The right-only click in selftest_in_reaper is what caught it.
+      reach_p = p; reach_c = c;
+      b = 0;
+      while (b < nb) ( skipun[b] = -1000000000; b += 1; );   // whole layout
+
+      n = nlo;
+      while (n <= nhi) (
+        ndet = 0; wmax_w = 0; maxr = 0; bmaxr = blo; bmask = 0;
+        b = blo;
+        while (b <= bhi) (
+          n >= skipun[b] ? (
+            cx_sp = sp + ((p*nch + c)*nb + b)*nsteps;
+            w = test_click(n);
+            w ? (
+              dt_band[ndet] = b;
+              dt_ratio[ndet] = tc_ratio;
+              ndet += 1;
+              w > wmax_w ? ( wmax_w = w; );
+              tc_ratio > maxr ? ( maxr = tc_ratio; bmaxr = b; );
+              skipun[b] = n + w + 1;
+            );
+          );
+          b += 1;
+        );
+
+        // late steepness test: the combined click is kept only if the strongest
+        // band detail reaches the full threshold -- and, if _MAXEVENT is set,
+        // only if the band that carried it comes back down inside that time.
+        (ndet && maxr >= rel_thresh
+         && (breach < 0 || reaches(n, wmax_w, breach))
+         && (maxev_steps <= 0 ||
+             event_len(sp + ((p*nch + c)*nb + bmaxr)*nsteps, n) <= maxev_steps)) ? (
+          // pass-local step positions -> input samples -> the global step grid
+          aa = n*stepsz + tb_stag[p];
+          bb = (n + wmax_w)*stepsz + tb_stag[p];
+          cc = max(xfsamp, 1);
+          kmin = max(0, floor((aa - xfsamp)/stepsz) - 1);
+          kmax = min(nsteps - 1, ceil((bb + xfsamp)/stepsz) + 1);
+
+          kk = 0;
+          while (kk < ndet) (
+            bnd = dt_band[kk];
+            depth = max(maxcut, -20*log10(dt_ratio[kk]));
+            depth < 0 ? (
+              eb = env + (c*nb + bnd)*nsteps;
+              k = kmin;
+              while (k <= kmax) (
+                kt = k*stepsz;
+                vv = min(kt - aa + xfsamp, bb + xfsamp - kt) / cc;
+                vv = max(0, min(1, vv));
+                vv > 0 ? ( eb[k] += depth * vv; );
+                k += 1;
+              );
+              bandcnt[bnd] += 1;
+              bandsum[bnd] += depth;
+              bmask = bmask | (1 << bnd);
+            );
+            kk += 1;
+          );
+
+          o = 20*log10(maxr);
+          nev += 1;
+          nev <= MAXEV ? (
+            evi = (nev - 1)*4;
+            ev[evi] = aa; ev[evi+1] = o; ev[evi+2] = wmax_w; ev[evi+3] = bmask;
+          );
+          // display raster: the strongest event in each waveform bucket
+          pos = floor(aa / wbucket);
+          (pos >= 0 && pos < wavb && o > ckmax[pos]) ? ( ckmax[pos] = o; );
+        );
+        n += 1;
+      );
+      c += 1;
+    );
+    p += 1;
+  );
+
+  // The overshoot histogram and the repaired fraction are both read off the
+  // committed events, so they describe what was actually done rather than what
+  // was considered.
+  evi = 0;
+  while (evi < min(nev, MAXEV)) (
+    o = ev[evi*4 + 1];
+    hb = floor((o - HIST_LO)/HIST_BIN);
+    hb = max(0, min(NHIST - 1, hb));
+    hist[hb] += 1;
+    evi += 1;
+  );
+  nev_kept = min(nev, MAXEV);
+
+  // Steps carrying any cut, over steps that exist: the repair budget.
+  cs = 0; sk = 0;
+  while (sk < nsteps) (
+    c = 0; b = 0; k = 0;
+    while (c < nch) (
+      b = 0;
+      while (b < nb) (
+        env[(c*nb + b)*nsteps + sk] < -0.01 ? ( k = 1; b = nb; );
+        b += 1;
+      );
+      c += 1;
+    );
+    k ? ( cs += 1; );
+    sk += 1;
+  );
+  cut_steps = cs;
+);
+
+// -------------------------------------------------------------------- render
+// One block, applying the gain envelopes. There is no lookahead and no delay:
+// the envelope for every step was known before rendering started, so the output
+// lines up with the input sample for sample.
+function render() local(i, c, b, xx, dry, r, frac, e0, e1, g, stt, dyb, aA, al,
+                        ra0i, y1, eb, v) (
+  i = 0;
+  while (i < _NSAMP) (
+    r = floor(rpos / stepsz);
+    r >= nsteps - 1 ? ( r = nsteps - 2; frac = 1; )
+                    : ( frac = (rpos - r*stepsz) / stepsz; );
+    c = 0;
+    while (c < nch) (
+      xx = _IN[i*nch + c];
+      dry = xx;
+      b = 0;
+      while (b < nb) (
+        eb = env + (c*nb + b)*nsteps;
+        e0 = eb[r]; e1 = eb[r+1];
+        g = e0 + (e1 - e0)*frac;
+        stt = rep_st + (c*MAXB + b)*2;
+        (g < -0.01 || abs(stt[0]) + abs(stt[1]) > 0.000000001) ? (
+          dyb = rep_dy + (c*MAXB + b)*6;
+          g != dyb[5] ? (
+            aA = 10^(g/40);
+            al = tb_alpha[b];
+            ra0i = 1/(1 + al/aA);
+            dyb[0] = (1 + al*aA)*ra0i;
+            dyb[1] = tb_m2cos[b]*ra0i;
+            dyb[2] = (1 - al*aA)*ra0i;
+            dyb[3] = tb_m2cos[b]*ra0i;
+            dyb[4] = (1 - al/aA)*ra0i;
+            dyb[5] = g;
+          );
+          y1 = dyb[0]*xx + stt[0];
+          stt[0] = dyb[1]*xx - dyb[3]*y1 + stt[1];
+          stt[1] = dyb[2]*xx - dyb[4]*y1;
+          xx = y1;
+        ) : (
+          stt[0] = 0; stt[1] = 0;
+        );
+        b += 1;
+      );
+      _ISOLATE ? ( xx = xx - dry; );
+      _OUT[i*nch + c] = xx;
+      v = abs(xx);
+      v > out_peak ? ( out_peak = v; );
+      c += 1;
+    );
+    rpos += 1;
+    i += 1;
+  );
+);
+
+function reset_stream() local(i) (
+  memset(stream0, 0, stream1 - stream0);
+  i = 0;
+  while (i < nch*MAXB) ( rep_dy[i*6+5] = 1000000; i += 1; );
+  i = 0;
+  while (i < nph) ( sctr[i] = tb_stag[i] + stepsz; i += 1; );
+  apos = 0; wb_ctr = 0; wpos = 0; wmin_acc = 2; wmax_acc = -2;
+  rpos = 0; out_peak = 0; ana_steps = 0;
+  memset(lhist, 0, NLHIST);      // the level histogram is the analysis's
+);
+
+// ---------------------------------------------------------------------- main
+_TASK == 0 ? ( setup(); )
+: _TASK == 1 ? ( analyse(); )
+: _TASK == 2 ? ( detect(); )
+: _TASK == 3 ? ( render(); )
+: _TASK == 4 ? ( reset_stream(); );
+
+band_lo = blo;
+band_hi = bhi;
+nhist = NHIST;
+hist_lo = HIST_LO;
+hist_bin = HIST_BIN;
+nlhist = NLHIST;
+lhist_lo = LHIST_LO;
+lhist_bin = LHIST_BIN;
+maxev = MAXEV;

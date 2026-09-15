@@ -1,0 +1,647 @@
+#!/usr/bin/env python3
+"""Headless render-test harness for Magnolius_MixReference.jsfx.
+
+Renders tiny REAPER projects through the plugin with
+`reaper -newinst -nosplash -renderproject` (works while a normal REAPER
+instance is running) and checks the rendered audio with pure-Python analysis.
+
+The analyser itself has no audible output, so the tests that cover it build a
+DEBUG COPY of the plugin (mix_reference_dbg.jsfx) whose @sample tail replaces
+the outputs with time-multiplexed internal values. The copy is generated from
+the real source on every run, so it can never drift from what it is testing.
+
+Prerequisites:
+  - Magnolius_MixReference.jsfx symlinked as <resource>/Effects/Magnolius_MixReference.jsfx
+  - tools/make_test_refs.py has been run (writes <resource>/Data/mixref/*)
+
+Usage:
+  render_test.py               # run all tests
+  render_test.py params refplay
+Work dir: ~/.cache/mixref-rendertest (override with MIXREF_TEST_DIR).
+"""
+import base64
+import math
+import os
+import re
+import shutil
+import struct
+import subprocess
+import sys
+import time
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from wavio import read_wav, write_wav_f32
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+SRC = os.path.join(os.path.dirname(HERE), "Magnolius_MixReference.jsfx")
+RES = os.path.expanduser("~/.config/REAPER")
+EFFECTS = os.path.join(RES, "Effects")
+WORK = os.environ.get("MIXREF_TEST_DIR",
+                      os.path.expanduser("~/.cache/mixref-rendertest"))
+SR = 48000
+FX = "Magnolius_MixReference.jsfx"
+FXDBG = "mix_reference_dbg.jsfx"
+
+RENDER_CFG = base64.b64encode(b"evaw" + struct.pack("<i", 32)).decode()
+
+NB, NDR, HOPSZ = 31, 9, 2048
+DBG_SLOT = 64            # samples per multiplexed value
+DBG_FRAME = 64 * DBG_SLOT
+
+RESULTS = []
+
+
+def report(name, ok, detail):
+    RESULTS.append((name, ok))
+    print("%-11s %s  %s" % (name, "PASS" if ok else "FAIL", detail))
+
+
+# --------------------------------------------------------------------------
+# project generation
+# --------------------------------------------------------------------------
+
+def slider_line(files=(None,) * 6, sel=0, trims=(0.0,) * 6, anasrc=0,
+                gmatch=1, avgsec=10, tscale=18, dscale=12, frz=0, inv=0,
+                dbg=0):
+    # File sliders serialize as a quoted basename relative to the slider's own
+    # directory (Data/mixref) -- not as a path, and not as the list index.
+    vals = ['"%s"' % f if f else "-" for f in files]
+    vals.append("%d.000000" % sel)
+    vals += ["%.6f" % t for t in trims]
+    vals += ["%d.000000" % anasrc, "%d.000000" % gmatch, "%.6f" % avgsec,
+             "%.6f" % tscale, "%.6f" % dscale, "%d.000000" % frz,
+             "%d.000000" % inv, "%d.000000" % dbg]
+    vals += ["-"] * (64 - len(vals))
+    return " ".join(vals)
+
+
+def make_rpp(path, sliders, out_wav, input_wav=None, length=2.0, srate=SR,
+             in_len=None, fx=FX):
+    item = ""
+    if input_wav:
+        item = """    <ITEM
+      POSITION 0
+      LENGTH %s
+      LOOP 0
+      NAME input
+      <SOURCE WAVE
+        FILE "%s"
+      >
+    >
+""" % (in_len if in_len else length, input_wav)
+    rpp = """<REAPER_PROJECT 0.1 "7.0/linux-x86_64" 1721000000
+  SAMPLERATE %d 0 0
+  TEMPO 120 4 4
+  RENDER_FILE "%s"
+  RENDER_PATTERN ""
+  RENDER_FMT 0 2 %d
+  RENDER_1X 0
+  RENDER_RANGE 1 0 %s 18 1000
+  RENDER_RESAMPLE 3 0 1
+  RENDER_ADDTOPROJ 0
+  RENDER_STEMS 0
+  RENDER_DITHER 0
+  <RENDER_CFG
+    %s
+  >
+  <TRACK
+    NAME "test"
+    <FXCHAIN
+      SHOW 0
+      LASTSEL 0
+      DOCKED 0
+      BYPASS 0 0 0
+      <JS "%s" ""
+        %s
+      >
+    >
+%s  >
+>
+""" % (srate, out_wav, srate, length, RENDER_CFG, fx, sliders, item)
+    with open(path, "w") as f:
+        f.write(rpp)
+
+
+def render(name, sliders, input_name="input.wav", length=2.0, srate=SR,
+           in_len=None, fx=FX):
+    out_wav = os.path.join(WORK, name + ".wav")
+    rpp = os.path.join(WORK, name + ".rpp")
+    if os.path.exists(out_wav):
+        os.remove(out_wav)          # an existing file can pop a dialog
+    make_rpp(rpp, sliders, out_wav,
+             input_wav=os.path.join(WORK, input_name) if input_name else None,
+             length=length, srate=srate, in_len=in_len, fx=fx)
+    t0 = time.time()
+    subprocess.run(["reaper", "-newinst", "-nosplash", "-renderproject", rpp],
+                   check=True, timeout=600,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists(out_wav):
+        raise RuntimeError("render produced no output: " + out_wav)
+    _, chans = read_wav(out_wav)
+    return chans, time.time() - t0
+
+
+# --------------------------------------------------------------------------
+# debug build: same source, extra @sample tail that prints internals as audio
+# --------------------------------------------------------------------------
+
+DBG_TAIL = """
+// ==== generated by tools/render_test.py - not part of the plugin ====
+// dbg 1: pM[k] / pR[k] in dB, one 1/3-octave band per 64 samples
+// dbg 2: drval(hM,k) / drval(hR,k) likewise, one dynamics band per 64 samples
+//
+// Values are latched at the start of each slot and scaled by DBG_SCALE. They
+// MUST land inside -1..1: REAPER zeroes a track's whole render if the FX
+// outputs samples far outside that (a raw -1000 "no data" from drval silenced
+// every sample of the render, which looks exactly like a dead plugin).
+dbg > 0 ? (
+  dbgi = (dbgc / 64)|0;
+  dbgi != dbgprev ? (
+    dbgprev = dbgi;
+    dbg == 1 ? (
+      dbgvA = dbgi < NB ? 10*log10(max(pM[dbgi], EPSLOG)) : 0;
+      dbgvB = dbgi < NB ? 10*log10(max(pR[dbgi], EPSLOG)) : 0;
+    ) : (
+      dbgvA = dbgi < NDR ? drval(hM, dbgi) : 0;
+      dbgvB = dbgi < NDR ? drval(hR, dbgi) : 0;
+    );
+  );
+  spl0 = max(-0.9, min(0.9, dbgvA*0.002));
+  spl1 = max(-0.9, min(0.9, dbgvB*0.002));
+  // Sync marker in the last slot. dbgc free-runs from the plugin's first
+  // sample, which is NOT the first sample of the render range -- REAPER runs
+  // blocks before the range starts -- so the decoder has to find the frame
+  // rather than assume it begins at sample 0.
+  dbgi == 63 ? ( spl0 = 0.9876543; spl1 = 0.9876543; );
+  dbgc += 1; dbgc >= 4096 ? dbgc = 0;
+);
+"""
+
+DBG_SCALE = 0.002        # dB -> sample value; 0.9/0.002 = 450 dB of headroom
+# Must stay inside -1..1 and must not collide with a real value (everything
+# else in the stream is <= 0.9 in magnitude and almost always negative).
+DBG_MAGIC = 0.9876543
+
+
+def build_debug_fx():
+    with open(SRC) as f:
+        src = f.read()
+    if "\nslider20:" not in src:
+        raise RuntimeError("slider20 not found - source layout changed")
+    src = re.sub(r"(?m)^(slider20:.*)$",
+                 r"\1\nslider21:dbg=0<0,2,1>DEBUG (test builds only)", src, 1)
+    marker = "\n@gfx "
+    if marker not in src:
+        raise RuntimeError("@gfx section not found")
+    head, tail = src.split(marker, 1)
+    src = head + DBG_TAIL + marker + tail
+    dst = os.path.join(EFFECTS, FXDBG)
+    if os.path.islink(dst):
+        os.remove(dst)
+    with open(dst, "w") as f:
+        f.write(src)
+    return dst
+
+
+def decode_dbg(chans, nvals, at_sec):
+    """Decode the multiplexed frame starting at/just before `at_sec`.
+
+    Read the frame while the input is still playing: REAPER appends a 1 s tail
+    to every render, and the FFT windows that straddle the end of the item drag
+    the band averages down by a dB or so.
+    """
+    ch0 = chans[0]
+    start = int(at_sec * SR)
+    hit = None
+    for p in range(start, min(len(ch0), start + 2 * DBG_FRAME)):
+        if abs(ch0[p] - DBG_MAGIC) < 1e-5:
+            hit = p
+            break
+    if hit is None:
+        raise RuntimeError("debug sync marker not found near %.2f s" % at_sec)
+    while hit > 0 and abs(ch0[hit - 1] - DBG_MAGIC) < 1e-5:
+        hit -= 1
+    base = hit - 63 * DBG_SLOT
+    if base < 0 or base + DBG_FRAME > len(ch0):
+        raise RuntimeError("debug frame at %.2f s is truncated" % at_sec)
+    out = []
+    for ch in (chans[0], chans[1]):
+        vals = []
+        for k in range(nvals):
+            seg = ch[base + k * DBG_SLOT + 16: base + k * DBG_SLOT + 48]
+            seg = sorted(seg)
+            vals.append(seg[len(seg) // 2] / DBG_SCALE)
+        out.append(vals)
+    return out
+
+
+# --------------------------------------------------------------------------
+# signal helpers
+# --------------------------------------------------------------------------
+
+def sine(freq, amp, n, sr=SR, phase=0.0):
+    return [amp * math.sin(2 * math.pi * freq * t / sr + phase)
+            for t in range(n)]
+
+
+def rms(x, a=0, b=None):
+    seg = x[a:b]
+    return math.sqrt(sum(v * v for v in seg) / max(len(seg), 1))
+
+
+def dft_mag(x, f, sr=SR):
+    re = im = 0.0
+    for n, v in enumerate(x):
+        w = 2 * math.pi * f * n / sr
+        re += v * math.cos(w)
+        im -= v * math.sin(w)
+    return 2.0 * math.sqrt(re * re + im * im) / len(x)
+
+
+def dft_mag_hann(x, f, sr=SR):
+    """Hann-windowed magnitude probe. The rectangular dft_mag() smears a strong
+    tone across the whole spectrum (a 0.5 amplitude 200 Hz tone reads 1.2e-3 at
+    997 Hz from sidelobes alone), which is louder than the leakage being
+    measured. Hann sidelobes fall off as 1/f^3 and put that floor below 1e-6."""
+    n = len(x)
+    re = im = 0.0
+    for k, v in enumerate(x):
+        w = 0.5 - 0.5 * math.cos(2 * math.pi * k / n)
+        a = 2 * math.pi * f * k / sr
+        re += v * w * math.cos(a)
+        im -= v * w * math.sin(a)
+    return 4.0 * math.sqrt(re * re + im * im) / n
+
+
+def maxdiff(a, b):
+    return max(abs(x - y) for x, y in zip(a, b))
+
+
+def band_index_for(freq):
+    """Index of the 1/3-octave band whose bin range covers `freq`."""
+    fftsz = 8192
+    tgt = freq * fftsz / SR
+    for i in range(NB):
+        fc = 20 * 2 ** (i / 3.0)
+        lo = max(1, math.floor(fc / 2 ** (1 / 6.0) * fftsz / SR + 0.5))
+        hi = min(fftsz // 2 - 1, math.floor(fc * 2 ** (1 / 6.0) * fftsz / SR + 0.5))
+        if lo <= tgt <= hi:
+            return i
+    raise RuntimeError("no band covers %g Hz" % freq)
+
+
+# --------------------------------------------------------------------------
+# tests
+# --------------------------------------------------------------------------
+
+EXPECT_PARAMS = [
+    "Ref 1 file", "Ref 2 file", "Ref 3 file", "Ref 4 file", "Ref 5 file",
+    "Ref 6 file", "Reference slot", "Trim 1 (dB)", "Trim 2 (dB)",
+    "Trim 3 (dB)", "Trim 4 (dB)", "Trim 5 (dB)", "Trim 6 (dB)",
+    "Analyse mix from", "Auto gain match", "Tonal average (s)",
+    "Tonal scale (+/- dB)", "Dynamics scale (+/- dB)", "Analyser",
+    "Curve polarity",
+]
+BUILTINS = ["Bypass", "Wet", "Delta"]
+
+
+def t_params():
+    """Every slider line must parse: a bad one silently eats itself and all
+    the ones after it, with no error anywhere in the UI."""
+    outf = os.path.join(WORK, "probe.txt")
+    if os.path.exists(outf):
+        os.remove(outf)
+    rpp = os.path.join(WORK, "probe.rpp")
+    make_rpp(rpp, slider_line(), os.path.join(WORK, "probe_render.wav"))
+    env = dict(os.environ, MIXREF_PROBE_OUT=outf, MIXREF_PROBE_FX=FX)
+    subprocess.run(["reaper", "-newinst", "-nosplash", rpp,
+                    os.path.join(HERE, "probe.lua")],
+                   check=False, timeout=300, env=env,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists(outf):
+        report("params", False, "probe wrote nothing (REAPER did not run it?)")
+        return
+    txt = open(outf).read()
+    names = re.findall(r"^PARAM \d+ (.*?)\|", txt, re.M)
+    # REAPER appends its own Bypass/Wet/Delta after the JSFX sliders
+    slider_names = names[:len(EXPECT_PARAMS)]
+    ok = slider_names == EXPECT_PARAMS and names[len(EXPECT_PARAMS):] == BUILTINS
+    if ok:
+        det = "all %d sliders parsed" % len(EXPECT_PARAMS)
+    else:
+        missing = [n for n in EXPECT_PARAMS if n not in names]
+        det = "got %r; missing=%r" % (names[:len(EXPECT_PARAMS) + 3], missing[:4])
+    report("params", ok, det)
+
+
+def t_passthrough():
+    """Off + no reference: bit-transparent. A dead @init also looks like this,
+    which is exactly why every other test uses signals passthrough cannot fake.
+    """
+    out, _ = render("passthrough", slider_line(sel=0), length=2.0)
+    n = int(2.0 * SR) - 1000        # REAPER renders a 1 s tail past the item
+    d = max(maxdiff(out[0][:n], IN_L[:n]), maxdiff(out[1][:n], IN_R[:n]))
+    report("passthru", d < 1e-6, "maxdiff over %d samples=%.2e" % (n, d))
+
+
+def looped(refs, trim=1.0):
+    """What readref() must produce for one loop of a slot: the file, times the
+    64-sample fade the plugin applies at both loop edges, times the trim."""
+    rln = len(refs[0])
+    out = []
+    for ch in refs:
+        out.append([ch[p] * min(1.0, min(p, rln - p) / 64.0) * trim
+                    for p in range(rln)])
+    return out
+
+
+def align2(out, refs, start, win):
+    """Best loop-phase offset for BOTH channels at once, searched over the
+    whole loop. Returns (offset, maxdiff).
+
+    The phase is deliberately not predicted: r_pos free-runs from the moment
+    the load finishes, and how many blocks REAPER runs before the render range
+    begins is its business. What this asserts is that ONE constant offset
+    reproduces the file sample-for-sample on both channels -- i.e. the loop
+    period, the interpolation, the wrap and the edge fade are all exact.
+
+    Two aliasing traps, both of which produced false failures here:
+      - a single channel is not enough. With 200 Hz on the left, an offset
+        wrong by one 240-sample period fits L perfectly and R not at all.
+      - even both channels alias: 200/300 Hz repeat together every 480
+        samples, so 25 offsets fit any fade-free probe window equally well.
+        Only the 64-sample loop-edge fade tells them apart, so every coarse
+        candidate is re-scored over the full window.
+    """
+    rl = len(refs[0])
+    cands = []
+    for off in range(rl):
+        d = 0.0
+        for k in range(0, 512, 16):
+            for c in (0, 1):
+                e = abs(out[c][start + k] - refs[c][(start + k - off) % rl])
+                d = e if e > d else d
+            if d > 1e-5:
+                break
+        if d <= 1e-5:
+            cands.append(off)
+    if not cands:
+        cands = list(range(rl))
+    best = (1e9, 0)
+    for off in cands:
+        d = max(abs(out[c][start + k] - refs[c][(start + k - off) % rl])
+                for c in (0, 1) for k in range(win))
+        if d < best[0]:
+            best = (d, off)
+    return best[1], best[0]
+
+
+def t_refplay():
+    """Slot 1 selected: the output must BE the reference file, looping, and the
+    input must be gone. Nothing about a passthrough or a dead plugin can
+    produce a 200/300 Hz pair when the input is 997/1499 Hz."""
+    out, _ = render("refplay", slider_line(files=("t_tone2.wav",) + (None,) * 5,
+                                           sel=1), length=1.5)
+    refs = looped([sine(200, 0.5, 12000), sine(300, 0.5, 12000)])
+    off, d = align2(out, refs, 24000, 8192)
+    # Input leakage: 997 Hz must be gone. Measured in a window with no loop
+    # edge in it -- the 64-sample edge fade is a broadband transient that puts
+    # ~1e-4 everywhere, which has nothing to do with the input.
+    w0 = off + 2000
+    while w0 < 24000:
+        w0 += 12000
+    leak = dft_mag_hann(out[0][w0:w0 + 8192], 997.0)
+    ok = d < 2e-4 and leak < 1e-5
+    report("refplay", ok, "loopphase=%d maxdiff=%.2e inputleak=%.2e"
+           % (off, d, leak))
+
+
+def t_trim():
+    """Trim 1 = -6.0206 dB must halve the reference, and only slot 1's trim."""
+    out, _ = render("trim", slider_line(files=("t_tone2.wav",) + (None,) * 5,
+                                        sel=1,
+                                        trims=(-6.0206,) + (0.0,) * 5),
+                    length=1.5)
+    refs = looped([sine(200, 0.5, 12000), sine(300, 0.5, 12000)],
+                  trim=10 ** (-6.0206 / 20))
+    off, d = align2(out, refs, 24000, 8192)
+    amp = dft_mag(out[0][24000:24000 + 9600], 200.0)
+    ok = d < 2e-4 and abs(amp - 0.25) < 0.005
+    report("trim", ok, "maxdiff=%.2e  200Hz amp=%.4f (want 0.2500)" % (d, amp))
+
+
+def t_mono():
+    """A 1-channel reference must be mirrored to both outputs, not read as
+    interleaved stereo (which would come out an octave up on one side)."""
+    out, _ = render("mono", slider_line(files=("t_mono.wav",) + (None,) * 5,
+                                        sel=1), length=1.5)
+    a, b = 24000, 33600
+    lr = maxdiff(out[0][a:b], out[1][a:b])
+    mono = sine(200, 0.5, 12000)
+    off, d = align2(out, looped([mono, list(mono)]), a, 8192)
+    ok = lr < 1e-9 and d < 2e-4
+    report("mono", ok, "L-R maxdiff=%.2e  vs file maxdiff=%.2e" % (lr, d))
+
+
+def t_resample():
+    """96 kHz reference in a 48 kHz project: r_rate must keep the pitch. If the
+    rate were ignored the 1 kHz tone would come out at 500 Hz."""
+    out, _ = render("resample", slider_line(files=("t_96k.wav",) + (None,) * 5,
+                                            sel=1), length=1.5)
+    seg = out[0][24000:24000 + 9600]
+    a1000, a500, a2000 = (dft_mag(seg, f) for f in (1000.0, 500.0, 2000.0))
+    ok = a1000 > 0.45 and a500 < 0.01 and a2000 < 0.01
+    report("resample", ok, "1k=%.4f 500=%.4f 2k=%.4f (want 0.5/0/0)"
+           % (a1000, a500, a2000))
+
+
+def t_tiny():
+    """A 30 ms file is under the 50 ms floor: it must be rejected outright, not
+    looped at audio rate. The mix has to keep playing instead."""
+    out, _ = render("tiny", slider_line(files=("t_tiny.wav",) + (None,) * 5,
+                                        sel=1), length=1.0)
+    n = int(1.0 * SR) - 1000
+    d = maxdiff(out[0][24000:n], IN_L[24000:n])
+    report("tiny", d < 1e-6, "rejected, mix still passes: maxdiff=%.2e" % d)
+
+
+def t_offkeepsana():
+    """Reference slot Off with a file loaded: the mix must pass through
+    untouched while the analyser keeps running on the auto-adopted slot."""
+    out, _ = render("offkeep", slider_line(files=("t_tone2.wav",) + (None,) * 5,
+                                           sel=0), length=1.0)
+    n = int(1.0 * SR) - 1000
+    d = maxdiff(out[0][:n], IN_L[:n])
+    report("offkeep", d < 1e-6, "mix untouched with a loaded slot: %.2e" % d)
+
+
+def t_sixslots():
+    """All six slots loaded at once: the arena split has to give every slot a
+    real region. Slot 6 is the one that a bad SLOTSZ or a stray memory-probe
+    sentinel lands in."""
+    files = ("t_tone2.wav", "t_cal1k.wav", "t_steady15.wav", "t_mono.wav",
+             "t_96k.wav", "t_tone2.wav")
+    out, _ = render("sixslots", slider_line(files=files, sel=6), length=1.5)
+    refs = looped([sine(200, 0.5, 12000), sine(300, 0.5, 12000)])
+    off, d = align2(out, refs, 24000, 8192)
+    peak = max(abs(v) for v in out[0])
+    ok = d < 2e-4 and peak < 1.0
+    report("sixslots", ok, "slot6 maxdiff=%.2e peak=%.3f" % (d, peak))
+
+
+def t_analysis():
+    """Analyser calibration, via the debug build.
+
+    Mix = 1 kHz at 0.5, reference file = 1 kHz at 0.25. Band power is a
+    mean-square estimate, so the 1 kHz band must read 10*log10(A^2/2):
+    -9.03 dB for the mix, -15.05 dB for the reference, and the difference the
+    curve plots must be exactly 6.02 dB. This is what catches a wrong FFT/
+    window normalisation, wrong band edges and a broken running average."""
+    out, _ = render("analysis",
+                    slider_line(files=("t_cal1k.wav",) + (None,) * 5,
+                                sel=0, gmatch=0, avgsec=1, dbg=1),
+                    length=8.0, in_len=8.0, input_name="cal_in.wav", fx=FXDBG)
+    pM, pR = decode_dbg(out, NB, 7.6)
+    b = band_index_for(1000.0)
+    wantM, wantR = 10 * math.log10(0.5 ** 2 / 2), 10 * math.log10(0.25 ** 2 / 2)
+    eM, eR = abs(pM[b] - wantM), abs(pR[b] - wantR)
+    ediff = abs((pR[b] - pM[b]) - (wantR - wantM))
+    # bands with no signal must stay far below the tone band
+    nb = max(pM[i] for i in range(NB) if abs(i - b) > 2)
+    ok = eM < 0.35 and eR < 0.35 and ediff < 0.1 and nb < pM[b] - 25
+    report("analysis", ok,
+           "band%d mix=%.2f (want %.2f) ref=%.2f (want %.2f) diff err=%.3f "
+           "next-loudest band=%.1f" % (b, pM[b], wantM, pR[b], wantR, ediff, nb))
+
+
+def t_dynamics():
+    """Dynamics readout, via the debug build.
+
+    Mix = 1.5 kHz switching between 0.5 and 0.05 every 0.5 s (20 dB range),
+    reference = a steady 1.5 kHz tone. drval() is a gated p95-p10, so the mix
+    band must read ~20 dB and the reference band ~0."""
+    out, _ = render("dynamics",
+                    slider_line(files=("t_steady15.wav",) + (None,) * 5,
+                                sel=0, gmatch=0, avgsec=1, dbg=2),
+                    length=14.0, in_len=14.0, input_name="dyn_in.wav",
+                    fx=FXDBG)
+    dM, dR = decode_dbg(out, NDR, 13.6)
+    b = 5                      # dedge 1000..2000 Hz, fully contains 1.5 kHz
+    # a clamped -450 means drval() said "not enough data"
+    ok = 16.0 < dM[b] < 24.0 and -0.1 <= dR[b] < 3.0
+    report("dynamics", ok, "band%d mix DR=%.2f dB (want ~20) ref DR=%.2f dB "
+           "(want ~0)" % (b, dM[b], dR[b]))
+
+
+def t_gmatch():
+    """Auto gain match on: a level difference between mix and reference must
+    not show up as a tonal difference. Same signals as `analysis`, so the raw
+    band gap is 6 dB; matched, the plotted curve must be ~0."""
+    out, _ = render("gmatch",
+                    slider_line(files=("t_cal1k.wav",) + (None,) * 5,
+                                sel=0, gmatch=1, avgsec=1, dbg=1),
+                    length=8.0, in_len=8.0, input_name="cal_in.wav", fx=FXDBG)
+    pM, pR = decode_dbg(out, NB, 7.6)
+    b = band_index_for(1000.0)
+    sM = 10 * math.log10(sum(10 ** (v / 10.0) for v in pM))
+    sR = 10 * math.log10(sum(10 ** (v / 10.0) for v in pR))
+    ofs = sR - sM                       # what @gfx subtracts
+    curve = (pR[b] - pM[b]) - ofs
+    ok = abs(curve) < 0.15 and abs(ofs + 6.0206) < 0.15
+    report("gmatch", ok, "offset=%.3f dB (want -6.021), matched curve=%.3f dB"
+           % (ofs, curve))
+
+
+def t_freeze():
+    """Freeze must stop the analyser dead. Same 8 s of 1 kHz that drives the
+    `analysis` test to -9 dB: frozen, every band has to stay at the untouched
+    floor instead."""
+    out, _ = render("freeze",
+                    slider_line(files=("t_cal1k.wav",) + (None,) * 5,
+                                sel=0, gmatch=0, avgsec=1, frz=1, dbg=1),
+                    length=8.0, in_len=8.0, input_name="cal_in.wav", fx=FXDBG)
+    pM, _ = decode_dbg(out, NB, 7.6)
+    quiet = max(pM)
+    ok = quiet < -250          # never ingested anything -> still EPSLOG
+    report("freeze", ok, "loudest band with analyser frozen=%.1f dB" % quiet)
+
+
+def t_anasrc():
+    """"Analyse mix from" must really switch the analyser input. On a 2-channel
+    track the sidechain pins are silent, so selecting Sidechain 3/4 has to leave
+    the mix profile empty while the reference profile still fills in. This is
+    the setting that made the plugin look broken out of the box when it
+    defaulted to the sidechain."""
+    out, _ = render("anasrc",
+                    slider_line(files=("t_cal1k.wav",) + (None,) * 5,
+                                sel=0, anasrc=1, gmatch=0, avgsec=1, dbg=1),
+                    length=8.0, in_len=8.0, input_name="cal_in.wav", fx=FXDBG)
+    pM, pR = decode_dbg(out, NB, 7.6)
+    b = band_index_for(1000.0)
+    ok = max(pM) < -250 and abs(pR[b] - 10 * math.log10(0.25 ** 2 / 2)) < 0.35
+    report("anasrc", ok, "mix profile empty (loudest %.1f dB), reference still "
+           "measured (%.2f dB)" % (max(pM), pR[b]))
+
+
+def t_cpu():
+    """Telemetry only: an offline render much slower than real time would mean
+    the live plugin cannot keep up."""
+    files = ("t_tone2.wav", "t_cal1k.wav", "t_steady15.wav", "t_mono.wav",
+             "t_96k.wav", "t_tone2.wav")
+    _, dt = render("cpu", slider_line(files=files, sel=1), length=20.0,
+                   in_len=8.0)
+    report("cpu", dt < 20.0, "20 s render with 6 slots loaded took %.1f s" % dt)
+
+
+ALL = [("params", t_params), ("passthru", t_passthrough),
+       ("refplay", t_refplay), ("trim", t_trim), ("mono", t_mono),
+       ("resample", t_resample), ("tiny", t_tiny),
+       ("offkeep", t_offkeepsana), ("sixslots", t_sixslots),
+       ("analysis", t_analysis), ("gmatch", t_gmatch),
+       ("dynamics", t_dynamics), ("freeze", t_freeze),
+       ("anasrc", t_anasrc), ("cpu", t_cpu)]
+
+IN_L = IN_R = None
+
+
+def main():
+    global IN_L, IN_R
+    os.makedirs(WORK, exist_ok=True)
+    if not os.path.exists(os.path.join(EFFECTS, FX)):
+        sys.exit("%s is not installed in %s" % (FX, EFFECTS))
+    build_debug_fx()
+
+    n = int(SR * 8.0)
+    IN_L, IN_R = sine(997.0, 0.4, n), sine(1499.0, 0.4, n)
+    write_wav_f32(os.path.join(WORK, "input.wav"), SR, [IN_L, IN_R])
+
+    cal = sine(1000.0, 0.5, n)
+    write_wav_f32(os.path.join(WORK, "cal_in.wav"), SR, [cal, list(cal)])
+
+    n2 = int(SR * 14.0)
+    dyn = sine(1500.0, 1.0, n2)
+    for t in range(n2):                      # 20 dB step every 0.5 s
+        dyn[t] *= 0.5 if (t // (SR // 2)) % 2 == 0 else 0.05
+    write_wav_f32(os.path.join(WORK, "dyn_in.wav"), SR, [dyn, list(dyn)])
+
+    sel = sys.argv[1:]
+    for name, fn in ALL:
+        if sel and name not in sel:
+            continue
+        try:
+            fn()
+        except Exception as e:
+            report(name, False, "EXCEPTION %s" % e)
+    if not os.environ.get("MIXREF_KEEP_DBG"):
+        # don't leave a test build sitting in the user's FX browser
+        try:
+            os.remove(os.path.join(EFFECTS, FXDBG))
+        except OSError:
+            pass
+    bad = [n for n, ok in RESULTS if not ok]
+    print("----\n%d/%d passed" % (len(RESULTS) - len(bad), len(RESULTS)))
+    sys.exit(1 if bad else 0)
+
+
+if __name__ == "__main__":
+    main()

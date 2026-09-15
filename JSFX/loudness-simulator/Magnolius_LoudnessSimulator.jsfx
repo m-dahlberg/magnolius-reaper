@@ -1,0 +1,207 @@
+desc:Loudness Simulator (contour EQ + upward compression + bs2b crossfeed)
+// @description Loudness Simulator
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Makes quiet monitoring sound like loud monitoring. One Simulated Loudness
+//   control drives an equal-loudness contour EQ, a two-band upward compressor
+//   and optional bs2b crossfeed together.
+//
+//   MONITORING ONLY. Put it last on the master bus and bypass it before
+//   rendering - everything it does is meant to be undone by listening louder.
+//
+//   The contour reaches +10 dB at 200 Hz and +4 dB at 6.5 kHz at full setting.
+//   A gate below -70 dBFS keeps hiss and room tone from being lifted with
+//   everything else.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - mastering loudness contour crossfeed
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+slider1:0<0,100,1>Simulated Loudness
+slider2:0<-12,12,0.1>Makeup Gain (dB)
+slider3:700<300,1500,1>Crossfeed Freq (Hz)
+slider4:5.0<0,10,0.1>Crossfeed Level (dB, 0=off)
+slider5:comp_thresh=-24<-60,0,0.5>Comp Threshold (dB)
+slider6:comp_ratio=2.0<1,8,0.01>Comp Ratio (1:N)
+slider7:comp_range=8<0,18,0.1>Comp Max Lift (dB)
+slider8:comp_knee=6<0,24,0.1>Comp Knee (dB)
+
+@init
+TINY  = 10^(-20);      // no scientific notation in EEL2 - this is -200 dB
+LOW_F  = 200;  LOW_MAX  = 10;   // contour low shelf  at slider1 = 100
+HIGH_F = 6500; HIGH_MAX = 4;    // contour high shelf at slider1 = 100
+DET_LO_F = 250; DET_HI_F = 5000;
+GATE_DB = -70; GATE_W = 6;      // lift tapers out below here so hiss stays put
+REFRESH = 32;                   // shelf redesign interval, samples
+
+// ---- memory map -------------------------------------------------------
+// C[0..19]   4 biquad coefficient sets x 5 words
+//   ci 0  = contour low shelf  (dynamic: LOW_MAX*amt  + gLdb)
+//   ci 5  = contour high shelf (dynamic: HIGH_MAX*amt + gHdb)
+//   ci 10 = detector LPF, ci 15 = detector HPF
+// St[0..31] 8 biquad states x 4 words (real addresses 200..231)
+//   si 0/4   low shelf L/R      si 8/12  high shelf L/R
+//   si 16/20 det LPF L/R        si 24/28 det HPF L/R
+C  = 0;
+St = 200;
+
+function setbq(ci,b0,b1,b2,a0,a1,a2)(
+  C[ci]=b0/a0; C[ci+1]=b1/a0; C[ci+2]=b2/a0; C[ci+3]=a1/a0; C[ci+4]=a2/a0;
+);
+function bq(in,ci,si) local(o)(
+  o = C[ci]*in + C[ci+1]*St[si] + C[ci+2]*St[si+1] - C[ci+3]*St[si+2] - C[ci+4]*St[si+3];
+  St[si+1]=St[si]; St[si]=in; St[si+3]=St[si+2]; St[si+2]=o; o;
+);
+function lowshelf(ci,f,g) local(A,w,cw,sw,al,s2,b0,b1,b2,a0,a1,a2)(
+  f=min(f,srate*0.45);
+  A=10^(g/40); w=2*$pi*f/srate; cw=cos(w); sw=sin(w); al=sw*0.5*sqrt(2); s2=2*sqrt(A)*al;
+  b0=A*((A+1)-(A-1)*cw+s2); b1=2*A*((A-1)-(A+1)*cw); b2=A*((A+1)-(A-1)*cw-s2);
+  a0=(A+1)+(A-1)*cw+s2; a1=-2*((A-1)+(A+1)*cw); a2=(A+1)+(A-1)*cw-s2;
+  setbq(ci,b0,b1,b2,a0,a1,a2);
+);
+function highshelf(ci,f,g) local(A,w,cw,sw,al,s2,b0,b1,b2,a0,a1,a2)(
+  f=min(f,srate*0.45);
+  A=10^(g/40); w=2*$pi*f/srate; cw=cos(w); sw=sin(w); al=sw*0.5*sqrt(2); s2=2*sqrt(A)*al;
+  b0=A*((A+1)+(A-1)*cw+s2); b1=-2*A*((A-1)+(A+1)*cw); b2=A*((A+1)+(A-1)*cw-s2);
+  a0=(A+1)-(A-1)*cw+s2; a1=2*((A-1)-(A+1)*cw); a2=(A+1)-(A-1)*cw-s2;
+  setbq(ci,b0,b1,b2,a0,a1,a2);
+);
+function lpf(ci,f) local(w,cw,sw,al,b0,b1,b2,a0,a1,a2)(
+  f=min(f,srate*0.45);
+  w=2*$pi*f/srate; cw=cos(w); sw=sin(w); al=sw/(2*0.7071);
+  b0=(1-cw)*0.5; b1=1-cw; b2=(1-cw)*0.5; a0=1+al; a1=-2*cw; a2=1-al;
+  setbq(ci,b0,b1,b2,a0,a1,a2);
+);
+function hpf(ci,f) local(w,cw,sw,al,b0,b1,b2,a0,a1,a2)(
+  f=min(f,srate*0.45);
+  w=2*$pi*f/srate; cw=cos(w); sw=sin(w); al=sw/(2*0.7071);
+  b0=(1+cw)*0.5; b1=-(1+cw); b2=(1+cw)*0.5; a0=1+al; a1=-2*cw; a2=1-al;
+  setbq(ci,b0,b1,b2,a0,a1,a2);
+);
+function tcoef(ms)( exp(-1/(max(ms,0.01)*0.001*srate)); );
+
+// Upward-compression static curve: how much lift for a given band level.
+// Mirror image of a downward-compressor knee - the "overshoot" is how far
+// BELOW the threshold we are. Audio thread only: locals are static in EEL2,
+// so @gfx must never call this.
+function lift_db(ldb,thr) local(x,g)(
+  x = thr - ldb;
+  x <= -knee_half ? ( g = 0; ) :
+  x <   knee_half ? ( g = slope*sqr(x + knee_half)/(4*knee_half); ) :
+                    ( g = slope*x; );
+  g * min(max((ldb - GATE_DB)/GATE_W, 0), 1);
+);
+
+// The contour shelves carry the lift, so they are redesigned every REFRESH
+// samples. Parallel-adding LPF/HPF band copies instead would cut the midrange
+// by ~1.5 dB whenever the lift engages (phase-shifted bands subtract).
+function refresh_shelves()(
+  lowshelf (0, LOW_F,  ctr_lo + gLdb);
+  highshelf(5, HIGH_F, ctr_hi + gHdb);
+);
+
+function update() local(fd,gb_lo,gb_hi,g_lo,g_hi,fc_hi,xx)(
+  amt    = slider1*0.01;
+  ctr_lo = amt*LOW_MAX;
+  ctr_hi = amt*HIGH_MAX;
+  mk     = 10^(slider2/20);
+
+  lpf(10,DET_LO_F); hpf(15,DET_HI_F);
+
+  thrL      = comp_thresh;
+  thrH      = comp_thresh - 6;
+  slope     = 1 - 1/max(comp_ratio,1);
+  knee_half = max(comp_knee,0.01)*0.5;
+  rangeL    = amt*comp_range;
+  rangeH    = amt*comp_range*0.5;
+
+  rms_coef = exp(-1/(0.030*srate));
+  // per-band ballistics are deliberately fixed: the low band needs to move
+  // slower than the high band or the lift audibly pumps on bass transients
+  atkL=tcoef(40); relL=tcoef(200);
+  atkH=tcoef(15); relH=tcoef(120);
+
+  // ---- crossfeed: libbs2b init(), including its two DIFFERENT poles ----
+  xf_on = slider4 >= 0.05;
+  xf_on ? (
+    fd    = min(max(slider4,1),15);
+    gb_lo = fd*(-5/6) - 3;
+    gb_hi = fd/6 - 3;
+    g_lo  = 10^(gb_lo/20);
+    g_hi  = 1 - 10^(gb_hi/20);
+    fc_hi = min(slider3 * 2^((gb_lo - 20*log10(g_hi))/12), srate*0.45);
+    xx = exp(-2*$pi*min(slider3,srate*0.45)/srate);
+    b1_lo = xx; a0_lo = g_lo*(1-xx);
+    xx = exp(-2*$pi*fc_hi/srate);
+    b1_hi = xx; a0_hi = 1 - g_hi*(1-xx); a1_hi = -xx;
+    cf_gain = 1/(1 - g_hi + g_lo);
+  );
+
+  refresh_shelves();
+);
+update();
+
+@slider
+update();
+
+@sample
+// ---- detector: taps the RAW input, never the shelf output ----------------
+// The lift lives inside the contour shelves; detecting after them would close
+// a feedback loop.
+dl0 = bq(spl0,10,16); dl1 = bq(spl1,10,20);
+dsq = (dl0*dl0 + dl1*dl1)*0.5;
+rmsL = dsq + (rmsL - dsq)*rms_coef;
+lvL = 10*log10(max(rmsL,TINY));
+tL = min(lift_db(lvL,thrL), rangeL);
+cf = tL > gLdb ? atkL : relL;
+gLdb = tL + (gLdb - tL)*cf;
+
+dh0 = bq(spl0,15,24); dh1 = bq(spl1,15,28);
+dsq = (dh0*dh0 + dh1*dh1)*0.5;
+rmsH = dsq + (rmsH - dsq)*rms_coef;
+lvH = 10*log10(max(rmsH,TINY));
+tH = min(lift_db(lvH,thrH), rangeH);
+cf = tH > gHdb ? atkH : relH;
+gHdb = tH + (gHdb - tH)*cf;
+
+refresh_ctr += 1;
+refresh_ctr >= REFRESH ? ( refresh_ctr = 0; refresh_shelves(); );
+
+// ---- contour + lift, one shelf pair per channel --------------------------
+outL = bq(bq(spl0,0,0),5,8)*mk;
+outR = bq(bq(spl1,0,4),5,12)*mk;
+
+// ---- crossfeed -----------------------------------------------------------
+xf_on ? (
+  cf_loL = a0_lo*outL + b1_lo*cf_loL;
+  cf_loR = a0_lo*outR + b1_lo*cf_loR;
+  cf_hiL = a0_hi*outL + a1_hi*cf_asL + b1_hi*cf_hiL;
+  cf_hiR = a0_hi*outR + a1_hi*cf_asR + b1_hi*cf_hiR;
+  cf_asL = outL; cf_asR = outR;
+  spl0 = (cf_hiL + cf_loR)*cf_gain;
+  spl1 = (cf_hiR + cf_loL)*cf_gain;
+) : (
+  spl0 = outL; spl1 = outR;
+);
+
+@gfx 440 144
+gfx_r=gfx_g=gfx_b=0.8; gfx_x=10; gfx_y=10;
+gfx_drawstr("Simulated loudness: "); gfx_drawnumber(slider1,0); gfx_drawstr("%");
+gfx_x=10; gfx_y=34; gfx_drawstr("Low band lift:  "); gfx_drawnumber(gLdb,2); gfx_drawstr(" dB");
+gfx_x=10; gfx_y=58; gfx_drawstr("High band lift: "); gfx_drawnumber(gHdb,2); gfx_drawstr(" dB");
+gfx_x=10; gfx_y=82; gfx_drawstr("Comp: thr "); gfx_drawnumber(comp_thresh,1);
+gfx_drawstr(" dB  1:"); gfx_drawnumber(comp_ratio,2);
+gfx_drawstr("  max "); gfx_drawnumber(comp_range,1); gfx_drawstr(" dB");
+gfx_x=10; gfx_y=106; gfx_drawstr("Crossfeed: ");
+slider4 >= 0.05 ? (
+  gfx_drawnumber(slider4,1); gfx_drawstr(" dB @ "); gfx_drawnumber(slider3,0); gfx_drawstr(" Hz");
+) : ( gfx_drawstr("off"); );
+gfx_r=gfx_g=gfx_b=0.45; gfx_x=380; gfx_y=126; gfx_drawstr("v0.2");

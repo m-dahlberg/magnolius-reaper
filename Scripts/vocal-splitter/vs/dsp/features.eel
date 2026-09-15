@@ -1,0 +1,118 @@
+// @noindex
+// Vocal Splitter -- per-sample feature kernel.
+//
+// Runs once per audio block. Reads an interleaved sample buffer and reduces it
+// to six per-frame accumulator arrays. Everything downstream works on frames,
+// so this is the only code that touches individual samples.
+//
+// Filter state and the previous sample sign are EEL globals: they persist
+// between Execute calls so that blocks join seamlessly. Set _RESET=1 on the
+// first block of a take to clear them.
+//
+// Inputs set from Lua:
+//   _SAMPLES   address of interleaved input, _NSAMP * _NCHAN slots
+//   _NSAMP     samples per channel in this block
+//   _NCHAN     channel count
+//   _NFRAMES   frames to emit
+//   _HOP       samples per frame
+//   _G_LO _K_LO _G_HI _K_HI   SVF coefficients (computed in Lua)
+//   _R_DC      one-pole DC blocker pole (computed in Lua)
+//   _RESET     1 to clear filter state
+//
+// Outputs (addresses set from Lua, _NFRAMES slots each):
+//   _OUT_SUMSQ  sum of x^2          -- level
+//   _OUT_PEAK   max |x|             -- crest factor
+//   _OUT_ELOW   sum of lowpass^2    -- voicing
+//   _OUT_EHIGH  sum of highpass^2   -- sibilance
+//   _OUT_ZCR    zero-crossing count -- noise vs tone
+//   _OUT_N      samples actually accumulated (last frame may be short)
+//
+// DC is removed here, by a 20 Hz one-pole blocker, and not downstream. It has
+// to happen before the accumulators split or they disagree: subtracting a
+// per-frame mean from the total while leaving the band sums alone is a
+// high-pass on one side of the ratio only, and at a 2.7 ms frame that
+// high-pass reaches up past 150 Hz. It took a male fundamental out of the
+// denominator while the voicing band kept it, so voice_ratio -- a *fraction*
+// -- came back above 1 on 60% of a real take, and every voicing test
+// downstream was reading a number that could not mean what it said.
+
+_RESET ? (
+  lo_ic1 = 0; lo_ic2 = 0;
+  hi_ic1 = 0; hi_ic2 = 0;
+  dc_x1 = 0; dc_y1 = 0;
+  prev_sign = 1;
+);
+
+// TPT state-variable filter coefficients. One SVF gives lowpass and highpass
+// from the same structure, so both bands cost one filter each.
+a1_lo = 1.0 / (1.0 + _G_LO * (_G_LO + _K_LO));
+a2_lo = _G_LO * a1_lo;
+a3_lo = _G_LO * a2_lo;
+
+a1_hi = 1.0 / (1.0 + _G_HI * (_G_HI + _K_HI));
+a2_hi = _G_HI * a1_hi;
+a3_hi = _G_HI * a2_hi;
+
+inv_chan = 1.0 / _NCHAN;
+
+f = 0;
+while (f < _NFRAMES) (
+
+  s0 = f * _HOP;
+  n  = min(_HOP, _NSAMP - s0);
+
+  acc_sq = 0; acc_pk = 0; acc_lo = 0; acc_hi = 0; acc_zc = 0;
+
+  i = 0;
+  while (i < n) (
+
+    // mono sum
+    base = (s0 + i) * _NCHAN;
+    c = 0; x = 0;
+    while (c < _NCHAN) (
+      x = x + _SAMPLES[base + c];
+      c = c + 1;
+    );
+    x = x * inv_chan;
+
+    // DC blocker, ahead of every accumulator so they all see one signal.
+    dc_y = x - dc_x1 + _R_DC * dc_y1;
+    dc_x1 = x; dc_y1 = dc_y; x = dc_y;
+
+    acc_sq  = acc_sq + x * x;
+    ax      = abs(x);
+    acc_pk  = max(acc_pk, ax);
+
+    sg = x >= 0 ? 1 : -1;
+    acc_zc = acc_zc + (sg != prev_sign);
+    prev_sign = sg;
+
+    // lowpass band
+    v3 = x - lo_ic2;
+    v1 = a1_lo * lo_ic1 + a2_lo * v3;
+    v2 = lo_ic2 + a2_lo * lo_ic1 + a3_lo * v3;
+    lo_ic1 = 2 * v1 - lo_ic1;
+    lo_ic2 = 2 * v2 - lo_ic2;
+    acc_lo = acc_lo + v2 * v2;
+
+    // highpass band
+    v3 = x - hi_ic2;
+    v1 = a1_hi * hi_ic1 + a2_hi * v3;
+    v2 = hi_ic2 + a2_hi * hi_ic1 + a3_hi * v3;
+    hi_ic1 = 2 * v1 - hi_ic1;
+    hi_ic2 = 2 * v2 - hi_ic2;
+    hp = x - _K_HI * v1 - v2;
+    acc_hi = acc_hi + hp * hp;
+
+    i = i + 1;
+  );
+
+  _OUT_SUMSQ[f] = acc_sq;
+  _OUT_PEAK[f]  = acc_pk;
+  _OUT_ELOW[f]  = acc_lo;
+  _OUT_EHIGH[f] = acc_hi;
+  _OUT_ZCR[f]   = acc_zc;
+  _OUT_N[f]     = n;
+
+  f = f + 1;
+);

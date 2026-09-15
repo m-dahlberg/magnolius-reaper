@@ -1,0 +1,702 @@
+desc:Vari-Mu Compressor (F670-style limiter)
+// @description Vari-Mu Compressor
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Vari-mu compressor/limiter in the Fairchild 670 idiom, with a custom GUI.
+//
+//   Derived from 'Fairly Childish' by Thomas Scott Stillwell (Copyright 2006),
+//   with the variable-mu detector topology and time-constant behaviour that
+//   gives the original its program-dependent release.
+//
+//   License: 3-clause BSD, matching the upstream work. See the LICENSE file in
+//   this package's folder.
+// @changelog
+//   Initial ReaPack release
+
+// tags - dynamics compressor limiter vari-mu stereo
+// License: 3-clause BSD. See LICENSE.
+//
+// Derived from "Fairly Childish" by Thomas Scott Stillwell (Copyright 2006,
+// all rights reserved), which ships with REAPER as sstillwell/fairlychildish2.
+// The variable-mu detector -- RMS window, program-dependent ratio driven by
+// the Bias control, the six Fairchild time constants and the "blown
+// capacitor" detector slope -- is his, and is reproduced here unchanged: at
+// default settings this plugin renders the same audio as the original to
+// within 1e-6 (tools/render_test.py, test "original").
+//
+// Changed from the original:
+//   * dead code removed: @init read attime/reltime/rmstime, which are never
+//     defined (the real names are lattime/lreltime/lrmstime); dcoffset was
+//     used but never assigned anywhere, so it was always 0.
+//   * the two ~90%-identical @slider mode branches collapsed into one, and
+//     the twice-written 6-way time-constant ladder replaced by two tables.
+//   * the duplicated per-channel @sample detector became one function called
+//     twice through EEL2 instance namespaces.
+//   * MODE SWITCH NO LONGER DESTROYS SETTINGS.  The original assigned
+//     slider2/4/6/9/11 from the left-hand sliders in L/R mode, so the Vert
+//     settings were gone when you switched back (and, with no
+//     slider_automate(), REAPER's UI never even showed the change).  The
+//     right chain now mirrors the left chain's derived values instead.
+//   * ext_gr_meter reported the Lat channel only in Lat/Vert mode; it now
+//     reports min(left, right), and it is dB and non-positive (see
+//     REAPER whatsnew.txt "add ext_gr_meter ... set to non-positive values").
+//   * added: Max Ratio (was hardcoded 20), sidechain HPF, stereo link,
+//     wet/dry mix, output trim -- every one defaulting to the original
+//     behaviour, so the defaults are still bit-identical.
+//   * added a custom @gfx panel: knobs, a scrolling input waveform with both
+//     gain-reduction traces drawn over it, and in/GR/out meters.
+//
+// Every slider label starts with '-', which hides it from REAPER's generic
+// slider list (the panel replaces it).  Hidden sliders are still fully
+// automatable and still appear in the Param menu -- verified with
+// TrackFX_GetNumParams, see tools/render_test.py test "params".
+//
+// THREADING - do not undo this.  @gfx runs on the UI thread; @init/@slider/
+// @sample run on the audio thread, and ALL globals AND all function locals
+// are shared between them.  So: every @gfx variable is g_-prefixed, @gfx
+// loop counters are gi/gj and audio-side ones ai/aj, and no name is used on
+// both sides.  The knob helpers are defined INSIDE @gfx, below every
+// audio-side section, so the audio thread cannot call them and stomp their
+// static locals.  @gfx never calls det().  It looks like gratuitous
+// verbosity; it prevents real corruption.
+//
+// EEL2 is case-insensitive: HIST_N and hist_n would be ONE variable.  Never
+// distinguish two names by case alone.  There is also no scientific
+// notation - 1e-30 is a silent syntax error that kills the whole section.
+//
+// v0.2
+
+options:gfx_hz=30
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+slider1:lthr_db=0<-60,0,0.1>-L/Mid Threshold (dB)
+slider2:rthr_db=0<-60,0,0.1>-R/Side Threshold (dB)
+slider3:lbias_pct=70<0,100,0.1>-L/Mid Bias (%)
+slider4:rbias_pct=70<0,100,0.1>-R/Side Bias (%)
+slider5:lmakeup_db=0<-30,30,0.1>-L/Mid Makeup (dB)
+slider6:rmakeup_db=0<-30,30,0.1>-R/Side Makeup (dB)
+slider7:agc_mode=2<0,3,1{L/R (Blown Cap),Mid/Side (Blown Cap),L/R,Mid/Side}>-Mode
+slider8:ltc=1<1,6,1>-L/Mid Time Constant
+slider9:rtc=1<1,6,1>-R/Side Time Constant
+slider10:lrms_us=100<1,10000,1>-L/Mid RMS Window (us)
+slider11:rrms_us=100<1,10000,1>-R/Side RMS Window (us)
+slider12:ratio_max=20<2,30,0.1>-Max Ratio
+slider13:sc_hz=20<20,500,1>-Sidechain HPF (Hz)
+slider14:link_pct=100<0,100,1>-Stereo Link (%)
+slider15:mix_pct=100<0,100,1>-Mix (%)
+slider16:trim_db=0<-24,24,0.1>-Output Trim (dB)
+slider17:hist_s=6<1,30,0.5>-Display History (s)
+
+@init
+ext_tail_size = -1;   // a 25 s release needs the tail
+ext_noinit = 1;       // do not re-run @init on transport start (keeps the ring)
+
+LOG2DB = 8.6858896380650366;    // 20/ln(10)
+DB2LOG = 0.11512925464970229;   // ln(10)/20
+TINY   = 10^(-30);              // NOT 1e-30 - see the header note
+
+HIST_N = 1024;                  // power of two: index with & MASK, never %
+HMASK  = HIST_N - 1;
+
+// The detector, verbatim Stillwell maths.  One function, two instances -
+// safe because BOTH calls are on the audio thread; the static-locals hazard
+// is only across threads.
+function det(x)
+  instance(runave rundb threshv rmscoef atcoef relcoef bias gr grv)
+  local(sq d over cr)
+(
+  sq = x*x;
+  runave = sq + rmscoef*(runave - sq);
+  d = sqrt(max(0, runave));
+  over = max(0, capsc*log(max(d, TINY)/threshv));
+  over > rundb ? ( rundb = over + atcoef*(rundb - over); )
+               : ( rundb = over + relcoef*(rundb - over); );
+  over = max(rundb, 0);
+  bias > 0 ? ( cr = 1 + (ratio_max - 1)*sqrt(over/bias); )
+           : ( cr = ratio_max; );
+  gr = -over*(cr - 1)/cr;               // <= 0 dB
+  grv = gr < 0 ? exp(gr*DB2LOG) : 1;    // skip exp() when not compressing
+);
+
+initdone != 20260908 ? (
+  initdone = 20260908;
+
+  // ---- memory map (bump allocated; keep this comment in step) ----
+  //   0            TCATK[6]   attack time per Time Constant index
+  //   8            TCREL[6]   release time per Time Constant index
+  //   16           hIMIN[1024]  display: input min per column
+  //   1040         hIMAX[1024]  display: input max per column
+  //   2064         hGRL [1024]  display: L/Mid GR depth per column, dB, +ve
+  //   3088         hGRR [1024]  display: R/Side GR depth per column
+  TCATK = 0;
+  TCREL = 8;
+  hIMIN = 16;
+  hIMAX = hIMIN + HIST_N;
+  hGRL  = hIMAX + HIST_N;
+  hGRR  = hGRL  + HIST_N;
+
+  // The six Fairchild time constants, from the original's 12 if-blocks.
+  TCATK[0]=0.0002; TCREL[0]=0.300;
+  TCATK[1]=0.0002; TCREL[1]=0.800;
+  TCATK[2]=0.0004; TCREL[2]=2.000;
+  TCATK[3]=0.0008; TCREL[3]=5.000;
+  TCATK[4]=0.0002; TCREL[4]=10.000;
+  TCATK[5]=0.0004; TCREL[5]=25.000;
+
+  memset(hIMIN, 0, HIST_N*4);   // hIMIN..hGRR are contiguous
+  hw = 0; binN = 0;
+  binIMin = 0; binIMax = 0; binGRL = 0; binGRR = 0;
+
+  l.runave = 0; l.rundb = 0; l.gr = 0; l.grv = 1;
+  r.runave = 0; r.rundb = 0; r.gr = 0; r.grv = 1;
+  hp0 = 0; hp1 = 0; px0 = 0; px1 = 0;
+  mtr_in = 0; mtr_out = 0; mtr_gr = 0;
+);
+
+// below here: srate may have changed, so refresh rate-dependent scalars only
+meter_rel = exp(-1/(0.30*srate));
+
+// Everything derived from the sliders, in one place.  Called from @slider
+// (the host changed something) AND from @gfx (a knob was dragged).
+//
+// *** DO NOT ADD local() OR PARAMETERS TO THIS FUNCTION. ***
+//
+// It is deliberately called from both threads, which is safe only because it
+// has no parameters, no locals and no loops -- every name in it is a global
+// written deterministically from the slider values, so two concurrent calls
+// compute identical results.  Adding a local or a loop counter would make it
+// exactly the cross-thread corruption the header note warns about.  This is
+// the same exception MixReference documents for clearstats().
+//
+// It must be callable from @gfx because neither slider_automate() nor
+// sliderchange() re-runs @slider (both verified), and @block does not run on
+// a stopped track -- so without this, no knob would do anything.
+function recalc()
+(amode = agc_mode|0;
+agc   = amode & 1;                   // 0 = L/R, 1 = Mid/Side
+// "Blown capacitor" (modes 0 and 1) runs the detector at 2.08x the dB slope.
+capsc = (amode & 2) ? LOG2DB : LOG2DB*2.08136898;
+
+ltcv = max(1, min(6, ltc|0));
+l.threshv = exp(lthr_db*DB2LOG);
+l.bias    = 80*lbias_pct*0.01;
+l.atcoef  = exp(-1/(TCATK[ltcv-1]*srate));
+l.relcoef = exp(-1/(TCREL[ltcv-1]*srate));
+l.rmscoef = exp(-1/(max(lrms_us,1)*0.000001*srate));
+lmakeupv  = exp(lmakeup_db*DB2LOG);
+
+agc ? (
+  rtcv = max(1, min(6, rtc|0));
+  r.threshv = exp(rthr_db*DB2LOG);
+  r.bias    = 80*rbias_pct*0.01;
+  r.atcoef  = exp(-1/(TCATK[rtcv-1]*srate));
+  r.relcoef = exp(-1/(TCREL[rtcv-1]*srate));
+  r.rmscoef = exp(-1/(max(rrms_us,1)*0.000001*srate));
+  rmakeupv  = exp(rmakeup_db*DB2LOG);
+) : (
+  // L/R mode: the right chain mirrors the left chain's DERIVED values and
+  // keeps its own state.  The original wrote slider2/4/6/9/11 in place here,
+  // which silently destroyed the user's Vert settings on every mode switch.
+  r.threshv = l.threshv;  r.bias    = l.bias;
+  r.atcoef  = l.atcoef;   r.relcoef = l.relcoef;
+  r.rmscoef = l.rmscoef;  rmakeupv  = lmakeupv;
+);
+
+link  = link_pct*0.01;
+wet   = mix_pct*0.01;
+dry   = 1 - wet;
+trimv = exp(trim_db*DB2LOG);
+sc_on = sc_hz > 20;                  // fully bypassed at the minimum
+sc_a  = exp(-2*$pi*sc_hz/srate);
+col_len = max(1, floor(srate*hist_s/HIST_N));
+);
+
+@slider
+recalc();
+
+@sample
+in0 = spl0;
+in1 = spl1;
+
+agc ? ( mid = (in0 + in1)*0.5; sid = (in0 - in1)*0.5; d0 = mid; d1 = sid; )
+    : ( d0 = in0; d1 = in1; );
+
+// sidechain high-pass (detector only), one-pole DC-blocker form
+sc_on ? (
+  hp0 = sc_a*(hp0 + d0 - px0); px0 = d0; d0 = hp0;
+  hp1 = sc_a*(hp1 + d1 - px1); px1 = d1; d1 = hp1;
+);
+
+d0 = abs(d0);
+d1 = abs(d1);
+
+// Stereo link, L/R mode only - Mid/Side is deliberately independent, which
+// is the whole point of that mode.  Blending at the rectified-sample stage
+// means link = 1 feeds both chains max(|L|,|R|), which IS the original's
+// single detector, so the default stays bit-identical.
+!agc ? (
+  dmx = max(d0, d1);
+  d0 += link*(dmx - d0);
+  d1 += link*(dmx - d1);
+);
+
+l.det(d0);
+r.det(d1);
+
+agc ? (
+  mid *= l.grv*lmakeupv;
+  sid *= r.grv*rmakeupv;
+  w0 = mid + sid;
+  w1 = mid - sid;
+) : (
+  w0 = in0*l.grv*lmakeupv;
+  w1 = in1*r.grv*rmakeupv;
+);
+
+spl0 = (dry*in0 + wet*w0)*trimv;
+spl1 = (dry*in1 + wet*w1)*trimv;
+
+ext_gr_meter = min(l.gr, r.gr);      // dB, non-positive; was L-only
+
+// ---- meters (audio side; @gfx only reads these scalars) ----
+apk = max(abs(in0), abs(in1));
+mtr_in  = apk > mtr_in  ? apk : mtr_in*meter_rel;
+apk = max(abs(spl0), abs(spl1));
+mtr_out = apk > mtr_out ? apk : mtr_out*meter_rel;
+agr = -min(l.gr, r.gr);
+mtr_gr  = agr > mtr_gr  ? agr : mtr_gr*meter_rel;
+
+// ---- scrolling display: one column per col_len samples ----
+binIMin = min(binIMin, min(in0, in1));
+binIMax = max(binIMax, max(in0, in1));
+binGRL  = max(binGRL, -l.gr);
+binGRR  = max(binGRR, -r.gr);
+binN += 1;
+binN >= col_len ? (
+  hIMIN[hw] = binIMin; hIMAX[hw] = binIMax;
+  hGRL[hw]  = binGRL;  hGRR[hw]  = binGRR;
+  hw = (hw + 1) & HMASK;
+  binN = 0;
+  binIMin = 0; binIMax = 0; binGRL = 0; binGRR = 0;
+);
+
+@gfx 900 560
+// ---------------------------------------------------------------------------
+// UI THREAD ONLY.  Every variable here is g_-prefixed, loop counters are
+// gi/gj, and these helper functions are defined HERE -- below every
+// audio-side section -- so the audio thread cannot call them.  EEL2 function
+// locals are static and shared between threads; a shared helper would stomp
+// the audio thread's copy mid-sample.  See the threading note at the top.
+//
+// @gfx only READS audio-side scalars (agc, mtr_*, hw) and the history ring.
+// It never writes them and never calls det().
+// ---------------------------------------------------------------------------
+
+function g_cstr(cx cy) (
+  gfx_measurestr(#g_s, g_tw, g_th);
+  gfx_x = cx - g_tw*0.5; gfx_y = cy;
+  gfx_drawstr(#g_s);
+);
+
+function g_hit(kx ky kr) (
+  sqr(g_mx - kx) + sqr(g_my - ky) <= sqr(kr + 7);
+);
+
+// The dial face. frac is 0..1 across a 270-degree sweep opening at the bottom.
+function g_dial(kx ky kr frac dim) local(aa gj) (
+  gfx_set(0.15,0.15,0.18,1);
+  gfx_circle(kx, ky, kr, 1, 1);
+  gfx_set(0.24,0.24,0.29,1);
+  gfx_arc(kx, ky, kr-2, -2.35619, 2.35619, 1);
+  frac > 0.001 ? (
+    dim ? gfx_set(0.34,0.36,0.40,1) : gfx_set(0.38,0.70,1.00,1);
+    gj = 0;
+    loop(3,
+      gfx_arc(kx, ky, kr-2-gj, -2.35619, -2.35619 + frac*4.71239, 1);
+      gj += 1;
+    );
+  );
+  aa = -2.35619 + frac*4.71239;
+  dim ? gfx_set(0.45,0.47,0.52,1) : gfx_set(0.90,0.92,0.96,1);
+  gfx_line(kx + sin(aa)*kr*0.32, ky - cos(aa)*kr*0.32,
+           kx + sin(aa)*kr*0.90, ky - cos(aa)*kr*0.90, 1);
+);
+
+// Vertical-drag control.  Returns the new value and sets g_dirty to `id`
+// (which IS the slider number) when it changed, so the caller can automate
+// exactly that slider.  Shift = fine, right-click = back to default.
+function g_ctl(id val lo hi step dflt dim) local(dv) (
+  dim ? ( val ) : (
+    g_click && g_hit(g_kx, g_ky, g_kr) ? ( g_cap = id; g_lasty = g_my; );
+    g_rclick && g_hit(g_kx, g_ky, g_kr) ? ( val = dflt; g_dirty = id; );
+    g_cap == id && g_my != g_lasty ? (
+      dv = (g_lasty - g_my)*step*((mouse_cap & 8) ? 0.1 : 1);
+      val = min(max(val + dv, lo), hi);
+      g_lasty = g_my;
+      g_dirty = id;
+    );
+    val;
+  );
+);
+
+// Integer stepper: one step per 14 px of drag, so a 1..6 control is usable.
+function g_stepctl(id val lo hi dflt dim) local(dv) (
+  dim ? ( val ) : (
+    g_click && g_hit(g_kx, g_ky, g_kr) ? ( g_cap = id; g_lasty = g_my; );
+    g_rclick && g_hit(g_kx, g_ky, g_kr) ? ( val = dflt; g_dirty = id; );
+    g_cap == id ? (
+      dv = floor((g_lasty - g_my)/14);
+      dv != 0 ? (
+        val = min(max(val + dv, lo), hi);
+        g_lasty -= dv*14;
+        g_dirty = id;
+      );
+    );
+    val;
+  );
+);
+
+gfx_setfont(1, "Arial", 13);
+gfx_set(0.07,0.07,0.08,1);
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+g_mx = mouse_x; g_my = mouse_y;
+g_click  = (mouse_cap & 1) && !(g_lastcap & 1);
+g_rclick = (mouse_cap & 2) && !(g_lastcap & 2);
+!(mouse_cap & 1) ? ( g_cap = 0; );
+g_dirty = 0;
+
+g_kr    = 19;
+g_x0    = 132;                 // centre of the first knob in a row
+g_pitch = 88;
+g_dimB  = !agc;                // R/Side row is inert in L/R mode
+g_rowa  = 80;
+g_rowb  = 164;
+g_rowc  = 248;
+g_rx    = 630;                 // right-hand column
+
+// ---------------------------------------------------------------- header
+gfx_set(0.85,0.86,0.90,1);
+gfx_x = 16; gfx_y = 8;
+gfx_drawstr("VARI-MU COMPRESSOR");
+gfx_set(0.45,0.45,0.50,1);
+gfx_x = gfx_w - 42; gfx_y = 8;
+gfx_drawstr("v0.2");           // bump on EVERY change: REAPER caches the
+                               // compiled JSFX per open FX instance, so a
+                               // stale instance is otherwise invisible
+
+// ---------------------------------------------------------------- row labels
+gfx_set(0.55,0.57,0.62,1);
+gfx_x = 16; gfx_y = g_rowa - 4;  gfx_drawstr(agc ? "MID" : "LEFT");
+g_dimB ? gfx_set(0.30,0.31,0.34,1) : gfx_set(0.55,0.57,0.62,1);
+gfx_x = 16; gfx_y = g_rowb - 4;  gfx_drawstr(agc ? "SIDE" : "RIGHT");
+gfx_set(0.55,0.57,0.62,1);
+gfx_x = 16; gfx_y = g_rowc - 4;  gfx_drawstr("GLOBAL");
+
+// ---------------------------------------------------------------- row A
+g_ky = g_rowa;
+
+g_kx = g_x0;
+gfx_set(0.60,0.62,0.66,1); #g_s = "Threshold"; g_cstr(g_kx, g_ky - 36);
+lthr_db = g_ctl(1, lthr_db, -60, 0, 0.5, 0, 0);
+g_dial(g_kx, g_ky, g_kr, (lthr_db + 60)/60, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.1f dB", lthr_db); g_cstr(g_kx, g_ky + 24);
+
+g_kx = g_x0 + g_pitch;
+gfx_set(0.60,0.62,0.66,1); #g_s = "Bias"; g_cstr(g_kx, g_ky - 36);
+lbias_pct = g_ctl(3, lbias_pct, 0, 100, 1, 70, 0);
+g_dial(g_kx, g_ky, g_kr, lbias_pct/100, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.0f %%", lbias_pct); g_cstr(g_kx, g_ky + 24);
+
+g_kx = g_x0 + g_pitch*2;
+gfx_set(0.60,0.62,0.66,1); #g_s = "Makeup"; g_cstr(g_kx, g_ky - 36);
+lmakeup_db = g_ctl(5, lmakeup_db, -30, 30, 0.5, 0, 0);
+g_dial(g_kx, g_ky, g_kr, (lmakeup_db + 30)/60, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.1f dB", lmakeup_db); g_cstr(g_kx, g_ky + 24);
+
+g_kx = g_x0 + g_pitch*3;
+gfx_set(0.60,0.62,0.66,1); #g_s = "Time Const"; g_cstr(g_kx, g_ky - 36);
+ltc = g_stepctl(8, ltc, 1, 6, 1, 0);
+g_dial(g_kx, g_ky, g_kr, (ltc - 1)/5, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%d", ltc); g_cstr(g_kx, g_ky + 24);
+
+g_kx = g_x0 + g_pitch*4;
+gfx_set(0.60,0.62,0.66,1); #g_s = "RMS Window"; g_cstr(g_kx, g_ky - 36);
+lrms_us = g_ctl(10, lrms_us, 1, 10000, 40, 100, 0);
+g_dial(g_kx, g_ky, g_kr, sqrt(lrms_us/10000), 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.0f us", lrms_us); g_cstr(g_kx, g_ky + 24);
+
+// ---------------------------------------------------------------- row B
+g_ky = g_rowb;
+g_dimB ? gfx_set(0.32,0.33,0.36,1) : gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0;
+#g_s = "Threshold"; g_cstr(g_kx, g_ky - 36);
+rthr_db = g_ctl(2, rthr_db, -60, 0, 0.5, 0, g_dimB);
+g_dial(g_kx, g_ky, g_kr, (rthr_db + 60)/60, g_dimB);
+g_dimB ? gfx_set(0.36,0.37,0.40,1) : gfx_set(0.85,0.86,0.90,1);
+sprintf(#g_s, "%.1f dB", rthr_db); g_cstr(g_kx, g_ky + 24);
+g_dimB ? gfx_set(0.32,0.33,0.36,1) : gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch;
+#g_s = "Bias"; g_cstr(g_kx, g_ky - 36);
+rbias_pct = g_ctl(4, rbias_pct, 0, 100, 1, 70, g_dimB);
+g_dial(g_kx, g_ky, g_kr, rbias_pct/100, g_dimB);
+g_dimB ? gfx_set(0.36,0.37,0.40,1) : gfx_set(0.85,0.86,0.90,1);
+sprintf(#g_s, "%.0f %%", rbias_pct); g_cstr(g_kx, g_ky + 24);
+g_dimB ? gfx_set(0.32,0.33,0.36,1) : gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*2;
+#g_s = "Makeup"; g_cstr(g_kx, g_ky - 36);
+rmakeup_db = g_ctl(6, rmakeup_db, -30, 30, 0.5, 0, g_dimB);
+g_dial(g_kx, g_ky, g_kr, (rmakeup_db + 30)/60, g_dimB);
+g_dimB ? gfx_set(0.36,0.37,0.40,1) : gfx_set(0.85,0.86,0.90,1);
+sprintf(#g_s, "%.1f dB", rmakeup_db); g_cstr(g_kx, g_ky + 24);
+g_dimB ? gfx_set(0.32,0.33,0.36,1) : gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*3;
+#g_s = "Time Const"; g_cstr(g_kx, g_ky - 36);
+rtc = g_stepctl(9, rtc, 1, 6, 1, g_dimB);
+g_dial(g_kx, g_ky, g_kr, (rtc - 1)/5, g_dimB);
+g_dimB ? gfx_set(0.36,0.37,0.40,1) : gfx_set(0.85,0.86,0.90,1);
+sprintf(#g_s, "%d", rtc); g_cstr(g_kx, g_ky + 24);
+g_dimB ? gfx_set(0.32,0.33,0.36,1) : gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*4;
+#g_s = "RMS Window"; g_cstr(g_kx, g_ky - 36);
+rrms_us = g_ctl(11, rrms_us, 1, 10000, 40, 100, g_dimB);
+g_dial(g_kx, g_ky, g_kr, sqrt(rrms_us/10000), g_dimB);
+g_dimB ? gfx_set(0.36,0.37,0.40,1) : gfx_set(0.85,0.86,0.90,1);
+sprintf(#g_s, "%.0f us", rrms_us); g_cstr(g_kx, g_ky + 24);
+
+g_dimB ? (
+  gfx_set(0.42,0.43,0.47,1);
+  gfx_x = g_x0 + g_pitch*4 + 44; gfx_y = g_ky - 4;
+  gfx_drawstr("follows Left");
+);
+
+// ---------------------------------------------------------------- row C
+g_ky = g_rowc;
+gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0;
+#g_s = "Max Ratio"; g_cstr(g_kx, g_ky - 36);
+ratio_max = g_ctl(12, ratio_max, 2, 30, 0.25, 20, 0);
+g_dial(g_kx, g_ky, g_kr, (ratio_max - 2)/28, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.1f:1", ratio_max); g_cstr(g_kx, g_ky + 24);
+gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch;
+#g_s = "SC HPF"; g_cstr(g_kx, g_ky - 36);
+sc_hz = g_ctl(13, sc_hz, 20, 500, 4, 20, 0);
+g_dial(g_kx, g_ky, g_kr, (sc_hz - 20)/480, 0);
+gfx_set(0.85,0.86,0.90,1);
+sc_hz > 20 ? sprintf(#g_s, "%.0f Hz", sc_hz) : (#g_s = "off");
+g_cstr(g_kx, g_ky + 24);
+gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*2;
+#g_s = "Stereo Link"; g_cstr(g_kx, g_ky - 36);
+link_pct = g_ctl(14, link_pct, 0, 100, 1, 100, agc);
+g_dial(g_kx, g_ky, g_kr, link_pct/100, agc);
+agc ? gfx_set(0.36,0.37,0.40,1) : gfx_set(0.85,0.86,0.90,1);
+agc ? (#g_s = "M/S: indep") : sprintf(#g_s, "%.0f %%", link_pct);
+g_cstr(g_kx, g_ky + 24);
+gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*3;
+#g_s = "Mix"; g_cstr(g_kx, g_ky - 36);
+mix_pct = g_ctl(15, mix_pct, 0, 100, 1, 100, 0);
+g_dial(g_kx, g_ky, g_kr, mix_pct/100, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.0f %%", mix_pct); g_cstr(g_kx, g_ky + 24);
+gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*4;
+#g_s = "Output Trim"; g_cstr(g_kx, g_ky - 36);
+trim_db = g_ctl(16, trim_db, -24, 24, 0.25, 0, 0);
+g_dial(g_kx, g_ky, g_kr, (trim_db + 24)/48, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.1f dB", trim_db); g_cstr(g_kx, g_ky + 24);
+gfx_set(0.60,0.62,0.66,1);
+
+g_kx = g_x0 + g_pitch*5;
+#g_s = "History"; g_cstr(g_kx, g_ky - 36);
+hist_s = g_ctl(17, hist_s, 1, 30, 0.25, 6, 0);
+g_dial(g_kx, g_ky, g_kr, (hist_s - 1)/29, 0);
+gfx_set(0.85,0.86,0.90,1); sprintf(#g_s, "%.1f s", hist_s); g_cstr(g_kx, g_ky + 24);
+
+// ---------------------------------------------------------------- mode buttons
+gfx_set(0.55,0.57,0.62,1);
+gfx_x = g_rx; gfx_y = 44;
+gfx_drawstr("MODE");
+gi = 0;
+loop(4,
+  g_bx = g_rx + (gi & 1)*130;
+  g_by = 62 + (gi > 1 ? 30 : 0);
+  agc_mode == gi ? gfx_set(0.20,0.34,0.48,1) : gfx_set(0.16,0.16,0.19,1);
+  gfx_rect(g_bx, g_by, 124, 26);
+  agc_mode == gi ? gfx_set(0.55,0.80,1.00,1) : gfx_set(0.30,0.31,0.35,1);
+  gfx_rect(g_bx, g_by, 124, 1); gfx_rect(g_bx, g_by+25, 124, 1);
+  gfx_rect(g_bx, g_by, 1, 26);  gfx_rect(g_bx+123, g_by, 1, 26);
+  agc_mode == gi ? gfx_set(0.92,0.94,0.98,1) : gfx_set(0.58,0.60,0.64,1);
+  gi == 0 ? (#g_s = "L/R  blown cap") :
+  gi == 1 ? (#g_s = "M/S  blown cap") :
+  gi == 2 ? (#g_s = "L/R") : (#g_s = "M/S");
+  g_cstr(g_bx + 62, g_by + 6);
+  g_click && g_mx >= g_bx && g_mx < g_bx+124
+          && g_my >= g_by && g_my < g_by+26 ? (
+    agc_mode = gi;
+    g_dirty = 7;
+  );
+  gi += 1;
+);
+
+// ---------------------------------------------------------------- automation
+// One knob is dragged at a time, so g_dirty holds the slider number that
+// changed.  slider_automate takes a bitmask of slider indices (slider N is
+// bit N-1) -- the form REAPER's own channel_mapper uses.
+// One place where a changed knob is committed, so tools/gfx_test.py can
+// drive the real path rather than a copy of it.
+function g_commit(id) (
+  slider_automate(2^(id - 1));
+  // recalc() from the UI thread.  This is the ONE deliberate exception to
+  // "@gfx never calls an audio-side function", and it is required: neither
+  // slider_automate() nor sliderchange() re-runs @slider (both verified --
+  // setting agc_mode here and automating it left the audio-side `agc` at 0
+  // and l.threshv stale), and @block does not run at all on a stopped track,
+  // so a queued flag would leave every knob dead until you pressed play.
+  // REAPER's own analysis/gfxspectrograph recomputes inline for exactly this
+  // reason.  See the "DO NOT ADD locals" warning on recalc() itself.
+  recalc();
+);
+
+g_dirty ? ( g_commit(g_dirty); );
+
+// ---------------------------------------------------------------- display
+g_px0 = 16; g_px1 = gfx_w - 16;
+g_py0 = 296; g_py1 = 452;
+g_pw = g_px1 - g_px0;
+g_ph = g_py1 - g_py0;
+g_mid = (g_py0 + g_py1)*0.5;
+g_grrange = 24;                // dB of reduction across the full height
+
+gfx_set(0.11,0.11,0.13,1);
+gfx_rect(g_px0, g_py0, g_pw, g_ph);
+
+// amplitude guides at 0 and +/- 0.5
+gfx_set(0.18,0.18,0.21,1);
+gfx_line(g_px0, g_mid, g_px1, g_mid);
+gfx_line(g_px0, g_mid - g_ph*0.25, g_px1, g_mid - g_ph*0.25);
+gfx_line(g_px0, g_mid + g_ph*0.25, g_px1, g_mid + g_ph*0.25);
+
+// GR guides every 6 dB
+gi = 1;
+loop(3,
+  g_y = g_py0 + (gi*6)/g_grrange*g_ph;
+  gfx_set(0.22,0.18,0.14,1);
+  gfx_line(g_px0, g_y, g_px1, g_y);
+  gi += 1;
+);
+
+// -2 keeps @gfx off the column @sample is filling right now: single writer,
+// reader stays behind the write head, so a torn column is impossible.
+g_cols = min(g_pw, HIST_N - 2);
+
+// input waveform, newest column at the right edge
+gfx_set(0.26,0.30,0.38,1);
+gi = 0;
+while (gi < g_cols) (
+  g_ci = (hw - 1 - gi) & HMASK;
+  g_x  = g_px1 - 1 - gi;
+  g_y0 = max(g_py0, min(g_py1, g_mid - hIMAX[g_ci]*g_ph*0.5));
+  g_y1 = max(g_py0, min(g_py1, g_mid - hIMIN[g_ci]*g_ph*0.5));
+  g_y1 - g_y0 < 1 ? ( g_y1 = g_y0 + 1; );
+  gfx_line(g_x, g_y0, g_x, g_y1);
+  gi += 1;
+);
+
+// gain reduction, both chains, hanging down from the top edge
+gj = 0;
+loop(2,
+  gj == 0 ? gfx_set(0.98,0.58,0.18,1) : gfx_set(0.94,0.32,0.30,1);
+  gi = 0; g_have = 0;
+  while (gi < g_cols) (
+    g_ci = (hw - 1 - gi) & HMASK;
+    g_x  = g_px1 - 1 - gi;
+    g_v  = min(gj == 0 ? hGRL[g_ci] : hGRR[g_ci], g_grrange);
+    // +1 so a flat 0 dB trace sits just inside the panel instead of hiding
+    // under the top border -- "no compression" should still be visible.
+    g_y  = g_py0 + 1 + g_v/g_grrange*(g_ph - 2);
+    g_have ? gfx_line(g_x, g_y, g_ppx, g_ppy);
+    g_ppx = g_x; g_ppy = g_y; g_have = 1;
+    gi += 1;
+  );
+  gj += 1;
+);
+
+gfx_set(0.30,0.30,0.34,1);
+gfx_rect(g_px0, g_py0, g_pw, 1); gfx_rect(g_px0, g_py1-1, g_pw, 1);
+gfx_rect(g_px0, g_py0, 1, g_ph); gfx_rect(g_px1-1, g_py0, 1, g_ph);
+
+// legend
+gfx_set(0.26,0.30,0.38,1); gfx_x = g_px0 + 6; gfx_y = g_py0 + 4;
+gfx_drawstr("input");
+gfx_set(0.98,0.58,0.18,1); gfx_drawstr("   GR ");
+gfx_drawstr(agc ? "mid" : "left");
+gfx_set(0.94,0.32,0.30,1); gfx_drawstr("   GR ");
+gfx_drawstr(agc ? "side" : "right");
+gfx_set(0.45,0.45,0.50,1);
+gfx_x = g_px1 - 96; gfx_y = g_py0 + 4;
+sprintf(#g_s, "%.1f s   0..%d dB", hist_s, g_grrange);
+gfx_drawstr(#g_s);
+
+// ---------------------------------------------------------------- meters
+g_my0 = 470;
+g_mh  = 18;
+// dB with a floor, computed here rather than through an audio-side helper
+g_din  = 8.68588964*log(max(mtr_in,  0.0000001));
+g_dout = 8.68588964*log(max(mtr_out, 0.0000001));
+
+function g_bar(bx by bw bh frac r g b) (
+  gfx_set(0.13,0.13,0.16,1);
+  gfx_rect(bx, by, bw, bh);
+  frac > 0 ? (
+    gfx_set(r, g, b, 1);
+    gfx_rect(bx, by, min(max(frac,0),1)*bw, bh);
+  );
+  gfx_set(0.28,0.28,0.32,1);
+  gfx_rect(bx, by, bw, 1); gfx_rect(bx, by+bh-1, bw, 1);
+  gfx_rect(bx, by, 1, bh); gfx_rect(bx+bw-1, by, 1, bh);
+);
+
+gfx_set(0.55,0.57,0.62,1);
+gfx_x = 16; gfx_y = g_my0 + 3; gfx_drawstr("IN");
+g_bar(56, g_my0, 300, g_mh, (g_din + 60)/60, 0.32,0.62,0.88);
+gfx_set(0.78,0.80,0.84,1);
+gfx_x = 364; gfx_y = g_my0 + 3;
+sprintf(#g_s, "%.1f dB", max(g_din, -60)); gfx_drawstr(#g_s);
+
+gfx_set(0.55,0.57,0.62,1);
+gfx_x = 16; gfx_y = g_my0 + 26 + 3; gfx_drawstr("OUT");
+g_bar(56, g_my0 + 26, 300, g_mh, (g_dout + 60)/60, 0.32,0.72,0.52);
+gfx_set(0.78,0.80,0.84,1);
+gfx_x = 364; gfx_y = g_my0 + 26 + 3;
+sprintf(#g_s, "%.1f dB", max(g_dout, -60)); gfx_drawstr(#g_s);
+
+gfx_set(0.55,0.57,0.62,1);
+gfx_x = 470; gfx_y = g_my0 + 3; gfx_drawstr("GR");
+g_bar(510, g_my0, 300, g_mh, mtr_gr/g_grrange, 0.98,0.58,0.18);
+gfx_set(0.98,0.72,0.42,1);
+gfx_x = 818; gfx_y = g_my0 + 3;
+sprintf(#g_s, "-%.1f dB", mtr_gr); gfx_drawstr(#g_s);
+
+gfx_set(0.40,0.40,0.45,1);
+gfx_x = 470; gfx_y = g_my0 + 26 + 3;
+gfx_drawstr("drag knobs vertically - shift = fine, right-click = default");
+
+g_lastcap = mouse_cap;

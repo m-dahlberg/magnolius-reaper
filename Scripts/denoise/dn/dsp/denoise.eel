@@ -1,0 +1,946 @@
+// @noindex
+// Spectral DeNoise -- analysis and processing kernel.
+//
+// DSP ported from the SpectralDenoise JSFX (itself a port of libspecbleach by
+// Luciano Dato). The audio maths is a transcription; what is new here is the
+// analysis task, which reduces the whole file to a level-binned spectrogram
+// histogram so a static noise profile can be derived from it offline.
+//
+// Runs under ReaImGui's CreateFunctionFromEEL. That sandbox provides standard
+// EEL2 plus memcpy/memset, but NOT the JSFX fft/fft_permute builtins, so a
+// radix-2 FFT is implemented below. Everything else -- globals persisting
+// between Execute calls, [] heap addressing -- behaves as in JSFX.
+//
+// Tasks (set _TASK, then Execute):
+//   0  setup      allocate and clear state for _FFT / _NCH; call on any change
+//   1  analyze    consume a block, accumulate the histogram cube
+//   2  profile    sum cube rows in [_BANDLO.._BANDHI] into the noise profile
+//   3  process    denoise a block from _IN into _OUT
+//   4  reset      clear the streaming state, keeping the histogram and profile
+//   5  rewind     task 4, and empty the histogram for a fresh analysis
+//
+// Lua sets these before Execute:
+//   _IN _OUT        interleaved sample buffers (addresses)
+//   _NSAMP          samples per channel in this block
+//   _FFT _NCH _SRATE
+//   _ANAHOP         analysis stride in samples (>= 1, any value)
+//   _MODE           0 static profile, 1 adaptive (SPP-MMSE)
+//   _REDUCTION _STRENGTH _SMOOTHING _RESIDUAL _WHITENING _NLM
+//   _GATE_ON _GTHRESH _GATTACK _GHOLD _GRELEASE _GMODE _GRATIO _GAUTO
+//   _BANDLO _BANDHI _PROFOFF   noise-band bin range and dB trim
+//   _RD             scratch address variable for reading arrays back
+//
+// Lua reads these back with Function_GetValue:
+//   cubeN meanS prof dispS         buffer addresses
+//   nlev lev0 half                 cube geometry
+//   ana_frames prof_frames out_peak heap_ok
+
+MAXFFT  = 4096;
+HALFMAX = 2049;
+NLEVMAX = 127;                  // 1 dB level bins
+LEV0    = -120;                 // dB of bin 0; digital silence lands here
+
+NLMFRMAX = 21;                  // NLM SNR ring, Full config (16 past + 4 future + 1)
+SPECFR   = 5;                   // complex-spectrum delay ring (4 future + 1)
+NLM_FUT  = 4;
+NLM_EPS  = 0.000000001;
+
+NF_SMOOTH = 0.5;                // ADAPTIVE_NOISE_FLOOR_SMOOTHING
+ALPHA_MAX = 4;                  // Berouti oversubtraction bounds
+ALPHA_MIN = 1;
+SUP_LO_DB = -5;
+SUP_HI_DB = 20;
+EPSP      = 10 ^ (-20);
+SPEC_EPS  = 10 ^ (-12);
+
+SPP_XI   = 31.62;               // SPP-MMSE constants (spp_mmse_noise_estimator.c)
+SPP_XIF  = SPP_XI / (1 + SPP_XI);
+SPP_APOW = 0.8;
+SPP_SSPP = 0.9;
+SPP_CSPP = 0.1;
+SPP_CAP  = 0.99;
+SIL_THRESH = 10 ^ (-10);
+
+GT_HYST  = 10 ^ (-3 / 20);
+GT_FLOOR = 0.0001;
+
+HANN_MS  = 0.375;               // mean of hann^2, undoes the analysis window
+                                // when a frame's power is read as a level
+
+// ---------------------------------------------------------------- allocation
+// Bump allocator over the heap above the Lua-owned I/O region. Every task
+// addresses its buffers through the globals set here, so nothing depends on a
+// hand-maintained address map.
+
+function halloc(n) (
+  _ha = memptr;
+  memptr += n;
+  memset(_ha, 0, n);
+  _ha;
+);
+
+// ----------------------------------------------------------------------- fft
+// Iterative radix-2 decimation-in-time, in place on interleaved complex data.
+// brev holds the bit-reversal permutation and twr/twi the twiddles for the
+// current fft_size; fft_tables() rebuilds both.
+
+function fft_tables() local(i, j, b, k, lg, n) (
+  n = fft_size;
+  lg = 0;
+  i = 1;
+  while (i < n) ( lg += 1; i *= 2; );
+  i = 0;
+  while (i < n) (
+    j = 0;
+    b = i;
+    k = 0;
+    while (k < lg) (
+      j = j * 2 + (b - floor(b * 0.5) * 2);
+      b = floor(b * 0.5);
+      k += 1;
+    );
+    brev[i] = j;
+    i += 1;
+  );
+  i = 0;
+  while (i < n * 0.5) (
+    twr[i] = cos(2 * $pi * i / n);
+    twi[i] = -sin(2 * $pi * i / n);
+    i += 1;
+  );
+);
+
+function fft_fwd(buf) local(i, j, len, hf, step, k, tr, ti, ur, ui, vr, vi, i0, i1, n, ar, ai) (
+  n = fft_size;
+  i = 0;
+  while (i < n) (
+    j = brev[i];
+    j > i ? (
+      tr = buf[2 * i];     ti = buf[2 * i + 1];
+      buf[2 * i] = buf[2 * j];     buf[2 * i + 1] = buf[2 * j + 1];
+      buf[2 * j] = tr;             buf[2 * j + 1] = ti;
+    );
+    i += 1;
+  );
+  len = 2;
+  while (len <= n) (
+    hf = len * 0.5;
+    step = n / len;
+    i = 0;
+    while (i < n) (
+      k = 0;
+      j = 0;
+      while (j < hf) (
+        tr = twr[k]; ti = twi[k];
+        i0 = i + j; i1 = i0 + hf;
+        ar = buf[2 * i1]; ai = buf[2 * i1 + 1];
+        vr = ar * tr - ai * ti;
+        vi = ar * ti + ai * tr;
+        ur = buf[2 * i0]; ui = buf[2 * i0 + 1];
+        buf[2 * i0] = ur + vr; buf[2 * i0 + 1] = ui + vi;
+        buf[2 * i1] = ur - vr; buf[2 * i1 + 1] = ui - vi;
+        k += step;
+        j += 1;
+      );
+      i += len;
+    );
+    len *= 2;
+  );
+);
+
+// Unscaled inverse, matching the JSFX ifft() convention: the 1/N is folded
+// into outscale instead. conj -> forward -> conj.
+function fft_inv(buf) local(i, n) (
+  n = fft_size;
+  i = 0;
+  while (i < n) ( buf[2 * i + 1] = -buf[2 * i + 1]; i += 1; );
+  fft_fwd(buf);
+  i = 0;
+  while (i < n) ( buf[2 * i + 1] = -buf[2 * i + 1]; i += 1; );
+);
+
+// --------------------------------------------------------------- dsp helpers
+
+// 3-point moving average blended at NF_SMOOTH (smooth_spectrum, spectral_utils.c)
+function smooth_spectrum_buf(buf) local(bk, prevv, cur) (
+  prevv = buf[0];
+  buf[0] = (buf[0] + buf[1]) * 0.5 * NF_SMOOTH + buf[0] * (1 - NF_SMOOTH);
+  bk = 1;
+  loop(half - 1,
+    cur = buf[bk];
+    buf[bk] = ((prevv + cur + buf[bk + 1]) / 3) * NF_SMOOTH + cur * (1 - NF_SMOOTH);
+    prevv = cur;
+    bk += 1;
+  );
+  buf[half] = (prevv + buf[half]) * 0.5 * NF_SMOOTH + buf[half] * (1 - NF_SMOOTH);
+);
+
+// median of buf[0..n-1] by iterative Hoare quickselect (destroys buf). EEL2
+// has no recursion; quickselect only descends one side, so a loop suffices.
+function qsel_median(buf, n) local(lo, hi, k, i, j, piv, tmp) (
+  k = floor(n * 0.5);
+  lo = 0;
+  hi = n - 1;
+  while (lo < hi) (
+    piv = buf[floor((lo + hi) * 0.5)];
+    i = lo;
+    j = hi;
+    while (i <= j) (
+      while (buf[i] < piv) ( i += 1; );
+      while (buf[j] > piv) ( j -= 1; );
+      i <= j ? (
+        tmp = buf[i]; buf[i] = buf[j]; buf[j] = tmp;
+        i += 1;
+        j -= 1;
+      );
+    );
+    k <= j ? ( hi = j; ) : k >= i ? ( lo = i; ) : ( lo = hi; );
+  );
+  buf[k];
+);
+
+// spectral_whitening_get_weights: valley-filling weights >= 1 anchored to the
+// median of the smoothed profile, so the reduction floor rises in the
+// profile's valleys and the residual comes out spectrally flat.
+function compute_wht_weights(nsrc, nscale, wbuf) local(bk, wf, anchor, sv) (
+  wf = whitening / 100;
+  wf <= 0 ? (
+    memset(wbuf, 1, half + 1);
+  ) : (
+    bk = 0;
+    loop(half + 1,
+      whtScr[bk] = nsrc[bk] * nscale;
+      bk += 1;
+    );
+    smooth_spectrum_buf(whtScr);
+    memcpy(whtSel, whtScr, half + 1);
+    anchor = max(qsel_median(whtSel, half + 1), SPEC_EPS);
+    bk = 0;
+    loop(half + 1,
+      sv = whtScr[bk];
+      wbuf[bk] = sv > SPEC_EPS ? (anchor / sv) ^ wf : 1;
+      bk += 1;
+    );
+  );
+);
+
+// Berouti alpha from the raw spectrum, rising-only temporal smoothing, then
+// Wiener subtraction of the alpha-scaled noise (suppression_engine.c,
+// spectral_smoother.c FIXED, gain_calculator.c). dosmooth=0 in the NLM path,
+// where the input has already been smoothed across time and frequency.
+function wiener_gains(ssrc, nsrc, nscale, gbuf, sprev, dosmooth)
+  local(bk, sp, np, snr_db, alpha, ssm, sn) (
+  bk = 0;
+  loop(half + 1,
+    sp = ssrc[bk];
+    np = nsrc[bk] * nscale;
+    snr_db = 10 * log10(sp / (np + SPEC_EPS));
+    alpha = snr_db <= SUP_LO_DB ? amax :
+            snr_db >= SUP_HI_DB ? ALPHA_MIN :
+            amax - (snr_db - SUP_LO_DB) / (SUP_HI_DB - SUP_LO_DB) * (amax - ALPHA_MIN);
+    dosmooth ? (
+      ssm = sp > sprev[bk] ? smcoef * sprev[bk] + (1 - smcoef) * sp : sp;
+      sprev[bk] = ssm;
+    ) : (
+      ssm = sp;
+    );
+    sn = np * alpha;
+    gbuf[bk] = sn > EPSP ? (ssm > sn ? (ssm - sn) / ssm : 0) : 1;
+    bk += 1;
+  );
+);
+
+// noise_floor_manager_apply + mixing: clamp each gain to the whitened
+// reduction floor, then scale the spectrum and its mirror. The floored gain
+// is written back so the display shows what was actually applied.
+function apply_gains(gbuf, wbuf) local(bk, bm, g, gr, fl) (
+  bk = 0;
+  loop(half + 1,
+    g = gbuf[bk];
+    gainfloor >= 0.999 ? (
+      g = 1;
+    ) : (
+      fl = gainfloor * (1 + wht_depth * (wbuf[bk] - 1));
+      fl > 1 ? fl = 1;
+      g < fl ? g = fl;
+    );
+    gbuf[bk] = g;
+    gr = residual ? (1 - g) : g;
+    fftbuf[2 * bk] *= gr;
+    fftbuf[2 * bk + 1] *= gr;
+    (bk > 0 && bk < half) ? (
+      bm = fft_size - bk;
+      fftbuf[2 * bm] *= gr;
+      fftbuf[2 * bm + 1] *= gr;
+    );
+    bk += 1;
+  );
+);
+
+// SPP-MMSE per-frame noise PSD update (spp_mmse_noise_estimator_run). specS
+// holds this frame's power spectrum. Returns the updated "initialized" flag.
+function spp_update(nbuf, pbuf, inited)
+  local(bk, fe, prev, ratio, spp1, spp0, mmse) (
+  fe = 0;
+  bk = 0;
+  loop(half + 1, fe += specS[bk]; bk += 1; );
+  fe /= (half + 1);
+  inited == 0 ? (
+    fe < SIL_THRESH ? (
+      memset(nbuf, 0, half + 1);
+      0;
+    ) : (
+      memcpy(nbuf, specS, half + 1);
+      memset(pbuf, 0, half + 1);
+      1;
+    );
+  ) : (
+    fe >= SIL_THRESH ? (
+      bk = 0;
+      loop(half + 1,
+        prev = nbuf[bk];
+        ratio = specS[bk] / max(prev, SPEC_EPS);
+        spp1 = 1 / (1 + (1 + SPP_XI) * exp(-ratio * SPP_XIF));
+        pbuf[bk] > SPP_CAP ? spp1 = min(spp1, SPP_CAP);
+        spp0 = 1 - spp1;
+        mmse = spp0 * specS[bk] + spp1 * prev;
+        nbuf[bk] = SPP_APOW * prev + (1 - SPP_APOW) * mmse;
+        pbuf[bk] = SPP_SSPP * pbuf[bk] + SPP_CSPP * spp1;
+        bk += 1;
+      );
+    );
+    1;
+  );
+);
+
+// nlm_filter_process_generic (Lukin "Algorithm B"): smooth the target SNR
+// frame (NLM_FUT hops back) by averaging paste-blocks of similar patches
+// found across the time-frequency search window. Result lands in nlmSm.
+function nlm_process(ring) local(dt, slot, tgt, bs, bc, lim, tsum, pf, hb, ih2, dth,
+                                 df, cc, safe, d, pr, tb0, cb0, diff, ft, fc, wgt, tb, cb) (
+  dt = -nlm_past - nlm_hp;
+  while (dt <= NLM_FUT + nlm_hp) (
+    // floor-modulo: EEL2 % on negatives is not guaranteed
+    slot = nlm_head - NLM_FUT + dt;
+    slot -= floor(slot / nlm_frames) * nlm_frames;
+    nlmPtrs[NLMPB + dt] = ring + slot * HALFMAX;
+    dt += 1;
+  );
+  tgt = nlmPtrs[NLMPB];
+  memset(nlmAcc, 0, half + 1);
+  memset(nlmWsum, 0, half + 1);
+  bs = 0;
+  while (bs <= half) (
+    lim = half + 1 - bs;
+    lim > 8 ? lim = 8;
+    bc = bs + 4;
+    bc > half ? bc = half;
+    tsum = 0;
+    pf = 0;
+    loop(lim, tsum += tgt[bs + pf]; pf += 1; );
+    tsum >= 0.000001 ? (
+      // frequency-dependent smoothing, stronger toward Nyquist. ih2/dth fold
+      // in the per-term patch normalization so raw d is compared against
+      // 4*hb^2 on the same scale whatever the patch size.
+      hb = nlm_h * (1 + 3 * (bc / half) * (bc / half));
+      ih2 = nlm_dnorm / (hb * hb);
+      dth = 4 * hb * hb / nlm_dnorm;
+      dt = -nlm_past;
+      while (dt <= NLM_FUT) (
+        df = -nlm_freq;
+        while (df <= nlm_freq) (
+          cc = bc + df;
+          cc < 0 ? cc = 0;
+          cc > half ? cc = half;
+          safe = bc >= nlm_hp && bc + nlm_hp <= half + 1 &&
+                 cc >= nlm_hp && cc + nlm_hp <= half + 1;
+          d = 0;
+          pr = 0;
+          while (pr < nlm_patch && d <= dth) (
+            tb0 = nlmPtrs[NLMPB + pr - nlm_hp];
+            cb0 = nlmPtrs[NLMPB + dt + pr - nlm_hp];
+            safe ? (
+              pf = 0;
+              loop(nlm_patch,
+                diff = tb0[bc - nlm_hp + pf] - cb0[cc - nlm_hp + pf];
+                d += diff * diff;
+                pf += 1;
+              );
+            ) : (
+              pf = 0;
+              loop(nlm_patch,
+                ft = bc + pf - nlm_hp;
+                ft < 0 ? ( ft = 0; );
+                ft > half ? ( ft = half; );
+                fc = cc + pf - nlm_hp;
+                fc < 0 ? ( fc = 0; );
+                fc > half ? ( fc = half; );
+                diff = tb0[ft] - cb0[fc];
+                d += diff * diff;
+                pf += 1;
+              );
+            );
+            pr += 1;
+          );
+          d <= dth ? (
+            wgt = exp(-d * ih2);
+            cb0 = nlmPtrs[NLMPB + dt];
+            pf = 0;
+            loop(lim,
+              tb = bs + pf;
+              cb = tb + df;
+              cb < 0 ? ( cb = 0; );
+              cb > half ? ( cb = half; );
+              nlmAcc[tb] += wgt * cb0[cb];
+              nlmWsum[tb] += wgt;
+              pf += 1;
+            );
+          );
+          df += 1;
+        );
+        dt += 1;
+      );
+    );
+    bs += 8;
+  );
+  pf = 0;
+  loop(half + 1,
+    nlmSm[pf] = nlmWsum[pf] > 0.0000000001 ? nlmAcc[pf] / nlmWsum[pf] : tgt[pf];
+    pf += 1;
+  );
+);
+
+// whitening weights follow the active noise profile. With a static profile
+// they only change when a parameter does, so the counter is reset by kparams.
+function refresh_wht(nsrc, nscale, wbuf, ch) local(wcnt) (
+  wcnt = whtCnt[ch];
+  wcnt <= 0 ? (
+    compute_wht_weights(nsrc, nscale, wbuf);
+    wcnt = 8;
+  );
+  whtCnt[ch] = wcnt - 1;
+);
+
+// ------------------------------------------------------------------- windows
+
+// Window the newest fft_size samples of channel ch into fftbuf, transform,
+// and leave the power spectrum in dst[0..half].
+function frame_spec(ch, dst) local(fk, rp, ring, bk) (
+  ring = b_ring + ch * MAXFFT;
+  rp = wpos;                    // oldest sample in the ring
+  fk = 0;
+  loop(fft_size,
+    fftbuf[2 * fk] = ring[rp] * window[fk];
+    fftbuf[2 * fk + 1] = 0;
+    rp += 1;
+    rp >= fft_size ? rp = 0;
+    fk += 1;
+  );
+  fft_fwd(fftbuf);
+  bk = 0;
+  loop(half + 1,
+    dst[bk] = fftbuf[2 * bk] * fftbuf[2 * bk] +
+              fftbuf[2 * bk + 1] * fftbuf[2 * bk + 1];
+    bk += 1;
+  );
+);
+
+// -------------------------------------------------------------------- setup
+
+function nlm_setup() (
+  // configurations.h: Eco halves patch, frequency and past ranges; the future
+  // range is fixed at 4 hops so added latency is one FFT either way.
+  nlm == 2 ? (
+    nlm_patch = 8; nlm_freq = 8; nlm_past = 16;
+  ) : (
+    nlm_patch = 4; nlm_freq = 4; nlm_past = 8;
+  );
+  nlm_hp = nlm_patch * 0.5;
+  nlm_frames = nlm_past + NLM_FUT + 1;
+  NLMPB = nlm_past + nlm_hp;
+  // deviation from the reference: normalize patch distances per term so the
+  // 8x8 Full patch is not 4x stricter against the same 4h^2 threshold
+  nlm_dnorm = 16 / (nlm_patch * nlm_patch);
+);
+
+function ksetup() local(wk, ch, top) (
+  fft_size = _FFT;
+  nch = max(_NCH, 1);
+  half = fft_size * 0.5;
+  hop = fft_size * 0.25;
+  nlev = NLEVMAX;
+  lev0 = LEV0;
+  nlm = _NLM;
+  nlm_setup();
+
+  memptr = _HEAP;
+  fftbuf  = halloc(2 * MAXFFT);
+  window  = halloc(MAXFFT);
+  twr     = halloc(MAXFFT * 0.5);
+  twi     = halloc(MAXFFT * 0.5);
+  brev    = halloc(MAXFFT);
+  specS   = halloc(HALFMAX);
+  specN   = halloc(HALFMAX);
+  whtScr  = halloc(HALFMAX);
+  whtSel  = halloc(HALFMAX);
+  nlmAcc  = halloc(HALFMAX);
+  nlmWsum = halloc(HALFMAX);
+  nlmSm   = halloc(HALFMAX);
+  nlmPtrs = halloc(64);
+  whtCnt  = halloc(64);
+  sppInit = halloc(64);
+  dispS   = halloc(HALFMAX);
+  cubeN   = halloc(NLEVMAX);
+
+  b_ring   = halloc(nch * MAXFFT);
+  b_ola    = halloc(nch * MAXFFT);
+  b_spec   = halloc(nch * HALFMAX);
+  b_gain   = halloc(nch * HALFMAX);
+  b_prof   = halloc(nch * HALFMAX);
+  b_prevS  = halloc(nch * HALFMAX);
+  b_whtW   = halloc(nch * HALFMAX);
+  b_sppN   = halloc(nch * HALFMAX);
+  b_sppP   = halloc(nch * HALFMAX);
+  b_meanS  = halloc(nch * HALFMAX);
+  b_snr    = halloc(nch * NLMFRMAX * HALFMAX);
+  b_specr  = halloc(nch * SPECFR * 2 * MAXFFT);
+  b_noiser = halloc(nch * SPECFR * HALFMAX);
+  cube     = halloc(NLEVMAX * nch * HALFMAX);
+  memtop   = memptr;
+
+  // EEL does not fail loudly when it runs out of heap: every access past the
+  // limit is redirected to one shared scratch slot. Probing the two ends of
+  // the cube does not catch that -- if only the far end is missing, the near
+  // end reads back its own value and the far end reads back the scratch slot,
+  // which is the value just written to it, and both comparisons pass. Two
+  // *adjacent* slots at the very top do catch it: if that end is unallocated
+  // both writes land in the one scratch slot, so the first reads back the
+  // second's value.
+  cube[0] = 1;
+  top = memtop - 2;
+  top[0] = 2;
+  top[1] = 3;
+  heap_ok = cube[0] == 1 && top[0] == 2 && top[1] == 3;
+  cube[0] = 0;
+  top[0] = 0;
+  top[1] = 0;
+
+  prof = b_prof;                // exported: channel 0 profile
+  meanS = b_meanS;
+
+  wk = 0;
+  loop(fft_size,
+    window[wk] = 0.5 - 0.5 * cos(2 * $pi * wk / fft_size);
+    wk += 1;
+  );
+  fft_tables();
+
+  // hann^2 at 75% overlap sums to 1.5; fft_inv is unscaled by fft_size
+  outscale = (2 / 3) / fft_size;
+
+  ch = 0;
+  loop(nch, memset(b_whtW + ch * HALFMAX, 1, half + 1); ch += 1; );
+  memset(b_gain, 1, nch * HALFMAX);
+
+  wpos = 0;
+  hopcount = 0;
+  apushed = 0;
+  acnt = 0;
+  ana_frames = 0;
+  prof_frames = 0;
+  out_peak = 0;
+  nlm_head = 0;
+  spec_head = 0;
+  nlm_fill = 0;
+  gt_gain = 1;
+  gt_env = 0;
+  gt_openst = 0;
+  gt_holdcnt = 0;
+  gt_opentime = 0;
+  gt_closing = 0;
+  gt_relc_use = 0;
+  memptr;
+);
+
+// Reset only the streaming state, keeping the cube and the profile. Used
+// between analysis chunks and before each processing run.
+function kreset() local(ch) (
+  memset(b_ring, 0, nch * MAXFFT);
+  memset(b_ola, 0, nch * MAXFFT);
+  memset(b_prevS, 0, nch * HALFMAX);
+  memset(b_sppN, 0, nch * HALFMAX);
+  memset(b_sppP, 0, nch * HALFMAX);
+  memset(b_snr, 0, nch * NLMFRMAX * HALFMAX);
+  memset(b_specr, 0, nch * SPECFR * 2 * MAXFFT);
+  memset(b_noiser, 0, nch * SPECFR * HALFMAX);
+  memset(b_gain, 1, nch * HALFMAX);
+  memset(sppInit, 0, 64);
+  wpos = 0; hopcount = 0; apushed = 0; acnt = 0;
+  nlm_head = 0; spec_head = 0; nlm_fill = 0;
+  gt_gain = 1; gt_env = 0; gt_openst = 0; gt_holdcnt = 0;
+  gt_opentime = 0; gt_closing = 0;
+  out_peak = 0;
+);
+
+// Clear the histogram for a fresh analysis. Separate from kreset: the counts
+// and the power sums have to go together, and clearing half a megabyte of
+// cube from Lua by writing an array over it would be absurd.
+function kclear_hist() (
+  memset(cube, 0, NLEVMAX * nch * HALFMAX);
+  memset(cubeN, 0, NLEVMAX);
+  memset(b_meanS, 0, nch * HALFMAX);
+  memset(b_prof, 0, nch * HALFMAX);
+  ana_frames = 0;
+  prof_frames = 0;
+);
+
+function kparams() local(ch) (
+  // NLM only changes the search-window shape, never the memory map: the rings
+  // are allocated for the Full configuration whatever the setting. So it can
+  // be switched without rebuilding the kernel or re-analysing the file.
+  _NLM != nlm ? ( nlm = _NLM; nlm_setup(); );
+  reduction = _REDUCTION;
+  strength = _STRENGTH;
+  smoothing = _SMOOTHING;
+  residual = _RESIDUAL;
+  whitening = _WHITENING;
+  mode = _MODE;
+  gainfloor = 10 ^ (-reduction / 20);
+  wht_depth = 1 - gainfloor;
+  amax = ALPHA_MIN + (strength / 100) * (ALPHA_MAX - ALPHA_MIN);
+  smcoef = smoothing / 100;
+  // Noise-vs-noise patches sit ~2 distance per term, so mid-band smoothing
+  // needs h ~3; map 0..100 -> 0.5..5.0 (reference default h=1 only ever
+  // smooths the top octaves).
+  nlm_h = 0.5 + (smoothing / 100) * 4.5;
+  memset(whtCnt, 0, 64);        // force a weight recompute
+
+  gt_thr = 10 ^ (_GTHRESH / 20);
+  gt_thrclose = gt_thr * GT_HYST;
+  gt_datk = exp(-1 / (0.0002 * _SRATE));
+  gt_drel = exp(-1 / (0.02 * _SRATE));
+  gt_atkc = _GAUTO ? exp(-1 / (0.001 * _SRATE))
+                   : exp(-1 / (max(_GATTACK, 0.1) * 0.001 * _SRATE));
+  gt_relc = exp(-1 / (max(_GRELEASE, 5) * 0.001 * _SRATE));
+  gt_holdsmp = floor(_GHOLD * 0.001 * _SRATE);
+  gt_ratio1 = _GRATIO - 1;
+);
+
+// ------------------------------------------------------------------ analyze
+// One analysis frame: transform every channel, bin the frame by its broadband
+// level, and add each channel's power spectrum to that level's cube row. The
+// cube is the whole-file histogram the noise profile is later read out of.
+
+function ana_frame() local(ch, k, tot, ldb, lb, sp, dst, msp) (
+  ch = 0;
+  while (ch < nch) (
+    frame_spec(ch, b_spec + ch * HALFMAX);
+    ch += 1;
+  );
+  tot = 0;
+  ch = 0;
+  while (ch < nch) (
+    sp = b_spec + ch * HALFMAX;
+    tot += sp[0] + sp[half];
+    k = 1;
+    while (k < half) ( tot += 2 * sp[k]; k += 1; );
+    ch += 1;
+  );
+  // Parseval: mean windowed sample power = sum|X|^2 / N^2; divide by mean of
+  // hann^2 to read back as the frame's un-windowed RMS level.
+  tot = tot / (nch * fft_size * fft_size * HANN_MS);
+  ldb = tot > 0 ? 10 * log10(tot) : lev0 - 1000;
+  lb = floor(ldb - lev0 + 0.5);
+  lb < 0 ? lb = 0;
+  lb > nlev - 1 ? lb = nlev - 1;
+  cubeN[lb] += 1;
+  ch = 0;
+  while (ch < nch) (
+    sp = b_spec + ch * HALFMAX;
+    dst = cube + (lb * nch + ch) * HALFMAX;
+    msp = b_meanS + ch * HALFMAX;
+    k = 0;
+    loop(half + 1,
+      dst[k] += sp[k];
+      msp[k] += sp[k];
+      k += 1;
+    );
+    ch += 1;
+  );
+  ana_frames += 1;
+);
+
+function kanalyze() local(s, ch, ring, base) (
+  s = 0;
+  while (s < _NSAMP) (
+    base = s * nch;
+    ch = 0;
+    while (ch < nch) (
+      ring = b_ring + ch * MAXFFT;
+      ring[wpos] = _IN[base + ch];
+      ch += 1;
+    );
+    wpos += 1;
+    wpos >= fft_size ? wpos = 0;
+    apushed < fft_size ? apushed += 1;
+    acnt += 1;
+    acnt >= _ANAHOP ? (
+      acnt = 0;
+      // no frame until the ring is full, or leading zeros would manufacture
+      // an artificially quiet frame and drag the profile down
+      apushed >= fft_size ? ana_frame();
+    );
+    s += 1;
+  );
+  ana_frames;
+);
+
+// ------------------------------------------------------------------- profile
+// Sum the cube rows inside the chosen level band into the per-channel noise
+// profile. This is the mean power spectrum of exactly those frames whose
+// broadband level fell in the band -- the same quantity the JSFX learn mode
+// accumulates, with the frames picked by the histogram instead of by hand.
+
+function kprofile() local(lb, ch, k, n, dst, src, sc, gain) (
+  n = 0;
+  lb = _BANDLO;
+  while (lb <= _BANDHI) ( n += cubeN[lb]; lb += 1; );
+  prof_frames = n;
+  memset(b_prof, 0, nch * HALFMAX);
+  n > 0 ? (
+    lb = _BANDLO;
+    while (lb <= _BANDHI) (
+      cubeN[lb] > 0 ? (
+        ch = 0;
+        while (ch < nch) (
+          dst = b_prof + ch * HALFMAX;
+          src = cube + (lb * nch + ch) * HALFMAX;
+          k = 0;
+          loop(half + 1, dst[k] += src[k]; k += 1; );
+          ch += 1;
+        );
+      );
+      lb += 1;
+    );
+    // power scales with the square of a dB trim on amplitude
+    gain = 10 ^ (_PROFOFF / 10);
+    sc = gain / n;
+    ch = 0;
+    while (ch < nch) (
+      dst = b_prof + ch * HALFMAX;
+      k = 0;
+      loop(half + 1, dst[k] *= sc; k += 1; );
+      // deliberately not smoothed. The mean over thousands of frames is
+      // already a low-variance estimate, and smoothing would spread a narrow
+      // line -- mains hum, a whine -- across its neighbours, leaving the line
+      // itself under-subtracted. The JSFX learn profile is a plain mean too.
+      ch += 1;
+    );
+  );
+  // display copy of the mean input spectrum, normalized to a mean per frame
+  ana_frames > 0 ? (
+    sc = 1 / ana_frames;
+    k = 0;
+    loop(half + 1, dispS[k] = meanS[k] * sc; k += 1; );
+  );
+  n;
+);
+
+// ------------------------------------------------------------------- process
+
+function process_channel(ch) local(fk, rp, bk, nvalid, nsrcb, sbase, dnb, snb,
+                                   dslot, sv, ring, ola, gbuf, sprev, wbuf,
+                                   snrring, specring, noisering, nbuf, pbuf) (
+  ring      = b_ring   + ch * MAXFFT;
+  ola       = b_ola    + ch * MAXFFT;
+  gbuf      = b_gain   + ch * HALFMAX;
+  sprev     = b_prevS  + ch * HALFMAX;
+  wbuf      = b_whtW   + ch * HALFMAX;
+  nbuf      = b_sppN   + ch * HALFMAX;
+  pbuf      = b_sppP   + ch * HALFMAX;
+  snrring   = b_snr    + ch * NLMFRMAX * HALFMAX;
+  specring  = b_specr  + ch * SPECFR * 2 * MAXFFT;
+  noisering = b_noiser + ch * SPECFR * HALFMAX;
+
+  rp = wpos;
+  fk = 0;
+  loop(fft_size,
+    fftbuf[2 * fk] = ring[rp] * window[fk];
+    fftbuf[2 * fk + 1] = 0;
+    rp += 1;
+    rp >= fft_size ? rp = 0;
+    fk += 1;
+  );
+  fft_fwd(fftbuf);
+  bk = 0;
+  loop(half + 1,
+    specS[bk] = fftbuf[2 * bk] * fftbuf[2 * bk] +
+                fftbuf[2 * bk + 1] * fftbuf[2 * bk + 1];
+    bk += 1;
+  );
+
+  nvalid = 0;
+  mode == 1 ? (
+    sppInit[ch] = spp_update(nbuf, pbuf, sppInit[ch]);
+    memcpy(specN, nbuf, half + 1);
+    smooth_spectrum_buf(specN);
+    nsrcb = specN;
+    nvalid = 1;
+  ) : (
+    prof_frames > 0 ? (
+      nsrcb = b_prof + ch * HALFMAX;
+      nvalid = 1;
+    );
+  );
+
+  nlm ? (
+    // spectral_2d_denoiser_run: push this frame's spectrum, noise estimate
+    // and SNR, then denoise the frame from NLM_FUT hops ago so the smoother
+    // sees its future. Every mode routes through the same delay, so the
+    // latency Lua compensates for is constant.
+    sbase = specring + spec_head * 2 * MAXFFT;
+    memcpy(sbase, fftbuf, 2 * fft_size);
+    dnb = noisering + spec_head * HALFMAX;
+    snb = snrring + nlm_head * HALFMAX;
+    nvalid ? (
+      bk = 0;
+      loop(half + 1,
+        sv = nsrcb[bk];
+        dnb[bk] = sv;
+        snb[bk] = specS[bk] / max(sv, NLM_EPS);
+        bk += 1;
+      );
+    ) : (
+      memset(dnb, 0, half + 1);
+      memset(snb, 1, half + 1);
+    );
+    dslot = spec_head + 1;
+    dslot >= SPECFR ? dslot = 0;
+    memcpy(fftbuf, specring + dslot * 2 * MAXFFT, 2 * fft_size);
+    (nvalid && nlm_fill + 1 >= nlm_frames) ? (
+      nlm_process(snrring);
+      dnb = noisering + dslot * HALFMAX;
+      bk = 0;
+      loop(half + 1, nlmSm[bk] *= max(dnb[bk], NLM_EPS); bk += 1; );
+      refresh_wht(dnb, 1, wbuf, ch);
+      // deviation from spectral_2d_denoiser_run: keep the rising-only FIXED
+      // smoother on top. The NLM distance threshold admits few matches at
+      // low frequencies, where without it the gains chatter.
+      wiener_gains(nlmSm, dnb, 1, gbuf, sprev, 1);
+    ) : (
+      memset(gbuf, 1, half + 1);
+    );
+  ) : (
+    nvalid ? (
+      refresh_wht(nsrcb, 1, wbuf, ch);
+      wiener_gains(specS, nsrcb, 1, gbuf, sprev, 1);
+    ) : (
+      memset(gbuf, 1, half + 1);
+    );
+  );
+  apply_gains(gbuf, wbuf);
+
+  fft_inv(fftbuf);
+  fk = 0;
+  loop(fft_size,
+    ola[fk] += fftbuf[2 * fk] * window[fk] * outscale;
+    fk += 1;
+  );
+);
+
+function kprocess() local(s, ch, base, ring, ola, av, gt_in, gt_target, ax) (
+  s = 0;
+  while (s < _NSAMP) (
+    base = s * nch;
+    // read the OLA tail before the new sample goes in, exactly as @sample does
+    ch = 0;
+    while (ch < nch) (
+      ola = b_ola + ch * MAXFFT;
+      _OUT[base + ch] = ola[hopcount];
+      ring = b_ring + ch * MAXFFT;
+      ring[wpos] = _IN[base + ch];
+      ch += 1;
+    );
+    wpos += 1;
+    wpos >= fft_size ? wpos = 0;
+    hopcount += 1;
+    hopcount >= hop ? (
+      ch = 0;
+      while (ch < nch) (
+        ola = b_ola + ch * MAXFFT;
+        memcpy(ola, ola + hop, fft_size - hop);
+        memset(ola + fft_size - hop, 0, hop);
+        ch += 1;
+      );
+      ch = 0;
+      while (ch < nch) ( process_channel(ch); ch += 1; );
+      nlm ? (
+        nlm_head += 1;
+        nlm_head >= nlm_frames ? nlm_head = 0;
+        spec_head += 1;
+        spec_head >= SPECFR ? spec_head = 0;
+        nlm_fill < nlm_frames ? nlm_fill += 1;
+      );
+      hopcount = 0;
+    );
+
+    _GATE_ON ? (
+      // broadband detector, linked across channels
+      gt_in = 0;
+      ch = 0;
+      while (ch < nch) (
+        ax = abs(_OUT[base + ch]);
+        ax > gt_in ? gt_in = ax;
+        ch += 1;
+      );
+      gt_env = gt_in > gt_env ? gt_in + gt_datk * (gt_env - gt_in)
+                              : gt_in + gt_drel * (gt_env - gt_in);
+      _GMODE == 0 ? (
+        gt_openst ? (gt_env < gt_thrclose ? gt_openst = 0;)
+                  : (gt_env >= gt_thr ? gt_openst = 1;);
+        gt_target = gt_openst;
+      ) : (
+        gt_target = gt_env >= gt_thr ? 1
+                  : max((gt_env / gt_thr) ^ gt_ratio1, GT_FLOOR);
+      );
+      gt_target >= gt_gain ? (
+        gt_gain = gt_target + gt_atkc * (gt_gain - gt_target);
+        gt_holdcnt = gt_holdsmp;
+        gt_closing = 0;
+        gt_env >= gt_thr ? gt_opentime += 1;
+      ) : (
+        gt_holdcnt > 0 ? gt_holdcnt -= 1 : (
+          gt_closing == 0 ? (
+            // longer tails after real phrases, fast cuts after short bursts
+            gt_relc_use = _GAUTO ?
+              exp(-1 / (min(0.06 + gt_opentime / _SRATE * 0.34, 0.4) * _SRATE)) :
+              gt_relc;
+            gt_opentime = 0;
+            gt_closing = 1;
+          );
+          gt_gain = gt_target + gt_relc_use * (gt_gain - gt_target);
+        );
+      );
+      ch = 0;
+      while (ch < nch) ( _OUT[base + ch] *= gt_gain; ch += 1; );
+    );
+
+    ch = 0;
+    while (ch < nch) (
+      av = abs(_OUT[base + ch]);
+      av > out_peak ? out_peak = av;
+      ch += 1;
+    );
+    s += 1;
+  );
+  out_peak;
+);
+
+// ---------------------------------------------------------------- dispatcher
+
+_TASK == 0 ? ( ksetup(); kparams(); ) :
+_TASK == 1 ? ( kparams(); kanalyze(); ) :
+_TASK == 2 ? ( kparams(); kprofile(); ) :
+_TASK == 3 ? ( kparams(); kprocess(); ) :
+_TASK == 4 ? ( kreset(); ) :
+_TASK == 5 ? ( kreset(); kclear_hist(); ) : 0;

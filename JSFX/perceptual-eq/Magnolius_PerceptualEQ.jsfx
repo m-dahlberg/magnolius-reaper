@@ -1,0 +1,1338 @@
+desc:Perceptual EQ (hearing-test based headphone correction)
+//tags: equalizer correction hearing headphones
+//
+// Builds a corrective EQ for headphone monitoring without a measurement mic.
+// Test mode runs a loudness-matching hearing test: sine beeps at 15 bands are
+// matched against a 1 kHz anchor tone. The plugin then corrects the deviation
+// of your personal equal-loudness curve from the ISO 226:2003 reference
+// contour, compensating both hearing anomalies and headphone response.
+//
+// The correction curve is NOT one bell per measured band: a smooth target
+// curve (monotone cubic through the strength-scaled points in log-f, lightly
+// Gaussian-smoothed so it stays realizable) is least-squares fitted with a
+// 43-bell bank (band centers + 2 subdivisions per interval). The fitted
+// cascade passes through the measured points instead of sagging back to 0 dB
+// between them, and the 1 kHz anchor stays at exactly 0 dB.
+//
+// Never applies full compensation (hearing-aid half-gain heuristic): use the
+// strength slider and boost cap to keep corrections safe and natural.
+//
+// Optional bs2b crossfeed (Correct mode only): headphone crossfeed after
+// Boris Mikhaylov's libbs2b (MIT) — the opposite channel is lowpassed and
+// fed across, the direct path gets the complementary "highboost", plus a
+// level-compensation gain. Pure one-pole IIR, no added latency.
+//
+// Optional true-stereo convolution reverb (Correct mode only): a 4-channel
+// IR WAV (LL,LR,RL,RR — input letter first) from Data/ReverbIRs, run through
+// uniform partitioned FFT convolution. Latency of one partition (2048
+// samples) is reported via pdc_delay; REAPER compensates.
+//
+// Correct-mode processing order: input -> crossfeed -> reverb -> EQ -> trim.
+
+options:maxmem=16777216
+
+slider1:mode=0<0,2,1{Correct,Test,Bypass}>Mode
+slider2:earmode=0<0,1,1{Binaural (one curve),Per-ear (separate L/R)}>Test ear mode
+slider3:phon=60<20,80,1>Assumed listening level (phon)
+slider4:strength=50<0,100,1>Correction strength (%)
+slider5:maxboost=12<0,18,0.5>Max boost (dB)
+slider6:outtrim=0<-24,12,0.1>Output trim (dB)
+slider7:xf_on=0<0,1,1{Off,On}>Crossfeed (bs2b)
+slider8:xf_fcut=700<300,2000,10>Crossfeed cut freq (Hz)
+slider9:xf_feed=4.5<1,15,0.1>Crossfeed feed (dB)
+slider10:/ReverbIRs:none:Reverb IR wav - 4ch order LL LR RL RR
+slider11:rvb_on=0<0,1,1{Off,On}>Reverb
+slider12:rvb_wet=-12<-60,12,0.1>Reverb wet (dB, -60=off)
+slider13:rvb_dry=0<-60,12,0.1>Reverb dry (dB, -60=off)
+
+in_pin:left
+in_pin:right
+out_pin:left
+out_pin:right
+
+@init
+// ---- memory map ----
+ISO_F   = 0;    // 29 ISO 226 frequencies
+ISO_AF  = 32;   // 29 exponent params
+ISO_LU  = 64;   // 29 transfer-function magnitudes
+ISO_TF  = 96;   // 29 hearing thresholds
+ISO_SPL = 128;  // 29 contour SPLs at current phon
+BANDF   = 160;  // 15 test band frequencies
+MEAS    = 192;  // 2x32 measured offsets vs anchor (dB), stride 32 per ear
+FLAGS   = 256;  // 2x32 band-measured flags
+PLOT    = 640;  // 2x128 plotted response (dB)
+ISOREL  = 920;  // 15 ISO contour offsets relative to 1 kHz (dB)
+
+// ---- correction-fit memory (allocated with a cursor from 1280) ----
+// The EQ is a 43-bell bank (NFIT) whose gains are least-squares fitted to a
+// smooth target curve through the measured points; see calc_targets().
+fitmem = 1280;
+FITF   = fitmem; fitmem += 64;  // 43 fit-bank center frequencies
+FITBW  = fitmem; fitmem += 64;  // 43 fit-bank bandwidths (octaves)
+TGAIN  = fitmem; fitmem += 128; // 2x64 fitted target gains; GAINS glides here
+GAINS  = fitmem; fitmem += 128; // 2x64 current (smoothed) gains (dB)
+COEF   = fitmem; fitmem += 512; // 2x43x5 biquad coefficients (b0,b1,b2,a1,a2)
+STATE  = fitmem; fitmem += 256; // 2x43x2 biquad states (DF2T)
+GSCR   = fitmem; fitmem += 512; // 2x43x5 @gfx-private coefficient scratch
+KNOTX  = fitmem; fitmem += 16;  // 15 log band frequencies (spline knots)
+KNOTY  = fitmem; fitmem += 16;  // 15 point targets (dB) for the current fit
+KSLOPE = fitmem; fitmem += 16;  // 15 PCHIP slopes
+KRESID = fitmem; fitmem += 16;  // 15 knot residuals for interp-smoothing
+GRIDX  = fitmem; fitmem += 128; // 128 log-f fit grid
+GRIDF  = fitmem; fitmem += 128; // 128 fit grid (Hz)
+TCURVE = fitmem; fitmem += 128; // target curve on the grid (per ch, reused)
+TSCR   = fitmem; fitmem += 128; // smoothing scratch
+GKERN  = fitmem; fitmem += 64;  // Gaussian smoothing kernel
+RESID  = fitmem; fitmem += 192; // LS residual rows (grid + knot rows)
+BVEC   = fitmem; fitmem += 64;  // Mt*residual
+DGV    = fitmem; fitmem += 64;  // gain update from the Cholesky solve
+FCOEF  = fitmem; fitmem += 256; // 43x5 audio-thread response-eval scratch
+CHOL   = fitmem; fitmem += 2048; // na x na Cholesky factor of MtM + ridge
+MMTX   = fitmem; fitmem += 8192; // nrows x na unit-gain bell shape matrix
+
+// ---- convolution reverb memory ----
+// Allocated from 65536 upward with a running cursor. Every buffer handed to
+// fft()/ifft()/convolve_c() is exactly CONV_N2 = 8192 words and starts on a
+// multiple of 8192, so no FFT buffer ever crosses a 65536-word boundary
+// (a JSFX FFT requirement).
+CONV_P   = 2048;              // partition size (samples) = reported latency
+CONV_N   = 4096;              // FFT size (complex points), 2*CONV_P
+CONV_N2  = 8192;              // words per spectrum (interleaved re,im)
+MAXPARTS = 128;               // IR cap: 128*2048 = 262144 samples (~5.5 s @48k)
+IRRAW_CAP = 8*MAXPARTS*CONV_P; // interleaved load staging (words)
+
+conv_alloc = 65536;
+FDL_L  = conv_alloc; conv_alloc += MAXPARTS*CONV_N2; // input spectrum history L
+FDL_R  = conv_alloc; conv_alloc += MAXPARTS*CONV_N2; // input spectrum history R
+IRSPEC = conv_alloc; conv_alloc += 4*MAXPARTS*CONV_N2; // IR spectra, path-major LL,LR,RL,RR
+ACC_L  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator L
+ACC_R  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator R
+CSCR   = conv_alloc; conv_alloc += CONV_N2; // convolve_c scratch
+OLAP_L = conv_alloc; conv_alloc += CONV_P;  // overlap-add tails
+OLAP_R = conv_alloc; conv_alloc += CONV_P;
+INB_L  = conv_alloc; conv_alloc += CONV_P;  // time-domain partition input rings
+INB_R  = conv_alloc; conv_alloc += CONV_P;
+OUTB_L = conv_alloc; conv_alloc += CONV_P;  // wet output for the current period
+OUTB_R = conv_alloc; conv_alloc += CONV_P;
+DRY_L  = conv_alloc; conv_alloc += CONV_P;  // dry-path alignment delay rings
+DRY_R  = conv_alloc; conv_alloc += CONV_P;
+IRRAW  = conv_alloc; conv_alloc += IRRAW_CAP; // interleaved IR file staging
+
+// THREADING RULE: @gfx runs on the UI thread; @slider/@block/@sample on the
+// audio thread. EEL2 globals and function locals (static!) are shared, so
+// @gfx must never call functions the audio thread uses, never write memory
+// the audio thread reads, and audio code must not use variable names that
+// @gfx uses. @gfx communicates via pend_* request scalars consumed in @block.
+
+NBANDS = 15;
+ANCHOR_IDX = 6; // 1000 Hz, never tested (offset 0 by definition)
+
+// correction-fit tuning (validated against the Python reference in tools/)
+NFIT   = 43;   // fit bells: 15 band centers + 2 log-subdivisions per interval
+NGRID  = 128;  // log-f grid rows for the least-squares fit
+FITBWS = 1.6;  // bell bandwidth = neighbor spacing x this (wide = smooth sum)
+FITSIG = 0.12; // target-curve Gaussian smoothing sigma (octaves)
+FITKW  = 3;    // weight of the knot rows (pass-through-the-points priority)
+FITRND = 3;    // interp-smoothing rounds (smooth AND through the points)
+FITIT  = 2;    // fit iterations (converged after 2 in validation)
+
+// The anchor sits low in dBFS on purpose: equal loudness at low frequencies
+// needs up to ~35 dB more level than 1 kHz (ISO 226), and that headroom has
+// to exist above the anchor.
+ANCHOR_DB = -40;  // anchor tone level, dBFS
+TONE_CAP_DB = -3; // absolute test-tone ceiling, dBFS
+OFF_MIN = -30;    // adjustable offset range (dB rel. anchor)
+OFF_MAX = TONE_CAP_DB - ANCHOR_DB;
+
+p = ISO_F;
+p[0]=20;    p[1]=25;    p[2]=31.5;  p[3]=40;    p[4]=50;
+p[5]=63;    p[6]=80;    p[7]=100;   p[8]=125;   p[9]=160;
+p[10]=200;  p[11]=250;  p[12]=315;  p[13]=400;  p[14]=500;
+p[15]=630;  p[16]=800;  p[17]=1000; p[18]=1250; p[19]=1600;
+p[20]=2000; p[21]=2500; p[22]=3150; p[23]=4000; p[24]=5000;
+p[25]=6300; p[26]=8000; p[27]=10000; p[28]=12500;
+
+p = ISO_AF;
+p[0]=0.532; p[1]=0.506; p[2]=0.480; p[3]=0.455; p[4]=0.432;
+p[5]=0.409; p[6]=0.387; p[7]=0.367; p[8]=0.349; p[9]=0.330;
+p[10]=0.315; p[11]=0.301; p[12]=0.288; p[13]=0.276; p[14]=0.267;
+p[15]=0.259; p[16]=0.253; p[17]=0.250; p[18]=0.246; p[19]=0.244;
+p[20]=0.243; p[21]=0.243; p[22]=0.243; p[23]=0.242; p[24]=0.242;
+p[25]=0.245; p[26]=0.254; p[27]=0.271; p[28]=0.301;
+
+p = ISO_LU;
+p[0]=-31.6; p[1]=-27.2; p[2]=-23.0; p[3]=-19.1; p[4]=-15.9;
+p[5]=-13.0; p[6]=-10.3; p[7]=-8.1;  p[8]=-6.2;  p[9]=-4.5;
+p[10]=-3.1; p[11]=-2.0; p[12]=-1.1; p[13]=-0.4; p[14]=0.0;
+p[15]=0.3;  p[16]=0.5;  p[17]=0.0;  p[18]=-2.7; p[19]=-4.1;
+p[20]=-1.0; p[21]=1.7;  p[22]=2.5;  p[23]=1.2;  p[24]=-2.1;
+p[25]=-7.1; p[26]=-11.2; p[27]=-10.7; p[28]=-3.1;
+
+p = ISO_TF;
+p[0]=78.5;  p[1]=68.7;  p[2]=59.5;  p[3]=51.1;  p[4]=44.0;
+p[5]=37.5;  p[6]=31.5;  p[7]=26.5;  p[8]=22.1;  p[9]=17.9;
+p[10]=14.4; p[11]=11.4; p[12]=8.6;  p[13]=6.2;  p[14]=4.4;
+p[15]=3.0;  p[16]=2.2;  p[17]=2.4;  p[18]=3.5;  p[19]=1.7;
+p[20]=-1.3; p[21]=-4.2; p[22]=-6.0; p[23]=-5.4; p[24]=-1.5;
+p[25]=6.0;  p[26]=12.6; p[27]=13.9; p[28]=12.3;
+
+p = BANDF;
+p[0]=40;    p[1]=80;    p[2]=125;   p[3]=250;   p[4]=500;
+p[5]=750;   p[6]=1000;  p[7]=1500;  p[8]=2000;  p[9]=3000;
+p[10]=4000; p[11]=6000; p[12]=8000; p[13]=12000; p[14]=16000;
+
+function db2lin(db) ( 10^(db*0.05) );
+function log2f(x) ( log(x)/log(2) );
+function sinhx(x) ( (exp(x)-exp(-x))*0.5 );
+function clampoff(x) ( max(OFF_MIN, min(OFF_MAX, x)) );
+
+function iso_interp(f) local(i, x) (
+  f <= ISO_F[0] ? ISO_SPL[0] :
+  f >= ISO_F[28] ? ISO_SPL[28] : (
+    i = 0;
+    while (ISO_F[i+1] < f) ( i += 1 );
+    x = (log(f) - log(ISO_F[i])) / (log(ISO_F[i+1]) - log(ISO_F[i]));
+    ISO_SPL[i] + x * (ISO_SPL[i+1] - ISO_SPL[i]);
+  );
+);
+
+// ISO 226:2003 contour at the current phon level, then band offsets rel. 1 kHz.
+// Above 12.5 kHz the standard has no data; the edge value is held (the 16 kHz
+// band is the least trustworthy either way).
+function iso_fill() local(i, af, lu, tf, afv, ref1k) (
+  i = 0;
+  loop(29,
+    af = ISO_AF[i]; lu = ISO_LU[i]; tf = ISO_TF[i];
+    // EEL2 does not parse e-notation literals (4.47e-3 kills the section)
+    afv = 0.00447 * (10^(0.025*phon) - 1.15) + (0.4 * 10^((tf+lu)/10 - 9))^af;
+    ISO_SPL[i] = 10/af * log10(afv) - lu + 94;
+    i += 1;
+  );
+  ref1k = ISO_SPL[17];
+  i = 0;
+  loop(NBANDS,
+    ISOREL[i] = iso_interp(BANDF[i]) - ref1k;
+    i += 1;
+  );
+);
+
+// ---- correction fit: smooth target curve + least-squares bell-gain fit ----
+// All of this runs on the audio thread only (@init / @block); @gfx has its
+// own private copy of the response math in calc_plot().
+
+// dB response of one fit bell at +1 dB gain (RBJ peaking, cookbook
+// warped-bandwidth alpha so the octave bandwidth stays right near Nyquist)
+function fit_unit_db(fc, bw, f) local(a, w0, alpha, cw, b0, b1, b2, a1, a2,
+                                      c1, s1, c2, s2, re_n, im_n, re_d, im_d) (
+  a = 10^(1/40);
+  w0 = 2*$pi*fc/srate;
+  alpha = sin(w0) * sinhx(0.5 * log(2) * bw * w0 / sin(w0));
+  cw = cos(w0);
+  b0 = 1 + alpha*a; b1 = -2*cw; b2 = 1 - alpha*a;
+  a1 = -2*cw; a2 = 1 - alpha/a;
+  // normalize by a0 = 1 + alpha/a implicitly via the ratio below
+  c1 = cos(2*$pi*f/srate); s1 = sin(2*$pi*f/srate);
+  c2 = cos(4*$pi*f/srate); s2 = sin(4*$pi*f/srate);
+  re_n = b0 + b1*c1 + b2*c2; im_n = -(b1*s1 + b2*s2);
+  re_d = (1 + alpha/a) + a1*c1 + a2*c2; im_d = -(a1*s1 + a2*s2);
+  10 * log10(max((re_n*re_n + im_n*im_n) /
+                 max(re_d*re_d + im_d*im_d, 0.0000000001), 0.0000000001));
+);
+
+// Build the fit bank, grid, smoothing kernel, unit-gain shape matrix M and
+// the Cholesky factor of MtM + ridge. srate-dependent -> rebuilt on @init.
+function fit_bank() local(i, n, r3, j, bw, k, x, r_, acc, a_, b_, s, kk) (
+  n = 0; i = 0;
+  loop(NBANDS-1,
+    FITF[n] = BANDF[i]; n += 1;
+    r3 = (BANDF[i+1]/BANDF[i])^(1/3);
+    FITF[n] = BANDF[i]*r3; n += 1;
+    FITF[n] = BANDF[i]*r3*r3; n += 1;
+    i += 1;
+  );
+  FITF[n] = BANDF[NBANDS-1]; // n+1 == NFIT
+  j = 0;
+  loop(NFIT,
+    bw = j == 0 ? log2f(FITF[1]/FITF[0]) :
+         j == NFIT-1 ? log2f(FITF[NFIT-1]/FITF[NFIT-2]) :
+         0.5 * log2f(FITF[j+1]/FITF[j-1]);
+    FITBW[j] = bw * FITBWS;
+    j += 1;
+  );
+  // active prefix (bells/knots below the Nyquist guard; banks are ascending)
+  fit_na = 0;
+  loop(NFIT, FITF[fit_na] <= srate*0.45 ? ( fit_na += 1; ); );
+  fit_nk = 0;
+  loop(NBANDS, BANDF[fit_nk] <= srate*0.45 ? ( fit_nk += 1; ); );
+  fit_nrows = NGRID + fit_nk;
+  // log-f grid over the measured span
+  fit_xlo = log(40);
+  fit_xhi = log(min(16000, srate*0.45));
+  k = 0;
+  loop(NGRID,
+    GRIDX[k] = fit_xlo + (fit_xhi - fit_xlo) * k / (NGRID-1);
+    GRIDF[k] = exp(GRIDX[k]);
+    k += 1;
+  );
+  i = 0;
+  loop(NBANDS, KNOTX[i] = log(BANDF[i]); i += 1; );
+  // Gaussian smoothing kernel in grid steps
+  fit_step = (fit_xhi - fit_xlo) / (NGRID-1) / log(2); // octaves per step
+  fit_krad = max(1, floor(3 * FITSIG / fit_step));
+  acc = 0; k = -fit_krad;
+  loop(2*fit_krad+1,
+    GKERN[k+fit_krad] = exp(-0.5 * (k*fit_step/FITSIG)^2);
+    acc += GKERN[k+fit_krad];
+    k += 1;
+  );
+  k = 0;
+  loop(2*fit_krad+1, GKERN[k] /= acc; k += 1; );
+  // unit-gain shape matrix: NGRID grid rows, then FITKW-weighted knot rows
+  r_ = 0;
+  loop(NGRID,
+    a_ = 0;
+    loop(fit_na,
+      MMTX[r_*fit_na + a_] = fit_unit_db(FITF[a_], FITBW[a_], GRIDF[r_]);
+      a_ += 1;
+    );
+    r_ += 1;
+  );
+  i = 0;
+  loop(fit_nk,
+    a_ = 0;
+    loop(fit_na,
+      MMTX[(NGRID+i)*fit_na + a_] =
+        FITKW * fit_unit_db(FITF[a_], FITBW[a_], BANDF[i]);
+      a_ += 1;
+    );
+    i += 1;
+  );
+  // A = MtM + ridge, lower triangle, then in-place Cholesky
+  a_ = 0;
+  loop(fit_na,
+    b_ = 0;
+    loop(a_+1,
+      s = a_ == b_ ? 0.001 : 0; // ridge
+      r_ = 0;
+      loop(fit_nrows,
+        s += MMTX[r_*fit_na + a_] * MMTX[r_*fit_na + b_];
+        r_ += 1;
+      );
+      CHOL[a_*fit_na + b_] = s;
+      b_ += 1;
+    );
+    a_ += 1;
+  );
+  a_ = 0;
+  loop(fit_na,
+    b_ = 0;
+    loop(a_+1,
+      s = CHOL[a_*fit_na + b_];
+      kk = 0;
+      loop(b_, s -= CHOL[a_*fit_na + kk] * CHOL[b_*fit_na + kk]; kk += 1; );
+      b_ == a_ ? ( CHOL[a_*fit_na + b_] = sqrt(max(s, 0.0000000001)); )
+               : ( CHOL[a_*fit_na + b_] = s / CHOL[b_*fit_na + b_]; );
+      b_ += 1;
+    );
+    a_ += 1;
+  );
+);
+
+// biquad coefficients for the whole bank at gains gp[0..NFIT-1] into FCOEF
+function fit_coefs(gp) local(j, b, g, f, w0, a, alpha, cw, ib0) (
+  j = 0;
+  loop(NFIT,
+    b = FCOEF + j*5;
+    g = gp[j]; f = FITF[j];
+    (abs(g) < 0.001 || f > srate * 0.45) ? (
+      b[0] = 1; b[1] = 0; b[2] = 0; b[3] = 0; b[4] = 0;
+    ) : (
+      a = 10^(g/40);
+      w0 = 2*$pi*f/srate;
+      alpha = sin(w0) * sinhx(0.5 * log(2) * FITBW[j] * w0 / sin(w0));
+      cw = cos(w0);
+      ib0 = 1 / (1 + alpha/a);
+      b[0] = (1 + alpha*a) * ib0;
+      b[1] = -2*cw * ib0;
+      b[2] = (1 - alpha*a) * ib0;
+      b[3] = -2*cw * ib0;
+      b[4] = (1 - alpha/a) * ib0;
+    );
+    j += 1;
+  );
+);
+
+// cascade dB response from FCOEF (product of mag^2, single log at the end)
+function fit_resp_db(f) local(w, c1, s1, c2, s2, j, b, re_n, im_n, re_d, im_d, prod) (
+  w = 2*$pi*f/srate;
+  c1 = cos(w); s1 = sin(w); c2 = cos(2*w); s2 = sin(2*w);
+  prod = 1;
+  j = 0;
+  loop(NFIT,
+    b = FCOEF + j*5;
+    re_n = b[0] + b[1]*c1 + b[2]*c2; im_n = -(b[1]*s1 + b[2]*s2);
+    re_d = 1 + b[3]*c1 + b[4]*c2;   im_d = -(b[3]*s1 + b[4]*s2);
+    prod *= (re_n*re_n + im_n*im_n) / max(re_d*re_d + im_d*im_d, 0.0000000001);
+    j += 1;
+  );
+  10 * log10(max(prod, 10^(-300)));
+);
+
+// Fritsch-Carlson monotone-cubic (PCHIP) slopes for KNOTX/KRESID -> KSLOPE
+function fit_slopes() local(i, n, h1, h2, s1, s2, w1, w2, d0) (
+  n = NBANDS;
+  i = 1;
+  loop(n-2,
+    h1 = KNOTX[i] - KNOTX[i-1];
+    h2 = KNOTX[i+1] - KNOTX[i];
+    s1 = (KRESID[i] - KRESID[i-1]) / h1;
+    s2 = (KRESID[i+1] - KRESID[i]) / h2;
+    s1*s2 <= 0 ? ( KSLOPE[i] = 0; ) : (
+      w1 = 2*h2 + h1;
+      w2 = h2 + 2*h1;
+      KSLOPE[i] = (w1 + w2) / (w1/s1 + w2/s2);
+    );
+    i += 1;
+  );
+  h1 = KNOTX[1] - KNOTX[0]; h2 = KNOTX[2] - KNOTX[1];
+  s1 = (KRESID[1] - KRESID[0]) / h1; s2 = (KRESID[2] - KRESID[1]) / h2;
+  d0 = ((2*h1 + h2)*s1 - h1*s2) / (h1 + h2);
+  d0*s1 <= 0 ? ( d0 = 0; ) : (
+    (s1*s2 <= 0 && abs(d0) > 3*abs(s1)) ? ( d0 = 3*s1; );
+  );
+  KSLOPE[0] = d0;
+  h1 = KNOTX[n-1] - KNOTX[n-2]; h2 = KNOTX[n-2] - KNOTX[n-3];
+  s1 = (KRESID[n-1] - KRESID[n-2]) / h1; s2 = (KRESID[n-2] - KRESID[n-3]) / h2;
+  d0 = ((2*h1 + h2)*s1 - h1*s2) / (h1 + h2);
+  d0*s1 <= 0 ? ( d0 = 0; ) : (
+    (s1*s2 <= 0 && abs(d0) > 3*abs(s1)) ? ( d0 = 3*s1; );
+  );
+  KSLOPE[n-1] = d0;
+);
+
+function fit_peval(x) local(i, h, t, t1) (
+  x <= KNOTX[0] ? KRESID[0] : (
+  x >= KNOTX[NBANDS-1] ? KRESID[NBANDS-1] : (
+    i = 0;
+    while (x > KNOTX[i+1]) ( i += 1; );
+    h = KNOTX[i+1] - KNOTX[i];
+    t = (x - KNOTX[i]) / h;
+    t1 = 1 - t;
+    (1 + 2*t)*t1*t1*KRESID[i] + t*t1*t1*h*KSLOPE[i]
+      + t*t*(3 - 2*t)*KRESID[i+1] + t*t*(t - 1)*h*KSLOPE[i+1];
+  ); );
+);
+
+// linear read of TCURVE at log-frequency x
+function fit_lin_at(x) local(p, k0, fr) (
+  p = (x - fit_xlo) / (fit_xhi - fit_xlo) * (NGRID-1);
+  p < 0 ? ( p = 0; );
+  p > NGRID-1 ? ( p = NGRID-1; );
+  k0 = min(floor(p), NGRID-2);
+  fr = p - k0;
+  TCURVE[k0]*(1-fr) + TCURVE[k0+1]*fr;
+);
+
+// solve (L Lt) DGV = BVEC with the precomputed Cholesky factor
+function fit_solve() local(a_, kk, s, nrem) (
+  a_ = 0;
+  loop(fit_na,
+    s = BVEC[a_];
+    kk = 0;
+    loop(a_, s -= CHOL[a_*fit_na + kk] * DGV[kk]; kk += 1; );
+    DGV[a_] = s / CHOL[a_*fit_na + a_];
+    a_ += 1;
+  );
+  a_ = fit_na - 1;
+  loop(fit_na,
+    s = DGV[a_];
+    nrem = fit_na - 1 - a_;
+    kk = a_ + 1;
+    loop(nrem, s -= CHOL[kk*fit_na + a_] * DGV[kk]; kk += 1; );
+    DGV[a_] = s / CHOL[a_*fit_na + a_];
+    a_ -= 1;
+  );
+);
+
+// Fit one channel: point targets -> smooth interpolating target curve ->
+// iterated weighted least squares on the bell gains. Result in TGAIN, and
+// the true peak boost of the fitted response in cmaxt0/cmaxt1 (headroom).
+function fit_channel(ch) local(src, i, t, any, gp, k, acc, kk, j, r_, rv, a_, hm, hv, mrow) (
+  src = earmode == 1 ? ch : 0;
+  any = 0;
+  i = 0;
+  loop(NBANDS,
+    t = 0;
+    (i != ANCHOR_IDX && FLAGS[src*32+i]) ? (
+      t = max(-18, min(maxboost, strength * 0.01 * (MEAS[src*32+i] - ISOREL[i])));
+    );
+    KNOTY[i] = t;
+    abs(t) > 0.001 ? ( any = 1; );
+    i += 1;
+  );
+  gp = TGAIN + ch*64;
+  !any ? (
+    memset(gp, 0, 64);
+    ch == 0 ? ( cmaxt0 = 0; ) : ( cmaxt1 = 0; );
+  ) : (
+    // target curve: PCHIP -> Gaussian smooth, repeated so the smoothed curve
+    // still passes through the points (raw PCHIP has curvature kinks at the
+    // knots that a bell cascade cannot realize)
+    memset(TCURVE, 0, NGRID);
+    i = 0;
+    loop(NBANDS, KRESID[i] = KNOTY[i]; i += 1; );
+    loop(FITRND,
+      fit_slopes();
+      k = 0;
+      loop(NGRID, TSCR[k] = fit_peval(GRIDX[k]); k += 1; );
+      k = 0;
+      loop(NGRID,
+        acc = 0;
+        kk = -fit_krad;
+        loop(2*fit_krad+1,
+          acc += GKERN[kk+fit_krad] * TSCR[min(NGRID-1, max(0, k+kk))];
+          kk += 1;
+        );
+        TCURVE[k] += acc;
+        k += 1;
+      );
+      i = 0;
+      loop(NBANDS,
+        KRESID[i] = i < fit_nk ? KNOTY[i] - fit_lin_at(KNOTX[i]) : 0;
+        i += 1;
+      );
+    );
+    k = 0;
+    loop(NGRID, TCURVE[k] = max(-18, min(maxboost, TCURVE[k])); k += 1; );
+    // init gains from the target curve, then iterate the weighted LS fit
+    j = 0;
+    loop(NFIT,
+      gp[j] = FITF[j] <= srate*0.45 ?
+        max(-18, min(maxboost, fit_lin_at(log(FITF[j])))) : 0;
+      j += 1;
+    );
+    loop(FITIT,
+      fit_coefs(gp);
+      k = 0;
+      loop(NGRID, RESID[k] = TCURVE[k] - fit_resp_db(GRIDF[k]); k += 1; );
+      i = 0;
+      loop(fit_nk,
+        RESID[NGRID+i] = FITKW * (KNOTY[i] - fit_resp_db(BANDF[i]));
+        i += 1;
+      );
+      a_ = 0;
+      loop(fit_na, BVEC[a_] = 0; a_ += 1; );
+      r_ = 0;
+      loop(fit_nrows,
+        rv = RESID[r_];
+        mrow = MMTX + r_*fit_na;
+        a_ = 0;
+        loop(fit_na, BVEC[a_] += mrow[a_] * rv; a_ += 1; );
+        r_ += 1;
+      );
+      fit_solve();
+      j = 0;
+      loop(fit_na,
+        gp[j] = max(-24, min(maxboost + 6, gp[j] + DGV[j]));
+        j += 1;
+      );
+    );
+    // true peak boost of the fitted response, for the auto headroom trim
+    fit_coefs(gp);
+    hm = 0;
+    k = 0;
+    loop(NGRID,
+      hv = fit_resp_db(GRIDF[k]);
+      hv > hm ? ( hm = hv; );
+      k += 1;
+    );
+    ch == 0 ? ( cmaxt0 = hm; ) : ( cmaxt1 = hm; );
+  );
+);
+
+function calc_targets() (
+  fit_channel(0);
+  earmode == 1 ? fit_channel(1) : (
+    memcpy(TGAIN + 64, TGAIN, 64);
+    cmaxt1 = cmaxt0;
+  );
+);
+
+function calc_coefs() local(ch, i, b, g, f, w0, a, alpha, cw, ib0) (
+  ch = 0;
+  loop(2,
+    i = 0;
+    loop(NFIT,
+      b = COEF + (ch*NFIT + i) * 5;
+      g = GAINS[ch*64+i];
+      f = FITF[i];
+      (abs(g) < 0.01 || f > srate * 0.45) ? (
+        b[0] = 1; b[1] = 0; b[2] = 0; b[3] = 0; b[4] = 0;
+      ) : (
+        a = 10^(g/40);
+        w0 = 2*$pi*f/srate;
+        alpha = sin(w0) * sinhx(0.5 * log(2) * FITBW[i] * w0 / sin(w0));
+        cw = cos(w0);
+        ib0 = 1 / (1 + alpha/a);
+        b[0] = (1 + alpha*a) * ib0;
+        b[1] = -2*cw * ib0;
+        b[2] = (1 - alpha*a) * ib0;
+        b[3] = -2*cw * ib0;
+        b[4] = (1 - alpha/a) * ib0;
+      );
+      i += 1;
+    );
+    ch += 1;
+  );
+);
+
+// Map a linear test step to the ear/band it addresses (the 1 kHz anchor band
+// is skipped: its offset is 0 by definition).
+function update_step() local(b) (
+  n_steps = earmode == 1 ? 2*(NBANDS-1) : NBANDS-1;
+  cur_step > n_steps ? cur_step = n_steps;
+  test_done = cur_step >= n_steps;
+  !test_done ? (
+    cur_ear = earmode == 1 ? floor(cur_step / (NBANDS-1)) : 0;
+    b = cur_step % (NBANDS-1);
+    cur_band = b < ANCHOR_IDX ? b : b+1;
+    FLAGS[cur_ear*32+cur_band] == 0 ?
+      MEAS[cur_ear*32+cur_band] = clampoff(ISOREL[cur_band]);
+    off_sm = MEAS[cur_ear*32+cur_band];
+    tpos = 0;
+  );
+);
+
+function adjust(d) local(idx) (
+  !test_done ? (
+    idx = cur_ear*32 + cur_band;
+    MEAS[idx] = clampoff(MEAS[idx] + d);
+  );
+);
+
+function confirm_step() (
+  !test_done ? (
+    FLAGS[cur_ear*32+cur_band] = 1;
+    cur_step += 1;
+    update_step();
+    dirty = 1;
+  );
+);
+
+function move_step(d) (
+  cur_step = max(0, min(n_steps-1, cur_step + d));
+  update_step();
+);
+
+function reset_band() local(idx) (
+  !test_done ? (
+    idx = cur_ear*32 + cur_band;
+    FLAGS[idx] = 0;
+    MEAS[idx] = clampoff(ISOREL[cur_band]);
+    off_sm = MEAS[idx];
+    dirty = 1;
+  );
+);
+
+// ---- true-stereo convolution reverb (audio thread only — never from @gfx) ----
+// Uniform partitioned FFT convolution. Spectra are kept in fft()'s permuted
+// order throughout: convolve_c is element-wise, so matching permuted order on
+// both operands is fine — only bin ORDER would need fft_permute, not products.
+
+function rvb_clear_state() (
+  memset(FDL_L, 0, MAXPARTS*CONV_N2);
+  memset(FDL_R, 0, MAXPARTS*CONV_N2);
+  memset(OLAP_L, 0, CONV_P); memset(OLAP_R, 0, CONV_P);
+  memset(INB_L, 0, CONV_P);  memset(INB_R, 0, CONV_P);
+  memset(OUTB_L, 0, CONV_P); memset(OUTB_R, 0, CONV_P);
+  memset(DRY_L, 0, CONV_P);  memset(DRY_R, 0, CONV_P);
+  conv_pos = 0; fdl_pos = 0;
+);
+
+// IR sample for conv path (0=LL,1=LR,2=RL,3=RR) at output frame t, linearly
+// resampled from the staged file data. 2ch files = parallel stereo (LL,RR),
+// mono = dual mono; missing cross paths read as silence.
+function ir_samp(path, t) local(sch, sp, s0, fr, v0, v1) (
+  sch = ir_nch == 4 ? path :
+        ir_nch == 2 ? (path == 0 ? 0 : path == 3 ? 1 : -1) :
+        (path == 0 || path == 3 ? 0 : -1);
+  sch < 0 ? 0 : (
+    sp = t * ir_ratio;
+    s0 = floor(sp);
+    fr = sp - s0;
+    v0 = s0 < ir_src_frames ? IRRAW[s0*ir_nch + sch] : 0;
+    v1 = s0 + 1 < ir_src_frames ? IRRAW[(s0+1)*ir_nch + sch] : 0;
+    v0 + fr*(v1 - v0);
+  );
+);
+
+// Load + prepare the IR from the file slider: stage the interleaved samples,
+// resample to srate, energy-normalize (unity energy per output channel, so a
+// unit-impulse IR passes at exactly 0 dB), partition, FFT into IRSPEC.
+function rvb_load() local(h, nch, sr, frames, capfr, out_frames, e_l, e_r, sc, p, k, t, n, buf, v) (
+  ir_ready = 0;
+  h = file_open(slider10);
+  h > 0 ? (
+    nch = 0; sr = 0;
+    file_riff(h, nch, sr);
+    ((nch == 1 || nch == 2 || nch == 4) && sr > 0) ? (
+      frames = floor(file_avail(h) / nch);
+      capfr = floor(IRRAW_CAP / nch);
+      frames > capfr ? frames = capfr;
+      file_mem(h, IRRAW, frames * nch);
+      ir_nch = nch;
+      ir_src_frames = frames;
+      ir_ratio = sr / srate;
+      out_frames = floor(frames * srate / sr);
+      out_frames > MAXPARTS*CONV_P ? out_frames = MAXPARTS*CONV_P;
+      out_frames > 0 ? (
+        e_l = 0; e_r = 0;
+        t = 0;
+        loop(out_frames,
+          v = ir_samp(0, t); e_l += v*v;
+          v = ir_samp(2, t); e_l += v*v;
+          v = ir_samp(1, t); e_r += v*v;
+          v = ir_samp(3, t); e_r += v*v;
+          t += 1;
+        );
+        sc = 1 / sqrt(max(max(e_l, e_r), 0.000000000001));
+        ir_nparts = ceil(out_frames / CONV_P);
+        p = 0;
+        loop(4,
+          k = 0;
+          loop(ir_nparts,
+            buf = IRSPEC + (p*MAXPARTS + k)*CONV_N2;
+            memset(buf, 0, CONV_N2);
+            n = 0;
+            loop(CONV_P,
+              t = k*CONV_P + n;
+              t < out_frames ? ( buf[2*n] = ir_samp(p, t) * sc; );
+              n += 1;
+            );
+            fft(buf, CONV_N);
+            k += 1;
+          );
+          p += 1;
+        );
+        ir_len_sec = out_frames / srate;
+        ir_nch_disp = nch;
+        ir_ready = 1;
+      );
+    );
+    file_close(h);
+  );
+  rvb_clear_state();
+);
+
+// spectral accumulate: dst += src over one spectrum (unrolled: this is the
+// hot loop — 4 paths x ir_nparts runs per partition period)
+function rvb_acc(dst, src) local(n) (
+  n = 0;
+  loop(CONV_N2*0.125,
+    dst[n]   += src[n];   dst[n+1] += src[n+1];
+    dst[n+2] += src[n+2]; dst[n+3] += src[n+3];
+    dst[n+4] += src[n+4]; dst[n+5] += src[n+5];
+    dst[n+6] += src[n+6]; dst[n+7] += src[n+7];
+    n += 8;
+  );
+);
+
+// acc += IR-path spectra (pbase) convolved with input history (fbase)
+function rvb_mac(acc, pbase, fbase) local(k, fs) (
+  k = 0;
+  loop(ir_nparts,
+    fs = fbase + ((fdl_pos + k) % MAXPARTS)*CONV_N2;
+    memcpy(CSCR, pbase + k*CONV_N2, CONV_N2);
+    convolve_c(CSCR, fs, CONV_N);
+    rvb_acc(acc, CSCR);
+    k += 1;
+  );
+);
+
+// One partition step, run inline in @sample when the input ring wraps:
+// FFT both input blocks into the newest FDL slots, MAC all partitions of the
+// four true-stereo paths into two output spectra, IFFT, overlap-add.
+function rvb_process() local(sl, n) (
+  fdl_pos = fdl_pos > 0 ? fdl_pos - 1 : MAXPARTS - 1;
+  sl = FDL_L + fdl_pos*CONV_N2;
+  memset(sl, 0, CONV_N2);
+  n = 0;
+  loop(CONV_P, sl[2*n] = INB_L[n]; n += 1; );
+  fft(sl, CONV_N);
+  sl = FDL_R + fdl_pos*CONV_N2;
+  memset(sl, 0, CONV_N2);
+  n = 0;
+  loop(CONV_P, sl[2*n] = INB_R[n]; n += 1; );
+  fft(sl, CONV_N);
+
+  memset(ACC_L, 0, CONV_N2);
+  memset(ACC_R, 0, CONV_N2);
+  rvb_mac(ACC_L, IRSPEC + 0*MAXPARTS*CONV_N2, FDL_L); // LL: L in -> L out
+  rvb_mac(ACC_L, IRSPEC + 2*MAXPARTS*CONV_N2, FDL_R); // RL: R in -> L out
+  rvb_mac(ACC_R, IRSPEC + 1*MAXPARTS*CONV_N2, FDL_L); // LR: L in -> R out
+  rvb_mac(ACC_R, IRSPEC + 3*MAXPARTS*CONV_N2, FDL_R); // RR: R in -> R out
+  ifft(ACC_L, CONV_N);
+  ifft(ACC_R, CONV_N);
+  n = 0;
+  loop(CONV_P,
+    OUTB_L[n] = ACC_L[2*n]*conv_scale + OLAP_L[n];
+    OUTB_R[n] = ACC_R[2*n]*conv_scale + OLAP_R[n];
+    OLAP_L[n] = ACC_L[2*(n+CONV_P)]*conv_scale;
+    OLAP_R[n] = ACC_R[2*(n+CONV_P)]*conv_scale;
+    n += 1;
+  );
+);
+
+function rvb_gains() (
+  wet_g = rvb_wet <= -59.9 ? 0 : db2lin(rvb_wet);
+  dry_g = rvb_dry <= -59.9 ? 0 : db2lin(rvb_dry);
+);
+
+// ---- bs2b crossfeed (after libbs2b by Boris Mikhaylov, MIT) ----
+// Cross path = one-pole lowpass of the opposite channel; direct path = the
+// complementary one-pole "highboost"; xf_gain compensates the level. The
+// formulas are libbs2b's init() verbatim. Recomputed on srate change (@init
+// reruns) and on slider changes — pure scalars, safe on the audio thread.
+
+function xf_calc() local(gb_lo, gb_hi, x) (
+  gb_lo = xf_feed * (-5/6) - 3;
+  gb_hi = xf_feed / 6 - 3;
+  xf_g_lo = 10^(gb_lo/20);
+  xf_g_hi = 1 - 10^(gb_hi/20);
+  xf_fc_hi = xf_fcut * 2^((gb_lo - 20*log10(xf_g_hi)) / 12);
+  x = exp(-2*$pi*xf_fcut/srate);
+  xf_b1_lo = x;
+  xf_a0_lo = xf_g_lo * (1 - x);
+  x = exp(-2*$pi*xf_fc_hi/srate);
+  xf_b1_hi = x;
+  xf_a0_hi = 1 - xf_g_hi * (1 - x);
+  xf_a1_hi = -x;
+  xf_gain = 1 / (1 - xf_g_hi + xf_g_lo);
+);
+
+function xf_clear() (
+  xf_lo_l = 0; xf_lo_r = 0;
+  xf_hi_l = 0; xf_hi_r = 0;
+  xf_as_l = 0; xf_as_r = 0;
+);
+
+fit_bank(); // srate-dependent (shape matrix + Cholesky), rebuilt on @init
+
+initialized == 0 ? (
+  cur_step = 0;
+  ser_ver = 1;
+  initialized = 1;
+);
+
+iso_fill();
+update_step();
+calc_coefs(); // identity filters until gains exist; also rebuilds on srate change
+l_earmode = earmode; l_mode = mode;
+l_phon = phon; l_strength = strength; l_maxboost = maxboost;
+trim = db2lin(outtrim);
+trim_sm = 0; // fades in over ~40 ms
+dirty = 1;
+
+// ifft() needs a 1/N scale; convolve_c adds none (verified by the unity-IR
+// render test — see tools/render_test.py)
+conv_scale = 1/CONV_N;
+rvb_gains();
+l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry; l_rvb_on = rvb_on;
+rvb_load(); // @init reruns on srate change: re-resamples + re-FFTs the IR
+l_irslider = slider10;
+
+xf_calc(); // srate-dependent, so rebuilt on every @init
+xf_clear();
+l_xf_on = xf_on; l_xf_fcut = xf_fcut; l_xf_feed = xf_feed;
+
+@slider
+// REAPER fires @slider spuriously (transport, undo); only react to real changes
+earmode != l_earmode ? (
+  l_earmode = earmode;
+  update_step();
+  dirty = 1;
+);
+mode != l_mode ? (
+  l_mode = mode;
+  mode == 1 ? update_step(); // (re)enter test: re-derive band, restart cycle
+);
+(phon != l_phon || strength != l_strength || maxboost != l_maxboost) ? (
+  l_phon = phon; l_strength = strength; l_maxboost = maxboost;
+  dirty = 1;
+);
+(xf_fcut != l_xf_fcut || xf_feed != l_xf_feed) ? (
+  l_xf_fcut = xf_fcut; l_xf_feed = xf_feed;
+  xf_calc();
+);
+xf_on != l_xf_on ? (
+  l_xf_on = xf_on;
+  xf_on ? xf_clear(); // no stale filter tails on re-enable
+);
+slider10 != l_irslider ? (
+  l_irslider = slider10;
+  rvb_load();
+);
+rvb_on != l_rvb_on ? (
+  l_rvb_on = rvb_on;
+  rvb_on ? rvb_clear_state(); // no stale tail on re-enable
+);
+(rvb_wet != l_rvb_wet || rvb_dry != l_rvb_dry) ? (
+  l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry;
+  rvb_gains();
+);
+
+@serialize
+file_var(0, ser_ver);
+file_mem(0, MEAS, 64);
+file_mem(0, FLAGS, 64);
+file_var(0, cur_step);
+file_avail(0) >= 0 ? ( // read pass: rebuild everything from restored state
+  update_step();
+  dirty = 1;
+);
+
+@block
+// Reverb latency: constant while enabled (PDC flapping per mode would force
+// REAPER audio resets); Test/Bypass get a matching plain delay in @sample.
+rvb_act = rvb_on && ir_ready;
+pdc_delay = rvb_act ? CONV_P : 0;
+pdc_bot_ch = 0; pdc_top_ch = 2;
+
+// Consume UI requests here so test-state functions run on this thread only
+mode == 1 ? (
+  pend_adj != 0 ? ( adjust(pend_adj); pend_adj = 0; );
+  pend_move != 0 ? ( move_step(pend_move); pend_move = 0; );
+  pend_confirm ? ( confirm_step(); pend_confirm = 0; );
+  pend_reset ? ( reset_band(); pend_reset = 0; );
+) : (
+  pend_adj = 0; pend_move = 0; pend_confirm = 0; pend_reset = 0;
+);
+
+// All recomputation lives here, on the audio thread only. @gfx merely sets
+// request flags: EEL2 function locals are static, so running the same
+// function from two threads at once corrupts it.
+dirty ? (
+  iso_fill();
+  calc_targets();
+  dirty = 0;
+);
+
+// glide gains toward targets (~50 ms time constant, block-size independent)
+gstep = 1 - exp(-samplesblock / (srate * 0.05));
+moving = 0;
+bch = 0;
+loop(2,
+  bi = 0;
+  loop(NFIT,
+    bidx = bch*64 + bi;
+    bd = TGAIN[bidx] - GAINS[bidx];
+    abs(bd) > 0.0001 ? (
+      moving = 1;
+      GAINS[bidx] = abs(bd) < 0.02 ? TGAIN[bidx] : GAINS[bidx] + bd*gstep;
+    );
+    bi += 1;
+  );
+  bch += 1;
+);
+moving ? calc_coefs();
+// headroom trim from the fitted curve's true peak boost (bells overlap, so
+// the response max is not the max per-bell gain); glided like the gains
+cmax0 += (cmaxt0 - cmax0) * gstep;
+cmax1 += (cmaxt1 - cmax1) * gstep;
+trim = db2lin(outtrim - max(max(cmax0, cmax1), 0));
+
+@sample
+mode == 1 ? (
+  // ---- Test mode: input muted, generate anchor/test tone cycle ----
+  segA = floor(srate * 0.7);
+  gap  = floor(srate * 0.3);
+  cyc  = 2 * (segA + gap);
+
+  test_done ? (
+    seg = -1;
+    sig = 0;
+  ) : (
+    tpos >= cyc ? tpos = 0;
+
+    tpos < segA ? ( seg = 0; spos = tpos; ) :
+    tpos < segA + gap ? ( seg = -1; ) :
+    tpos < segA + gap + segA ? ( seg = 1; spos = tpos - segA - gap; ) :
+    ( seg = -1; );
+
+    ramp = srate * 0.01;
+    env = seg < 0 ? 0 :
+          spos < ramp ? 0.5 - 0.5*cos($pi*spos/ramp) :
+          spos > segA - ramp ? 0.5 - 0.5*cos($pi*(segA-spos)/ramp) :
+          1;
+
+    // smooth the user-adjusted offset so level changes don't click
+    off_sm += (MEAS[cur_ear*32+cur_band] - off_sm) * 0.0005;
+
+    pha += 2*$pi*1000/srate;        pha >= 2*$pi ? pha -= 2*$pi;
+    phb += 2*$pi*BANDF[cur_band]/srate; phb >= 2*$pi ? phb -= 2*$pi;
+
+    sig = seg == 0 ? sin(pha) * db2lin(ANCHOR_DB) * env :
+          seg == 1 ? sin(phb) * db2lin(min(TONE_CAP_DB, ANCHOR_DB + off_sm)) * env :
+          0;
+
+    tpos += 1;
+  );
+
+  spl0 = (earmode == 0 || cur_ear == 0) ? sig : 0;
+  spl1 = (earmode == 0 || cur_ear == 1) ? sig : 0;
+) : mode == 0 ? (
+  // ---- Correct mode: crossfeed -> reverb -> EQ -> trim ----
+  // fi/fcb/fsb/fv/xl/xr and the xf_* states are audio-private: @gfx uses
+  // i/t/ch etc. on the UI thread and must never share these variables
+  xf_on ? (
+    // bs2b: lowpass the opposite channel across, highboost the direct path
+    xf_lo_l = xf_a0_lo*spl0 + xf_b1_lo*xf_lo_l;
+    xf_lo_r = xf_a0_lo*spl1 + xf_b1_lo*xf_lo_r;
+    xf_hi_l = xf_a0_hi*spl0 + xf_a1_hi*xf_as_l + xf_b1_hi*xf_hi_l;
+    xf_hi_r = xf_a0_hi*spl1 + xf_a1_hi*xf_as_r + xf_b1_hi*xf_hi_r;
+    xf_as_l = spl0; xf_as_r = spl1;
+    xl = (xf_hi_l + xf_lo_r) * xf_gain;
+    xr = (xf_hi_r + xf_lo_l) * xf_gain;
+  ) : (
+    xl = spl0; xr = spl1;
+  );
+  rvb_act ? (
+    // wet = partitioned convolution (one-partition latency); dry runs through
+    // a matching CONV_P delay ring so the two stay sample-aligned
+    cvdl = DRY_L[conv_pos]; cvdr = DRY_R[conv_pos];
+    DRY_L[conv_pos] = xl; DRY_R[conv_pos] = xr;
+    INB_L[conv_pos] = xl; INB_R[conv_pos] = xr;
+    xl = dry_g * cvdl + wet_g * OUTB_L[conv_pos];
+    xr = dry_g * cvdr + wet_g * OUTB_R[conv_pos];
+    conv_pos += 1;
+    conv_pos >= CONV_P ? ( conv_pos = 0; rvb_process(); );
+  );
+  fi = 0;
+  loop(NFIT,
+    fcb = COEF + fi*5;
+    fsb = STATE + fi*2;
+    fv = fcb[0]*xl + fsb[0];
+    fsb[0] = fcb[1]*xl - fcb[3]*fv + fsb[1];
+    fsb[1] = fcb[2]*xl - fcb[4]*fv;
+    xl = fv;
+
+    fcb = COEF + (NFIT + fi)*5;
+    fsb = STATE + (NFIT + fi)*2;
+    fv = fcb[0]*xr + fsb[0];
+    fsb[0] = fcb[1]*xr - fcb[3]*fv + fsb[1];
+    fsb[1] = fcb[2]*xr - fcb[4]*fv;
+    xr = fv;
+    fi += 1;
+  );
+  trim_sm += (trim - trim_sm) * 0.0005; // per-sample gain smoothing, no steps
+  spl0 = xl * trim_sm;
+  spl1 = xr * trim_sm;
+);
+// mode == 2: bypass, samples pass through untouched
+
+// While the convolver is active, Test/Bypass carry the same CONV_P delay so
+// actual latency always equals the reported pdc_delay (test tones unaffected:
+// a loudness match is indifferent to absolute latency).
+(rvb_act && mode != 0) ? (
+  cvdl = DRY_L[conv_pos]; cvdr = DRY_R[conv_pos];
+  DRY_L[conv_pos] = spl0; DRY_R[conv_pos] = spl1;
+  spl0 = cvdl; spl1 = cvdr;
+  conv_pos += 1;
+  conv_pos >= CONV_P ? ( conv_pos = 0; );
+);
+
+@gfx 700 460
+
+// Compute the plot from GAINS, never from live COEF: the audio thread
+// rewrites COEF mid-glide and a torn read draws garbage spikes. Reading the
+// per-band gain doubles is safe (each value is individually valid), and the
+// RBJ math is duplicated here into @gfx-private scratch on purpose.
+function calc_plot() local(ch, t, f, w, i, cb, g, a, w0, hb, alpha, cw, ib0, c1, s1, c2, s2, re_n, im_n, re_d, im_d, prod) (
+  ch = 0;
+  loop(2,
+    i = 0;
+    loop(NFIT,
+      cb = GSCR + (ch*NFIT + i)*5;
+      g = GAINS[ch*64+i];
+      f = FITF[i];
+      (abs(g) < 0.01 || f > srate * 0.45) ? (
+        cb[0] = 1; cb[1] = 0; cb[2] = 0; cb[3] = 0; cb[4] = 0;
+      ) : (
+        a = 10^(g/40);
+        w0 = 2*$pi*f/srate;
+        // sinh inlined: sinhx() is audio-thread code and EEL2 function
+        // locals are static -> calling it from @gfx would corrupt them
+        hb = 0.5 * log(2) * FITBW[i] * w0 / sin(w0);
+        alpha = sin(w0) * (exp(hb) - exp(-hb)) * 0.5;
+        cw = cos(w0);
+        ib0 = 1 / (1 + alpha/a);
+        cb[0] = (1 + alpha*a) * ib0;
+        cb[1] = -2*cw * ib0;
+        cb[2] = (1 - alpha*a) * ib0;
+        cb[3] = -2*cw * ib0;
+        cb[4] = (1 - alpha/a) * ib0;
+      );
+      i += 1;
+    );
+    t = 0;
+    loop(128,
+      f = 20 * exp(log(1000) * t / 127); // 20 Hz .. 20 kHz
+      w = 2*$pi*f/srate;
+      c1 = cos(w); s1 = sin(w); c2 = cos(2*w); s2 = sin(2*w);
+      prod = 1;
+      i = 0;
+      loop(NFIT,
+        cb = GSCR + (ch*NFIT + i)*5;
+        re_n = cb[0] + cb[1]*c1 + cb[2]*c2;
+        im_n = -(cb[1]*s1 + cb[2]*s2);
+        re_d = 1 + cb[3]*c1 + cb[4]*c2;
+        im_d = -(cb[3]*s1 + cb[4]*s2);
+        prod *= (re_n*re_n + im_n*im_n) / max(re_d*re_d + im_d*im_d, 10^(-30));
+        i += 1;
+      );
+      PLOT[ch*128 + t] = 10 * log10(max(prod, 10^(-300)));
+      t += 1;
+    );
+    ch += 1;
+  );
+);
+
+function fx(f) ( px0 + pw * log(f/20) / log(1000) );
+function fy(db) ( py0 + ph_ * (0.5 - db/(2*PLOT_RANGE)) );
+
+// ---- input handling: queue requests only, @block executes them ----
+while ((c = gfx_getchar()) > 0) (
+  mode == 1 ? (
+    c == 30064      ? ( pend_adj += 0.5; ) :      // up
+    c == 1685026670 ? ( pend_adj -= 0.5; ) :      // down
+    c == 13 || c == 32 ? ( pend_confirm = 1; ) :  // enter / space
+    c == 1818584692 ? ( pend_move -= 1; ) :       // left
+    c == 1919379572 ? ( pend_move += 1; ) :       // right
+    c == $'r' || c == $'R' ? ( pend_reset = 1; );
+  );
+);
+mw = mouse_wheel; mouse_wheel = 0;
+(mode == 1 && mw != 0) ? ( pend_adj += (mw > 0 ? 0.5 : -0.5); );
+
+// ---- shared chrome ----
+gfx_r = 0.09; gfx_g = 0.10; gfx_b = 0.12; gfx_a = 1;
+gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_setfont(1, "Arial", 16);
+gfx_setfont(2, "Arial", 38, 'b');
+gfx_setfont(3, "Arial", 13);
+
+gfx_setfont(3);
+gfx_r = 0.4; gfx_g = 0.42; gfx_b = 0.45;
+gfx_x = gfx_w - 42; gfx_y = gfx_h - 18;
+gfx_drawstr("v0.7");
+
+mode == 1 ? (
+  // ================= TEST MODE UI =================
+  gfx_setfont(1);
+  gfx_r = 0.85; gfx_g = 0.87; gfx_b = 0.9;
+  gfx_x = 20; gfx_y = 16;
+  earmode == 1 ? (
+    test_done ? gfx_drawstr("Hearing test — per-ear")
+    : cur_ear == 0 ? gfx_drawstr("Hearing test — LEFT ear")
+    : gfx_drawstr("Hearing test — RIGHT ear");
+  ) : gfx_drawstr("Hearing test — both ears");
+
+  test_done ? (
+    gfx_setfont(2);
+    gfx_r = 0.4; gfx_g = 0.9; gfx_b = 0.5;
+    gfx_x = 20; gfx_y = gfx_h*0.35;
+    gfx_drawstr("Test complete");
+    gfx_setfont(1);
+    gfx_r = 0.85; gfx_g = 0.87; gfx_b = 0.9;
+    gfx_x = 20; gfx_y += 54;
+    gfx_drawstr("Switch Mode to 'Correct' to hear the result.");
+    gfx_x = 20; gfx_y += 24;
+    gfx_drawstr("Left arrow revisits bands.");
+  ) : (
+    // current band
+    gfx_setfont(2);
+    gfx_r = 1; gfx_g = 1; gfx_b = 1;
+    gfx_x = 20; gfx_y = 60;
+    BANDF[cur_band] >= 1000 ?
+      gfx_printf("%.1f kHz", BANDF[cur_band]/1000)
+    : gfx_printf("%d Hz", BANDF[cur_band]);
+
+    // what is sounding right now
+    gfx_setfont(1);
+    gfx_x = 20; gfx_y = 120;
+    seg == 0 ? (
+      gfx_r = 0.55; gfx_g = 0.75; gfx_b = 1;
+      gfx_drawstr("Playing: REFERENCE  (1 kHz)");
+    ) : seg == 1 ? (
+      gfx_r = 1; gfx_g = 0.75; gfx_b = 0.35;
+      gfx_drawstr("Playing: TEST TONE");
+    ) : (
+      gfx_r = 0.45; gfx_g = 0.47; gfx_b = 0.5;
+      gfx_drawstr("...");
+    );
+
+    // offset readout
+    gfx_setfont(2);
+    gfx_r = 1; gfx_g = 0.75; gfx_b = 0.35;
+    gfx_x = 20; gfx_y = 160;
+    gfx_printf("%+.1f dB", MEAS[cur_ear*32+cur_band]);
+    gfx_setfont(1);
+    gfx_r = 0.6; gfx_g = 0.62; gfx_b = 0.65;
+    gfx_x += 16; gfx_y += 18;
+    gfx_drawstr("test tone vs reference");
+    MEAS[cur_ear*32+cur_band] >= OFF_MAX - 0.01 ? (
+      gfx_r = 1; gfx_g = 0.4; gfx_b = 0.35;
+      gfx_x = 20; gfx_y += 28;
+      gfx_drawstr("Level cap reached (safety limit)");
+    );
+
+    // progress dots
+    doty = gfx_h - 130;
+    st = 0;
+    loop(n_steps,
+      de = earmode == 1 ? floor(st / (NBANDS-1)) : 0;
+      db_ = st % (NBANDS-1);
+      db_ = db_ < ANCHOR_IDX ? db_ : db_+1;
+      dotx = 20 + st * ((gfx_w - 40) / n_steps);
+      FLAGS[de*32+db_] ? (
+        gfx_r = 0.35; gfx_g = 0.8; gfx_b = 0.45;
+      ) : (
+        gfx_r = 0.3; gfx_g = 0.32; gfx_b = 0.36;
+      );
+      gfx_circle(dotx + 6, doty + 6, 5, 1, 1);
+      st == cur_step ? (
+        gfx_r = 1; gfx_g = 1; gfx_b = 1;
+        gfx_circle(dotx + 6, doty + 6, 7, 0, 1);
+      );
+      st += 1;
+    );
+    gfx_setfont(3);
+    gfx_r = 0.6; gfx_g = 0.62; gfx_b = 0.65;
+    gfx_x = 20; gfx_y = doty + 20;
+    gfx_printf("band %d / %d", cur_step + 1, n_steps);
+  );
+
+  // help
+  gfx_setfont(3);
+  gfx_r = 0.55; gfx_g = 0.57; gfx_b = 0.6;
+  gfx_x = 20; gfx_y = gfx_h - 78;
+  gfx_drawstr("Match the TEST TONE loudness to the REFERENCE tone:");
+  gfx_x = 20; gfx_y += 17;
+  gfx_drawstr("Up/Down or mouse wheel: adjust level (0.5 dB)   Enter/Space: confirm & next");
+  gfx_x = 20; gfx_y += 17;
+  gfx_drawstr("Left/Right: previous / next band   R: reset band");
+  gfx_x = 20; gfx_y += 17;
+  gfx_drawstr("Keep your system volume FIXED for the whole test. Click the window first for keyboard focus.");
+) : (
+  // ================= CORRECT / BYPASS UI =================
+  // recompute every frame: cheap, and always reflects the live filter bank
+  calc_plot();
+
+  PLOT_RANGE = 18;
+  px0 = 46; py0 = 44;
+  pw = gfx_w - px0 - 16;
+  ph_ = gfx_h - py0 - 96;
+
+  gfx_setfont(1);
+  gfx_r = 0.85; gfx_g = 0.87; gfx_b = 0.9;
+  gfx_x = 20; gfx_y = 14;
+  mode == 2 ? gfx_drawstr("Bypass (correction not applied)")
+            : gfx_drawstr("Correction curve");
+
+  // grid
+  gfx_setfont(3);
+  gl = -PLOT_RANGE;
+  while (gl <= PLOT_RANGE) (
+    gl == 0 ? ( gfx_r = gfx_g = gfx_b = 0.35; ) : ( gfx_r = gfx_g = gfx_b = 0.18; );
+    gfx_line(px0, fy(gl), px0 + pw, fy(gl));
+    gfx_r = gfx_g = gfx_b = 0.5;
+    gfx_x = 8; gfx_y = fy(gl) - 6;
+    gfx_printf("%+d", gl);
+    gl += 6;
+  );
+  gi = 0;
+  loop(10,
+    gf = gi == 0 ? 20 : gi == 1 ? 50 : gi == 2 ? 100 : gi == 3 ? 200 :
+         gi == 4 ? 500 : gi == 5 ? 1000 : gi == 6 ? 2000 : gi == 7 ? 5000 :
+         gi == 8 ? 10000 : 20000;
+    gfx_r = gfx_g = gfx_b = 0.18;
+    gfx_line(fx(gf), py0, fx(gf), py0 + ph_);
+    gfx_r = gfx_g = gfx_b = 0.5;
+    gfx_x = fx(gf) - 10; gfx_y = py0 + ph_ + 6;
+    gf >= 1000 ? gfx_printf("%dk", gf/1000) : gfx_printf("%d", gf);
+    gi += 1;
+  );
+
+  // measured deviation points (raw, before strength/cap)
+  // NOTE: loop() has no break in EEL2 — iterate exactly the channels to draw
+  ndraw = earmode == 1 ? 2 : 1;
+  ch = 0;
+  loop(ndraw,
+    src = earmode == 1 ? ch : 0;
+    ch == 0 ? ( gfx_r = 0.4; gfx_g = 0.75; gfx_b = 1; )
+            : ( gfx_r = 1; gfx_g = 0.5; gfx_b = 0.45; );
+    gfx_a = 0.9;
+    i = 0;
+    loop(NBANDS,
+      (i != ANCHOR_IDX && FLAGS[src*32+i]) ? (
+        dv = MEAS[src*32+i] - ISOREL[i];
+        gfx_rect(fx(BANDF[i]) - 2, fy(max(-PLOT_RANGE, min(PLOT_RANGE, dv))) - 2, 5, 5);
+      );
+      i += 1;
+    );
+    ch += 1;
+  );
+
+  // applied EQ curves
+  ch = 0;
+  loop(ndraw,
+    ch == 0 ? ( gfx_r = 0.4; gfx_g = 0.75; gfx_b = 1; )
+            : ( gfx_r = 1; gfx_g = 0.5; gfx_b = 0.45; );
+    gfx_a = mode == 2 ? 0.35 : 1;
+    t = 0;
+    loop(127,
+      f0 = 20 * exp(log(1000) * t / 127);
+      f1 = 20 * exp(log(1000) * (t+1) / 127);
+      gfx_line(fx(f0), fy(PLOT[ch*128+t]), fx(f1), fy(PLOT[ch*128+t+1]));
+      t += 1;
+    );
+    ch += 1;
+  );
+  gfx_a = 1;
+
+  // status line
+  nmeasL = 0; nmeasR = 0;
+  i = 0;
+  loop(NBANDS,
+    i != ANCHOR_IDX ? (
+      FLAGS[i] ? nmeasL += 1;
+      FLAGS[32+i] ? nmeasR += 1;
+    );
+    i += 1;
+  );
+  gfx_setfont(3);
+  gfx_r = 0.6; gfx_g = 0.62; gfx_b = 0.65;
+  gfx_x = 20; gfx_y = gfx_h - 60;
+  earmode == 1 ?
+    gfx_printf("Measured: L %d/14, R %d/14   strength %d%%", nmeasL, nmeasR, strength)
+  : gfx_printf("Measured: %d/14 bands   strength %d%%", nmeasL, strength);
+  gfx_x = 20; gfx_y += 17;
+  nmeasL + nmeasR == 0 ?
+    gfx_drawstr("No measurements yet — switch Mode to 'Test' to run the hearing test.")
+  : gfx_printf("Output gain: %.1f dB (trim %+.1f, auto headroom)", 20*log10(max(trim, 10^(-10))), outtrim);
+
+  // crossfeed/reverb status: reads only scalar values, never audio-thread arrays
+  xf_on ? (
+    gfx_x = 20; gfx_y += 17;
+    gfx_printf("Crossfeed: bs2b, cut %d Hz, feed %.1f dB", xf_fcut, xf_feed);
+  );
+  rvb_on ? (
+    gfx_x = 20; gfx_y += 17;
+    ir_ready ? (
+      gfx_printf("Reverb: %d-ch IR, %.1f s — wet %+.1f dB, dry %+.1f dB (latency 2048 spl, PDC)",
+                 ir_nch_disp, ir_len_sec, rvb_wet, rvb_dry);
+    ) : (
+      gfx_drawstr("Reverb: on, but no valid IR loaded (needs a 1/2/4-ch WAV in Data/ReverbIRs)");
+    );
+  );
+);

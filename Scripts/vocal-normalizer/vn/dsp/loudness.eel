@@ -1,0 +1,169 @@
+// @noindex
+// Vocal Normalizer -- the measurement kernel.
+//
+// Reduces a take to two per-frame sums of squares on one time grid:
+//
+//   _OUT_ZB   the signal through the VOCAL BAND -- what gets normalised
+//   _OUT_ZK   the same signal through BS.1770 K-weighting -- ordinary LUFS,
+//             carried along so the panel can show both numbers and the gap
+//             between them, which is the bias the band measurement removes
+//   _OUT_N    samples actually accumulated into the frame
+//   _OUT_PK   peak |sample| over all channels, unfiltered
+//
+// Both chains run per channel and their squares are SUMMED across channels,
+// not averaged: that is BS.1770's rule (z = sum of the per-channel mean
+// squares, unity weight for L and R) and it is also the only safe choice for a
+// vocal, because a mono sum cancels a widened double against itself and would
+// report a stereo take several dB quieter than it is. Surround weights are not
+// implemented -- this measures a vocal, and a vocal is one or two channels.
+//
+// A "frame" here is a QUARTER of a gating block, not a block. BS.1770's blocks
+// overlap by 75%, so every block is exactly four consecutive quarter-blocks
+// and Lua can slide a four-wide window over what this produces. The kernel
+// therefore never has to know what a gating block is, and changing the block
+// length changes only a multiplier in Lua.
+//
+// Frames sit on a grid defined in TIME: frame f begins at exactly f * hop
+// seconds. _HOPF is that hop in samples and is FRACTIONAL -- 100 ms at 44100
+// is 4410 exactly, but 90 ms is 3969.0 and 70 ms is 3087.0 while 100 ms at
+// 44056 is not an integer at all -- so every frame rounds its own start from
+// its absolute frame number. _FOFF and _SOFF carry the block's origin so the
+// rounding cannot restart per block and drift against the audio.
+//
+// Filter state carries across Executes, which is what makes the block
+// boundaries invisible: there is no lookahead and no overlap in the reads, so
+// _RESET must be set on the first Execute of a pass and only that one. A pass
+// that forgot to reset would start with the previous take's filter state --
+// a few milliseconds of wrong answer at the very front, which is exactly the
+// kind of thing that hides for years.
+//
+// Runs under ReaImGui's CreateFunctionFromEEL: standard EEL2 plus
+// memcpy/memset. Globals persist between Execute calls.
+//
+// Tasks (set _TASK, then Execute):
+//   0  setup     allocate filter state from _NCHAN and _NSECT
+//   1  measure   consume a block of interleaved samples -> the four outputs
+//
+// Lua sets these before Execute:
+//   _IN                             interleaved input buffer (address)
+//   _OUT_ZB _OUT_ZK _OUT_N _OUT_PK  output arrays (addresses)
+//   _COEF                           band sections, _NSECT * 5 doubles as
+//                                   b0,b1,b2,a1,a2 already divided by a0
+//   _KCOEF                          K-weighting, 2 * 5 doubles, same layout
+//   _HEAP                           first heap slot the kernel may use
+//   _NCHAN _NSECT _MAXSAMP          memory map (setup only)
+//   _NSAMP _NFRAMES _HOPF _FOFF _SOFF
+//   _RESET                          1 on the first Execute of a pass
+//
+// Lua reads back with Function_GetValue:
+//   memtop heap_ok nsect_echo
+
+function halloc(n) (
+  _ha = memptr;
+  memptr += n;
+  memset(_ha, 0, n);
+  _ha;
+);
+
+function clear_state() (
+  memset(st,  0, nch * nsect * 2);
+  memset(kst, 0, nch * 4);
+);
+
+function ksetup() local(top) (
+  nch   = max(_NCHAN, 1);
+  nsect = max(_NSECT, 1);
+  nsect_echo = nsect;
+
+  memptr = _HEAP;
+  st  = halloc(nch * nsect * 2 + 2);
+  kst = halloc(nch * 4 + 2);
+  memtop = memptr;
+
+  // EEL does not fail loudly when it runs out of heap: every access past the
+  // limit is redirected to one shared scratch slot. Probing the two ENDS of a
+  // buffer does not catch that, because the write and the read of the far end
+  // both land in the scratch slot and agree with each other. Two ADJACENT
+  // slots at the very top do -- if that end is unallocated both writes hit the
+  // one slot, so the first reads back the second's value.
+  st[0] = 1;
+  top = memtop - 2;
+  top[0] = 2;
+  top[1] = 3;
+  heap_ok = st[0] == 1 && top[0] == 2 && top[1] == 3;
+  st[0] = 0;
+  top[0] = 0;
+  top[1] = 0;
+
+  memptr;
+);
+
+// Transposed direct form II, which keeps its state in the same units as the
+// signal and so does not lose precision over a long take the way direct form I
+// state can. One section, one channel, one sample; `zp` is that channel's
+// state pair for that section.
+function biquad(cp, zp, x) local(y) (
+  y = cp[0] * x + zp[0];
+  zp[0] = cp[1] * x - cp[3] * y + zp[1];
+  zp[1] = cp[2] * x - cp[4] * y;
+  y;
+);
+
+function kmeasure()
+         local(f, i, n, s0, base, c, k, x, ax, y, zb, zk, pk, sp) (
+  _RESET ? clear_state();
+
+  f = 0;
+  while (f < _NFRAMES) (
+    // Absolute frame number, so the rounding is the same one Lua does when it
+    // decides how many samples to read.
+    s0 = floor((_FOFF + f) * _HOPF + 0.5) - _SOFF;
+    n  = floor((_FOFF + f + 1) * _HOPF + 0.5) - _SOFF - s0;
+    n > _NSAMP - s0 ? n = _NSAMP - s0;
+    n < 0 ? n = 0;
+
+    zb = 0;
+    zk = 0;
+    pk = 0;
+    i = 0;
+    while (i < n) (
+      base = (s0 + i) * nch;
+      c = 0;
+      while (c < nch) (
+        x  = _IN[base + c];
+        ax = abs(x);
+        ax > pk ? pk = ax;
+
+        y  = x;
+        sp = st + c * nsect * 2;
+        k  = 0;
+        while (k < nsect) (
+          y = biquad(_COEF + k * 5, sp + k * 2, y);
+          k += 1;
+        );
+        zb += y * y;
+
+        y  = x;
+        sp = kst + c * 4;
+        k  = 0;
+        while (k < 2) (
+          y = biquad(_KCOEF + k * 5, sp + k * 2, y);
+          k += 1;
+        );
+        zk += y * y;
+
+        c += 1;
+      );
+      i += 1;
+    );
+
+    _OUT_ZB[f] = zb;
+    _OUT_ZK[f] = zk;
+    _OUT_N[f]  = n;
+    _OUT_PK[f] = pk;
+    f += 1;
+  );
+);
+
+_TASK == 0 ? ksetup() :
+_TASK == 1 ? kmeasure() : 0;

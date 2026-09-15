@@ -1,0 +1,584 @@
+desc:DeClick (multiband click repair)
+// @description DeClick
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Real-time click and mouth-noise repair. A port of Paul Licameli's
+//   Audacity/Nyquist De-Clicker.
+//
+//   Detects brief spikes in per-band step-peak envelopes - the level must
+//   stand above the background both before AND after the spike, which is what
+//   separates a click from a transient - and repairs them with crossfaded
+//   peaking-EQ cuts at the affected band centres, over 1 to 4 passes.
+//
+//   Lookahead is implemented as reported PDC latency.
+//
+//   See also the offline DeClick script, which derives its threshold from each
+//   file's own click distribution instead of a dialled-in setting.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// Port of Paul Licameli's Audacity/Nyquist "De-Clicker" to real-time JSFX.
+// Detects brief spikes in per-band step-peak envelopes (level must stand above
+// the background both before AND after the spike) and repairs them with
+// crossfaded peaking-EQ cuts at the affected band centers, over 1-4 passes.
+// Lookahead is implemented as PDC-reported latency.
+
+slider1:action=1<0,1,1{Isolate changes,Apply changes}>Action
+slider2:passes=2<1,4,1>Passes
+slider3:sens_db=6<0.5,42,0.1>Sensitivity threshold (dB)
+slider4:step_ms=5<1,20,0.5>Step size (ms)
+slider5:max_steps_sl=2<1,10,1>Max click length (steps)
+slider6:sep_sl=3<1,10,1>Min time between clicks (steps)
+slider7:crackle_db=-45<-200,0,1>Dense click threshold (dB)
+slider8:flo_sl=150<20,22050,1>Low frequency (Hz)
+slider9:fhi_sl=9600<20,22050,1>High frequency (Hz)
+slider10:nbands_sl=12<1,30,1>Number of bands
+slider11:xfade_ms=5<0,20,0.5>Crossfade widen (ms)
+
+in_pin:left
+in_pin:right
+out_pin:left
+out_pin:right
+
+@init
+MAXB = 30;
+MAXP = 4;
+SPMASK = 63;             // step-peak ring length 64 (per band)
+ENVMASK = 127;           // gain-envelope ring length 128 (per band)
+WAVLEN = 2048;           // waveform display buckets (~4 s window)
+WAVMASK = 2047;
+CKMASK = 255;            // click-event ring length 256
+FLOORAMP = 0.00001;      // -100 dB guard added to band peaks (as in original)
+ABSTHRESH = 10^(-10);    // -200 dB absolute threshold (fixed obsolete control)
+RISE = 1;                // max rise/fall time in steps (fixed in original)
+
+function p2ceil(x) local(k) ( k = 64; while (k < x) ( k += k; ); k );
+function sinh_(x) ( (exp(x) - exp(-x)) * 0.5 );
+
+dring = p2ceil(0.62 * srate);   // per pass/ch audio delay ring (covers worst-case D)
+drylen = p2ceil(2.5 * srate);   // dry ring (worst-case 4 passes * D)
+
+mpos = 0;
+function alloc(n) local(r) ( r = mpos; mpos += n; r );
+
+// per-band tables (recomputed in recalc)
+tb_fc     = alloc(MAXB);
+tb_det_b0 = alloc(MAXB);  // detection bandpass (normalized; b1=0, b2=-b0)
+tb_det_a1 = alloc(MAXB);
+tb_det_a2 = alloc(MAXB);
+tb_alpha  = alloc(MAXB);  // repair peaking alpha
+tb_m2cos  = alloc(MAXB);  // repair -2*cos(w0)
+tb_stag   = alloc(MAXP);  // per-pass step-grid stagger (samples)
+
+// gfx scalars (audio writes single values; @gfx only reads)
+gfx_env = alloc(MAXB);    // last step peak, pass 0 ch 0 (linear)
+gfx_cut = alloc(MAXB);    // last repair depth per band (dB, negative)
+gfx_tim = alloc(MAXB);    // sample clock of last detection per band
+
+// detection detail scratch
+dt_band  = alloc(MAXB);
+dt_ratio = alloc(MAXB);
+
+// ---- zeroed state region ----
+state0  = mpos;
+det_st  = alloc(MAXP*2*MAXB*4);   // 2 cascaded biquads x (s1,s2)
+rep_st  = alloc(MAXP*2*MAXB*2);
+rep_dy  = alloc(MAXP*2*MAXB*8);   // cb0,cb1,cb2,ca1,ca2,lastgain,-,-
+sp_ring = alloc(MAXP*2*MAXB*64);  // per-band step peaks
+am_ring = alloc(MAXP*2*64);       // broadband step peaks (crackle test)
+env_ring= alloc(MAXP*2*MAXB*128); // repair gain (dB) per step
+sp_acc  = alloc(MAXP*2*MAXB);
+am_acc  = alloc(MAXP*2);
+skipun  = alloc(MAXP*2*MAXB);     // per-band next allowed candidate step
+sctr    = alloc(MAXP);            // step-boundary countdown
+scount  = alloc(MAXP);            // completed-step counter
+rphase  = alloc(MAXP);            // repair reader phase within step
+rsc     = alloc(MAXP);            // repair reader step number
+ractive = alloc(MAXP);
+lastr   = alloc(MAXP);
+wav_ring = alloc(WAVLEN*2);   // display: bucket min/max of the input
+ck_ring  = alloc(256*2);      // display: click events (bucket pos, severity dB)
+state1  = mpos;
+dry_ring = alloc(2*drylen);
+aud_ring = alloc(MAXP*2*dring);
+state_end = mpos;
+
+function recalc_live() (
+  rel_thresh = 10^(sens_db/20);
+  det_thresh = sqrt(rel_thresh);   // per-band test at half threshold (late steepness)
+  crackle_amp = 10^(crackle_db/20);
+);
+
+function recalc() local(b, fb, ft, fc, w0, sn, al, a0i, p) (
+  recalc_live();
+  nb = max(1, min(MAXB, floor(nbands_sl + 0.5)));
+  np = max(1, min(MAXP, floor(passes + 0.5)));
+  stepsz = max(1, floor(srate * step_ms * 0.001 + 0.5));
+  msteps = max(1, min(10, floor(max_steps_sl + 0.5)));
+  sep = max(1, min(10, floor(sep_sl + 0.5)));
+  skewsep = sep + floor(sep/3);
+  pad = max(RISE, skewsep);
+  xfsamp = floor(srate * xfade_ms * 0.001 + 0.5);
+  xfsteps = xfsamp > 0 ? ceil(xfsamp / stepsz) : 0;
+  flo = min(flo_sl, fhi_sl);
+  fhi = max(flo_sl, fhi_sl);
+  bandsok = fhi > flo * 1.001;
+  D = (msteps + pad + 3) * stepsz + xfsamp;
+  totD = np * D;
+  bw_oct = bandsok ? log(fhi/flo) / log(2) / nb : 1;
+
+  b = 0;
+  while (b < nb) (
+    fb = flo * (fhi/flo)^(b/nb);
+    ft = flo * (fhi/flo)^((b+1)/nb);
+    fc = min(sqrt(fb*ft), 0.47*srate);
+    tb_fc[b] = fc;
+    w0 = 2*$pi*fc/srate;
+    sn = sin(w0);
+    // detection: constant-peak-gain bandpass, twice the band width (wide detection bands)
+    al = sn * sinh_(0.5*log(2) * (2*bw_oct) * w0/sn);
+    a0i = 1/(1+al);
+    tb_det_b0[b] = al*a0i;
+    tb_det_a1[b] = -2*cos(w0)*a0i;
+    tb_det_a2[b] = (1-al)*a0i;
+    // repair peaking: one band width
+    tb_alpha[b] = sn * sinh_(0.5*log(2) * bw_oct * w0/sn);
+    tb_m2cos[b] = -2*cos(w0);
+    b += 1;
+  );
+
+  memset(state0, 0, state_end - state0);
+  b = 0;
+  while (b < MAXP*2*MAXB) ( rep_dy[b*8+5] = 1000000; b += 1; );  // force coeff recompute
+  p = 0;
+  while (p < MAXP) (
+    tb_stag[p] = floor(stepsz * p / np);
+    sctr[p] = tb_stag[p] + stepsz;
+    lastr[p] = -1000000000;
+    p += 1;
+  );
+  samp_t = 0;
+  apos = 0;
+  dpos = 0;
+  clickcount = 0;
+  wbucket = max(16, floor(srate * 4 / WAVLEN));   // ~4 s scroll window
+  wpos = 0;
+  wb_ctr = 0;
+  wmin_acc = 2;
+  wmax_acc = -2;
+  ck_head = 0;
+  memset(gfx_env, 0, 3*MAXB);
+  pdc_delay = totD;
+  pdc_bot_ch = 0;
+  pdc_top_ch = 2;
+);
+
+// ---- detection: port of the Nyquist test-click / test-click-boundary ----
+// cx_sp / cx_am point at the current band's step-peak ring and the broadband ring.
+function sp_at(k) ( cx_sp[k & SPMASK] );
+function am_at(k) ( cx_am[k & SPMASK] );
+
+// Scan one side of a candidate click. Leading side: base=n, dirn=-1 probes
+// steps n-1, n-2, ... Trailing side: base=n+w-1, dirn=+1 probes n+w, n+w+1, ...
+// Returns the background level, or -1 if no edge found within RISE steps.
+// Sets tcb_len = length of the quiet zone found (skewsep if fully quiet).
+function tcboundary(base, dirn, bar) local(r, found, v, bg, lim, ii, ambar, brk) (
+  found = 0; r = 0; bg = 0;
+  while (!found && r < RISE) (
+    r += 1;
+    v = sp_at(base + dirn*r);
+    v < bar ? ( found = 1; bg = v; );
+  );
+  found ? (
+    lim = max(0, skewsep - r);
+    tcb_len = skewsep;
+    ii = 0; ambar = 0; brk = 0;
+    while (ii < lim && !brk) (
+      v = sp_at(base + dirn*(r + 1 + ii));
+      (ambar || v >= bar) ? (
+        // once an edge of a neighboring bump is seen, later steps pass only
+        // if the broadband amplitude is below the dense-click threshold
+        ambar = 1;
+        am_at(base + dirn*(r + 1 + ii)) >= crackle_amp ? (
+          tcb_len = r + ii;
+          brk = 1;
+        );
+      ) : (
+        v > bg ? ( bg = v; );
+      );
+      ii += 1;
+    );
+    bg;
+  ) : ( -1; );
+);
+
+// Test candidate step n. Returns click width in steps (0 = no click);
+// sets tc_ratio = min(foreground/bg_before, foreground/bg_after).
+function test_click(n) local(fg1, bg1, len1, w, fg2, maxfg, minfg, bgt, bg2, width, fgs, done) (
+  width = 0;
+  fg1 = sp_at(n);
+  bg1 = tcboundary(n, -1, fg1 / det_thresh);
+  bg1 >= 0 ? (
+    len1 = tcb_len;
+    len1 >= 2*sep - skewsep ? (
+      maxfg = 0; minfg = 1000000000; bg2 = 0; fgs = 0; done = 0;
+      w = 1;
+      while (w <= msteps && !done) (
+        fg2 = sp_at(n + w - 1);
+        fg2 > maxfg ? ( maxfg = fg2; );
+        fg2 < minfg ? ( minfg = fg2; );
+        bgt = tcboundary(n + w - 1, 1, fg2 / det_thresh);
+        (bgt >= 0 && len1 + tcb_len >= 2*sep && minfg > ABSTHRESH) ? (
+          fgs = maxfg; bg2 = bgt; width = w;   // set or extend the click end
+        ) : (
+          width ? ( done = 1; );
+        );
+        w += 1;
+      );
+      width ? ( tc_ratio = min(fgs/bg1, fgs/bg2); );
+    );
+  );
+  width;
+);
+
+// Step boundary for pass p: push accumulators for completed step s, then test
+// the candidate whose full detection window just became available.
+function step_work(p, s) local(c, pc, b, n, ndet, w, wmax, maxr, k, kk, depth, bnd, eb, kmin, kmax, kt, cc, vv, aa, bb) (
+  c = 0;
+  while (c < 2) (
+    pc = p*2 + c;
+    b = 0;
+    while (b < nb) (
+      k = pc*MAXB + b;
+      sp_ring[(k<<6) + (s & SPMASK)] = sp_acc[k] + FLOORAMP;
+      sp_acc[k] = 0;
+      b += 1;
+    );
+    am_ring[(pc<<6) + (s & SPMASK)] = am_acc[pc];
+    am_acc[pc] = 0;
+    (p == 0 && c == 0) ? (
+      b = 0;
+      while (b < nb) (
+        gfx_env[b] = sp_ring[((pc*MAXB + b)<<6) + (s & SPMASK)];
+        b += 1;
+      );
+    );
+    c += 1;
+  );
+
+  n = s - msteps - pad + 1;
+  n >= pad ? (
+    c = 0;
+    while (c < 2) (
+      pc = p*2 + c;
+      cx_am = am_ring + (pc<<6);
+      ndet = 0; wmax = 0; maxr = 0;
+      b = 0;
+      while (b < nb) (
+        k = pc*MAXB + b;
+        n >= skipun[k] ? (
+          cx_sp = sp_ring + (k<<6);
+          w = test_click(n);
+          w ? (
+            dt_band[ndet] = b;
+            dt_ratio[ndet] = tc_ratio;
+            ndet += 1;
+            w > wmax ? ( wmax = w; );
+            tc_ratio > maxr ? ( maxr = tc_ratio; );
+            skipun[k] = n + w + 1;
+          );
+        );
+        b += 1;
+      );
+      // late steepness test: keep the combined click only if the strongest
+      // band detail reaches the full threshold
+      (ndet && maxr >= rel_thresh) ? (
+        kmin = max(0, n - xfsteps - 1);
+        kmax = n + wmax + xfsteps + 1;
+        aa = n*stepsz;             // click start (pass-local step grid, samples)
+        bb = (n + wmax)*stepsz;    // click end
+        cc = max(xfsamp, 1);
+        kk = 0;
+        while (kk < ndet) (
+          bnd = dt_band[kk];
+          depth = -20*log10(dt_ratio[kk]);   // repair gain, negative dB
+          depth < 0 ? (
+            eb = env_ring + ((pc*MAXB + bnd)<<7);
+            k = kmin;
+            while (k <= kmax) (
+              kt = k*stepsz;
+              vv = min(kt - aa + xfsamp, bb + xfsamp - kt) / cc;
+              vv = max(0, min(1, vv));
+              vv > 0 ? ( eb[k & ENVMASK] += depth * vv; );
+              k += 1;
+            );
+            gfx_cut[bnd] = depth;
+            gfx_tim[bnd] = samp_t;
+          );
+          kk += 1;
+        );
+        clickcount += 1;
+        // display event: click position mapped back to the plugin-input
+        // timeline (pass p's stream is delayed by p*D), severity in dB
+        k = (ck_head & CKMASK)*2;
+        ck_ring[k] = (n*stepsz + tb_stag[p] - p*D) / wbucket;
+        ck_ring[k+1] = 20*log10(maxr);
+        ck_head += 1;
+      );
+      c += 1;
+    );
+  );
+);
+
+// One pass over one sample: reads globals x0/x1 (pass input), leaves the
+// pass output (delayed by D, repaired) in x0/x1.
+function pass_run(p) local(c, b, k0, x, v, b0, a1, a2, st, y1, y2, wr, rd, del0, del1, s, r, frac, g, e0, e1, eb, dyb, stt, aA, al, ra0i, xx) (
+  // detection filters + step-peak accumulation on the pass input
+  c = 0;
+  while (c < 2) (
+    x = c ? x1 : x0;
+    k0 = (p*2 + c)*MAXB;
+    b = 0;
+    while (b < nb) (
+      b0 = tb_det_b0[b]; a1 = tb_det_a1[b]; a2 = tb_det_a2[b];
+      st = det_st + (k0 + b)*4;
+      y1 = b0*x + st[0];
+      st[0] = -a1*y1 + st[1];
+      st[1] = -b0*x - a2*y1;
+      y2 = b0*y1 + st[2];
+      st[2] = -a1*y2 + st[3];
+      st[3] = -b0*y1 - a2*y2;
+      v = abs(y2);
+      v > sp_acc[k0 + b] ? ( sp_acc[k0 + b] = v; );
+      b += 1;
+    );
+    v = abs(x);
+    v > am_acc[p*2 + c] ? ( am_acc[p*2 + c] = v; );
+    c += 1;
+  );
+
+  // pass delay ring
+  aud_ring[(p*2)*dring + apos] = x0;
+  aud_ring[(p*2+1)*dring + apos] = x1;
+  samp_t >= D ? (
+    rd = apos - D;
+    rd < 0 ? ( rd += dring; );
+    del0 = aud_ring[(p*2)*dring + rd];
+    del1 = aud_ring[(p*2+1)*dring + rd];
+  ) : ( del0 = 0; del1 = 0; );
+
+  // step boundary (this sample completes a step on this pass's grid)
+  sctr[p] -= 1;
+  sctr[p] <= 0 ? (
+    s = scount[p];
+    scount[p] += 1;
+    sctr[p] = stepsz;
+    step_work(p, s);
+  );
+
+  // repair the delayed signal from the per-band gain envelopes
+  (!ractive[p] && samp_t >= D + tb_stag[p]) ? ( ractive[p] = 1; rphase[p] = 0; rsc[p] = 0; );
+  ractive[p] ? (
+    r = rsc[p];
+    frac = rphase[p] / stepsz;
+    r != lastr[p] ? (
+      // recycle a ring slot safely behind the read position
+      r >= 8 ? (
+        c = 0;
+        while (c < 2) (
+          b = 0;
+          while (b < nb) (
+            env_ring[(((p*2+c)*MAXB + b)<<7) + ((r-8) & ENVMASK)] = 0;
+            b += 1;
+          );
+          c += 1;
+        );
+      );
+      lastr[p] = r;
+    );
+    c = 0;
+    while (c < 2) (
+      xx = c ? del1 : del0;
+      k0 = (p*2 + c)*MAXB;
+      b = 0;
+      while (b < nb) (
+        eb = env_ring + ((k0 + b)<<7);
+        e0 = eb[r & ENVMASK];
+        e1 = eb[(r+1) & ENVMASK];
+        g = e0 + (e1 - e0)*frac;
+        stt = rep_st + (k0 + b)*2;
+        (g < -0.01 || abs(stt[0]) + abs(stt[1]) > 0.000000001) ? (
+          dyb = rep_dy + (k0 + b)*8;
+          g != dyb[5] ? (
+            aA = 10^(g/40);
+            al = tb_alpha[b];
+            ra0i = 1/(1 + al/aA);
+            dyb[0] = (1 + al*aA)*ra0i;
+            dyb[1] = tb_m2cos[b]*ra0i;
+            dyb[2] = (1 - al*aA)*ra0i;
+            dyb[3] = tb_m2cos[b]*ra0i;
+            dyb[4] = (1 - al/aA)*ra0i;
+            dyb[5] = g;
+          );
+          y1 = dyb[0]*xx + stt[0];
+          stt[0] = dyb[1]*xx - dyb[3]*y1 + stt[1];
+          stt[1] = dyb[2]*xx - dyb[4]*y1;
+          xx = y1;
+        ) : (
+          stt[0] = 0; stt[1] = 0;
+        );
+        b += 1;
+      );
+      c ? ( x1 = xx; ) : ( x0 = xx; );
+      c += 1;
+    );
+    rphase[p] += 1;
+    rphase[p] >= stepsz ? ( rphase[p] = 0; rsc[p] += 1; );
+  ) : (
+    x0 = del0; x1 = del1;
+  );
+);
+
+recalc();
+c_passes = passes; c_step = step_ms; c_ms = max_steps_sl; c_sep = sep_sl;
+c_flo = flo_sl; c_fhi = fhi_sl; c_nb = nbands_sl; c_xf = xfade_ms;
+
+@slider
+recalc_live();
+(passes != c_passes || step_ms != c_step || max_steps_sl != c_ms ||
+ sep_sl != c_sep || flo_sl != c_flo || fhi_sl != c_fhi ||
+ nbands_sl != c_nb || xfade_ms != c_xf) ? (
+  c_passes = passes; c_step = step_ms; c_ms = max_steps_sl; c_sep = sep_sl;
+  c_flo = flo_sl; c_fhi = fhi_sl; c_nb = nbands_sl; c_xf = xfade_ms;
+  pend_recalc = 1;
+);
+
+@block
+pend_recalc ? ( pend_recalc = 0; recalc(); );
+
+@sample
+in0 = spl0; in1 = spl1;
+// waveform display: bucket min/max of the input across both channels
+wmax_acc = max(wmax_acc, max(in0, in1));
+wmin_acc = min(wmin_acc, min(in0, in1));
+wb_ctr += 1;
+wb_ctr >= wbucket ? (
+  wav_ring[(wpos & WAVMASK)*2] = wmin_acc;
+  wav_ring[(wpos & WAVMASK)*2 + 1] = wmax_acc;
+  wpos += 1;
+  wb_ctr = 0;
+  wmin_acc = 2;
+  wmax_acc = -2;
+);
+dry_ring[dpos] = in0;
+dry_ring[drylen + dpos] = in1;
+samp_t >= totD ? (
+  rdd = dpos - totD;
+  rdd < 0 ? ( rdd += drylen; );
+  d0 = dry_ring[rdd];
+  d1 = dry_ring[drylen + rdd];
+) : ( d0 = 0; d1 = 0; );
+
+bandsok ? (
+  x0 = in0; x1 = in1;
+  pidx = 0;
+  while (pidx < np) ( pass_run(pidx); pidx += 1; );
+  action ? ( spl0 = x0; spl1 = x1; ) : ( spl0 = x0 - d0; spl1 = x1 - d1; );
+) : (
+  action ? ( spl0 = d0; spl1 = d1; ) : ( spl0 = 0; spl1 = 0; );
+);
+apos += 1;
+apos >= dring ? ( apos = 0; );
+dpos += 1;
+dpos >= drylen ? ( dpos = 0; );
+samp_t += 1;
+
+@gfx 620 340
+gfx_r = 0.09; gfx_g = 0.09; gfx_b = 0.11; gfx_a = 1;
+gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_r = 0.9; gfx_g = 0.9; gfx_b = 0.9;
+gfx_x = 8; gfx_y = 8;
+gfx_drawstr("De-Clicker v0.2   latency ");
+gfx_drawnumber(pdc_delay * 1000 / srate, 1);
+gfx_drawstr(" ms   clicks ");
+gfx_drawnumber(clickcount, 0);
+
+// ---- scrolling waveform (plugin input, newest at the right edge) ----
+g_wx0 = 8;
+g_wx1 = gfx_w - 8;
+g_wy0 = 28;
+g_wy1 = max(g_wy0 + 40, gfx_h - 88);
+g_mid = (g_wy0 + g_wy1) * 0.5;
+g_half = (g_wy1 - g_wy0) * 0.5;
+gfx_r = 0.13; gfx_g = 0.13; gfx_b = 0.16; gfx_a = 1;
+gfx_rect(g_wx0, g_wy0, g_wx1 - g_wx0, g_wy1 - g_wy0);
+gfx_r = 0.25; gfx_g = 0.25; gfx_b = 0.3;
+gfx_line(g_wx0, g_mid, g_wx1, g_mid);
+g_npx = g_wx1 - g_wx0;
+g_bpp = WAVLEN / g_npx;    // display buckets per pixel column
+gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.9; gfx_a = 1;
+g_i = 0;
+while (g_i < g_npx) (
+  g_b0 = floor(wpos - WAVLEN + g_i*g_bpp);
+  g_b1 = floor(g_b0 + g_bpp);
+  g_mn = 0; g_mx = 0;
+  g_k = max(g_b0, 0);
+  while (g_k <= g_b1) (
+    g_k < wpos ? (
+      g_mn = min(g_mn, wav_ring[(g_k & WAVMASK)*2]);
+      g_mx = max(g_mx, wav_ring[(g_k & WAVMASK)*2 + 1]);
+    );
+    g_k += 1;
+  );
+  g_mn = max(-1, g_mn); g_mx = min(1, g_mx);
+  gfx_line(g_wx0 + g_i, g_mid - g_mx*g_half, g_wx0 + g_i, g_mid - g_mn*g_half);
+  g_i += 1;
+);
+
+// ---- click markers: color and thickness follow severity ----
+g_n = min(ck_head, 256);
+g_k = ck_head - g_n;
+while (g_k < ck_head) (
+  g_pos = ck_ring[(g_k & CKMASK)*2];
+  g_sev = ck_ring[(g_k & CKMASK)*2 + 1];
+  g_x = g_wx1 - (wpos - g_pos) / g_bpp;
+  (g_x >= g_wx0 && g_x <= g_wx1) ? (
+    g_s = max(0, min(1, (g_sev - sens_db) / 30));  // 0 at threshold, 1 at +30 dB
+    g_th = 1 + floor(g_s*4 + 0.5);                 // 1..5 px
+    gfx_r = 1; gfx_g = 0.85 - 0.75*g_s; gfx_b = 0.15; gfx_a = 0.9;
+    gfx_rect(min(max(g_x - g_th*0.5, g_wx0), g_wx1 - g_th), g_wy0, g_th, g_wy1 - g_wy0);
+  );
+  g_k += 1;
+);
+gfx_a = 1;
+
+// ---- band activity strip ----
+g_top = g_wy1 + 8;
+g_bot = gfx_h - 22;
+g_bw = (gfx_w - 16) / max(nb, 1);
+g_b = 0;
+while (g_b < nb) (
+  g_x = 8 + g_b*g_bw;
+  g_db = 20*log10(max(gfx_env[g_b], 0.0000001));
+  g_hh = max(0, min(1, (g_db + 90)/90)) * (g_bot - g_top);
+  gfx_r = 0.30; gfx_g = 0.55; gfx_b = 0.85; gfx_a = 1;
+  gfx_rect(g_x + 1, g_bot - g_hh, max(g_bw - 2, 1), g_hh);
+  g_age = (samp_t - gfx_tim[g_b]) / srate;
+  (gfx_tim[g_b] > 0 && g_age >= 0 && g_age < 0.5) ? (
+    gfx_r = 1; gfx_g = 0.3; gfx_b = 0.25; gfx_a = 1 - g_age*2;
+    gfx_rect(g_x + 1, g_top, max(g_bw - 2, 1), g_bot - g_top);
+    gfx_a = 1;
+  );
+  g_b += 1;
+);
+gfx_r = 0.6; gfx_g = 0.6; gfx_b = 0.6; gfx_a = 1;
+gfx_x = 8; gfx_y = g_bot + 4;
+gfx_drawnumber(flo, 0);
+gfx_drawstr(" Hz");
+gfx_x = gfx_w - 78; gfx_y = g_bot + 4;
+gfx_drawnumber(fhi, 0);
+gfx_drawstr(" Hz");

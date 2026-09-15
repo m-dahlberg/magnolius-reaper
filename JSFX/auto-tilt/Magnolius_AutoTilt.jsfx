@@ -1,0 +1,537 @@
+desc:Auto Tilt (self-adjusting tilt EQ)
+// @description Auto Tilt
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Automatic tilt EQ aimed at sung vocals. It measures the long-term spectral
+//   slope of the incoming signal - dB per octave, a least-squares fit of
+//   log-spaced band levels against log2(f) - and applies the shelf pair that
+//   corrects it toward your target slope.
+//
+//   Because it measures continuously, one setting tracks a performance that
+//   changes tone as it goes, instead of a static curve dialled for one phrase.
+//
+//   See also the offline Auto Tilt script, which matches one clip to another
+//   and renders a new take rather than processing in real time.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - EQ tilt spectral analysis vocal automatic
+// Automatic tilt EQ, aimed at sung vocals.
+//
+// It measures the long-term spectral slope of the incoming signal - dB per
+// octave, least-squares fit of log-spaced band levels against log2(f) inside
+// the analysis range - and sets the gain of a tilt EQ so the OUTPUT lands on
+// a target slope.  The target is one Tone control running dark..bright
+// around a user-set neutral slope.
+//
+// The measurement is FEED-FORWARD: it is taken pre-EQ, so there is no control
+// loop to ring or hunt.  Everything about the motion is set by two time
+// constants which both default to tens of seconds; on a normal vocal the gain
+// settles in the first few seconds (Fast Start) and then effectively holds
+// for the rest of the song.
+//
+// Zero latency.  The EQ is two RBJ shelves in the time domain; the FFT is
+// only ever used to look, never to process, so no PDC is reported.
+//
+// THREADING - do not undo this.  Audio-side loop counters are named ai/aj/
+// ak/ab and every @gfx variable is g_-prefixed; nothing is named in both.
+// A loop counter shared between @gfx and @sample stomps audio-thread
+// indexing mid-loop.  @gfx never calls a function defined in @init; it only
+// reads the dsp* display copies that the audio thread refreshes per hop.
+
+slider1:tone=0<-100,100,1>Tone (Dark to Bright)
+slider2:neutral_slope=-8<-14,-2,0.1>Neutral Slope (dB per oct)
+slider3:tilt_fc=1000<200,4000,1:log>Tilt Pivot (Hz)
+slider4:max_tilt=6<0,12,0.1>Max Auto Tilt (dB)
+slider5:resp_s=20<1,120,0.5:log>Response (s)
+slider6:ana_s=8<1,60,0.5:log>Analysis Window (s)
+slider7:amount=100<0,100,1>Amount (%)
+slider8:offset_db=0<-6,6,0.05>Manual Offset (dB)
+slider9:gate_db=-40<-70,-10,0.5>Gate (dB RMS)
+slider10:ana_lo=120<40,500,1:log>Analysis Low (Hz)
+slider11:ana_hi=9000<3000,16000,10:log>Analysis High (Hz)
+slider12:shelf_s=0.55<0.25,1,0.01>Tilt Shelf Slope
+slider13:comp_on=1<0,1,1{Off,On}>Level Compensation
+slider14:freeze=0<0,1,1{Off,On}>Freeze
+slider15:trim_db=0<-12,12,0.1>Output Trim (dB)
+slider16:fast_start=1<0,1,1{Off,On}>Fast Start
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+@init
+ext_noinit = 1;             // do not re-run @init on every transport start
+
+TINY    = 10^(-30);         // EEL2 has no scientific notation: 4.47e-3 is a
+                            // silent syntax error that kills the section
+FFTSIZE = 8192;             // 171 ms @ 48k - long-term average, not a detector
+HALF    = FFTSIZE/2;
+HOP     = FFTSIZE/2;        // 50% overlap is plenty for a multi-second average
+MASK    = FFTSIZE-1;
+NB      = 32;               // analysis bands, log spaced across the range
+DISPN   = 160;              // points in the drawn filter response
+REFRESH = 64;               // shelf redesign interval, samples
+BAND_FLOOR = 45;            // clamp bands this far under the loudest, so a
+                            // dead HF region cannot fake an absurd slope
+TONE_RANGE = 0.5;           // dB per octave of target swing at Tone = +/-100
+COMP_MAX = 6;               // level-compensation clamp, dB
+BIGN    = 1000000;          // "already converged" frame count
+
+// ---- memory map (bump allocated) ---------------------------------------
+// fftbuf must sit at 0: FFT-visible buffers must not cross a multiple-of-
+// 65536-word boundary, and address 0 with a power-of-two size cannot.
+mpos = 0;
+function alloc(n) local(r) ( r = mpos; mpos += n; r; );
+
+fftbuf  = alloc(2*FFTSIZE);   // complex interleaved, L in re / R in im
+wind    = alloc(FFTSIZE);     // Hann
+inbufL  = alloc(FFTSIZE);     // pre-EQ input ring
+inbufR  = alloc(FFTSIZE);
+bandE   = alloc(NB);          // smoothed band power
+bandP   = alloc(NB);          // this frame's band power
+bandW   = alloc(NB);          // bins owned by the band
+bandFB  = alloc(NB);          // fallback bin for bands too narrow to own one
+bandFC  = alloc(NB);          // band centre frequency
+bandX   = alloc(NB);          // log2(fc) - mean(log2(fc)): the regressor
+bandSH  = alloc(NB);          // tilt response per band at exactly 1 dB tilt
+bandDB  = alloc(NB);          // measured density, dB
+dspDB   = alloc(NB);          // @gfx copy of bandDB
+dspF    = alloc(DISPN);       // @gfx response plot: frequency
+dspR    = alloc(DISPN);       // @gfx response plot: dB
+binband = alloc(HALF+1);      // bin -> band, or -1 outside the range
+C       = alloc(20);          // 4 biquad coefficient sets x 5
+St      = alloc(16);          // 4 biquad states x 4
+//   ci 0  = tilt low shelf   ci 5  = tilt high shelf
+//   ci 10 / 15 = scratch pair, used only to measure the unit-gain shape
+//   si 0/4 = low shelf L/R   si 8/12 = high shelf L/R
+
+// ---- biquads (transposed direct form I, as elsewhere in this repo) -------
+function setbq(ci,b0,b1,b2,a0,a1,a2)(
+  C[ci]=b0/a0; C[ci+1]=b1/a0; C[ci+2]=b2/a0; C[ci+3]=a1/a0; C[ci+4]=a2/a0;
+);
+function bq(in,ci,si) local(o)(
+  o = C[ci]*in + C[ci+1]*St[si] + C[ci+2]*St[si+1] - C[ci+3]*St[si+2] - C[ci+4]*St[si+3];
+  St[si+1]=St[si]; St[si]=in; St[si+3]=St[si+2]; St[si+2]=o; o;
+);
+// RBJ shelves with an explicit slope S.  f is clamped below Nyquist; the
+// shelf poles are unconditionally stable for every S > 0.
+function lowshelf(ci,f,g,s) local(A,w,cw,sw,al,t2,b0,b1,b2,a0,a1,a2)(
+  f=min(f,srate*0.45); s=max(s,0.05);
+  A=10^(g/40); w=2*$pi*f/srate; cw=cos(w); sw=sin(w);
+  al=sw*0.5*sqrt((A+1/A)*(1/s-1)+2); t2=2*sqrt(A)*al;
+  b0=A*((A+1)-(A-1)*cw+t2); b1=2*A*((A-1)-(A+1)*cw); b2=A*((A+1)-(A-1)*cw-t2);
+  a0=(A+1)+(A-1)*cw+t2; a1=-2*((A-1)+(A+1)*cw); a2=(A+1)+(A-1)*cw-t2;
+  setbq(ci,b0,b1,b2,a0,a1,a2);
+);
+function highshelf(ci,f,g,s) local(A,w,cw,sw,al,t2,b0,b1,b2,a0,a1,a2)(
+  f=min(f,srate*0.45); s=max(s,0.05);
+  A=10^(g/40); w=2*$pi*f/srate; cw=cos(w); sw=sin(w);
+  al=sw*0.5*sqrt((A+1/A)*(1/s-1)+2); t2=2*sqrt(A)*al;
+  b0=A*((A+1)+(A-1)*cw+t2); b1=-2*A*((A-1)+(A+1)*cw); b2=A*((A+1)+(A-1)*cw-t2);
+  a0=(A+1)-(A-1)*cw+t2; a1=2*((A-1)-(A+1)*cw); a2=(A+1)-(A-1)*cw-t2;
+  setbq(ci,b0,b1,b2,a0,a1,a2);
+);
+// a tilt of g dB is -g on the low shelf and +g on the high shelf: -g at DC,
+// 0 at the pivot, +g at Nyquist
+function design_tilt(ci,g)(
+  lowshelf (ci,   fcp, -g, shelf_s);
+  highshelf(ci+5, fcp,  g, shelf_s);
+);
+// magnitude of one normalized biquad, dB
+function bqmagdb(ci,f) local(w,cw,sw,c2,s2,nr,ni,dr,di)(
+  w=2*$pi*f/srate; cw=cos(w); sw=sin(w); c2=cos(2*w); s2=sin(2*w);
+  nr=C[ci]  +C[ci+1]*cw+C[ci+2]*c2;  ni=C[ci+1]*sw+C[ci+2]*s2;
+  dr=1      +C[ci+3]*cw+C[ci+4]*c2;  di=C[ci+3]*sw+C[ci+4]*s2;
+  10*log10((nr*nr+ni*ni)/(dr*dr+di*di+TINY)+TINY);
+);
+function tiltdb(f)( bqmagdb(0,f)+bqmagdb(5,f); );
+
+// ---- band mapping -------------------------------------------------------
+// Log-spaced bands over [flop, fhip].  Bands narrower than one FFT bin (low
+// frequencies, or a high sample rate) own no bins; they borrow the nearest
+// bin instead, so every band always carries a real measurement and the fit
+// never sees a -300 dB hole.
+function build_bands() local(ab,ak,af,abi,xs,lr)(
+  lr = log(fhip/flop);
+  xs = 0; ab = 0;
+  loop(NB,
+    bandFC[ab] = flop*exp(lr*(ab+0.5)/NB);
+    bandX[ab]  = log(bandFC[ab])/log(2);
+    xs += bandX[ab];
+    bandW[ab] = 0; bandFB[ab] = -1;
+    ab += 1;
+  );
+  xs /= NB;
+  sxx = 0; ab = 0;
+  loop(NB, bandX[ab] -= xs; sxx += sqr(bandX[ab]); ab += 1;);
+
+  ak = 0;
+  loop(HALF+1,
+    af = ak*srate/FFTSIZE;
+    (ak >= 1 && af >= flop && af <= fhip) ? (
+      abi = min(floor(NB*log(af/flop)/lr), NB-1);
+      binband[ak] = abi;
+      bandW[abi] += 1;
+    ) : ( binband[ak] = -1; );
+    ak += 1;
+  );
+  ab = 0;
+  loop(NB,
+    bandW[ab] < 1 ? (
+      bandFB[ab] = max(1, min(HALF-1, floor(bandFC[ab]*FFTSIZE/srate + 0.5)));
+      bandW[ab]  = 1;
+    );
+    ab += 1;
+  );
+  have_data = 0;          // the smoothed spectrum no longer matches the map
+);
+
+// Sensitivity: how many dB per octave of fitted slope one dB of tilt buys,
+// measured from the actual designed filter rather than assumed.  Recomputed
+// whenever the pivot, the shelf slope, the range or the sample rate move.
+function calc_shape() local(ab,sxy)(
+  design_tilt(10, 1);
+  sxy = 0; ab = 0;
+  loop(NB,
+    bandSH[ab] = bqmagdb(10,bandFC[ab]) + bqmagdb(15,bandFC[ab]);
+    sxy += bandX[ab]*bandSH[ab];
+    ab += 1;
+  );
+  sens = max(sxy/sxx, 0.02);
+);
+
+function build_disp() local(ai,lr)(
+  ai = 0; lr = log(min(20000,srate*0.45)/20);
+  loop(DISPN, dspF[ai] = 20*exp(lr*ai/(DISPN-1)); ai += 1;);
+);
+
+// ---- one analysis frame (audio thread only - @gfx must never call this) --
+function analyze() local(ai,aj,ak,ab,e,aL,aR,mx,sl,p,cs,cw,a)(
+  e = 0; ai = 0;
+  loop(FFTSIZE,
+    aj = (apos+ai)&MASK;                 // apos points at the oldest sample
+    aL = inbufL[aj]; aR = inbufR[aj];
+    e += aL*aL + aR*aR;
+    fftbuf[ai*2]   = aL*wind[ai];
+    fftbuf[ai*2+1] = aR*wind[ai];
+    ai += 1;
+  );
+  frms = sqrt(e/(2*FFTSIZE));
+
+  frms > gate_lin ? (
+    fft(fftbuf, FFTSIZE);
+    fft_permute(fftbuf, FFTSIZE);        // we index bins by frequency
+
+    ab = 0; loop(NB, bandP[ab] = 0; ab += 1;);
+    // |L_k|^2 + |R_k|^2 for the L+jR packing is |X_k|^2 + |X_{N-k}|^2
+    ak = 1;
+    loop(HALF-1,
+      ab = binband[ak];
+      ab >= 0 ? (
+        bandP[ab] += sqr(fftbuf[2*ak])   + sqr(fftbuf[2*ak+1])
+                   + sqr(fftbuf[2*(FFTSIZE-ak)]) + sqr(fftbuf[2*(FFTSIZE-ak)+1]);
+      );
+      ak += 1;
+    );
+    ab = 0;
+    loop(NB,
+      bandFB[ab] >= 0 ? (
+        ak = bandFB[ab];
+        bandP[ab] = sqr(fftbuf[2*ak])   + sqr(fftbuf[2*ak+1])
+                  + sqr(fftbuf[2*(FFTSIZE-ak)]) + sqr(fftbuf[2*(FFTSIZE-ak)+1]);
+      );
+      ab += 1;
+    );
+
+    nana += 1;
+    a = fast_start ? max(alpha_ana, 1/max(nana,1)) : alpha_ana;
+    have_data ? (
+      ab = 0; loop(NB, bandE[ab] += a*(bandP[ab]-bandE[ab]); ab += 1;);
+    ) : (
+      memcpy(bandE, bandP, NB); have_data = 1;
+    );
+  );
+
+  // The rest runs on gated frames too, so slider moves still take effect
+  // while the analysis itself is frozen.
+  have_data ? (
+    mx = -1000; ab = 0;
+    loop(NB,
+      bandDB[ab] = 10*log10(bandE[ab]*nrm/bandW[ab] + TINY);
+      mx = max(mx, bandDB[ab]);
+      ab += 1;
+    );
+    sl = 0; ab = 0;
+    loop(NB,
+      bandDB[ab] = max(bandDB[ab], mx - BAND_FLOOR);
+      sl += bandX[ab]*bandDB[ab];
+      ab += 1;
+    );
+    meas_slope = sl/sxx;                       // dB per octave, pre-EQ
+
+    targ_slope = neutral_slope + tone*0.01*TONE_RANGE;
+    tilt_need  = max(-max_tilt, min(max_tilt,
+                 amount*0.01*(targ_slope - meas_slope)/sens));
+
+    !freeze ? (
+      ngain += 1;
+      a = fast_start ? max(alpha_g, 1/max(ngain,1)) : alpha_g;
+      tilt_auto += a*(tilt_need - tilt_auto);
+    );
+    tilt_total = tilt_auto + offset_db;    // provisional, so comp_db below
+                                           // sees this frame's value
+    // Level compensation: the exact broadband change the tilt makes to the
+    // measured spectrum, inverted.  Deterministic - not a feedback loop.
+    comp_on ? (
+      cs = 0; cw = 0; ab = 0;
+      loop(NB,
+        p = bandE[ab];
+        cw += p;
+        cs += p*10^(bandSH[ab]*tilt_total*0.1);
+        ab += 1;
+      );
+      comp_db = max(-COMP_MAX, min(COMP_MAX, -10*log10(cs/(cw+TINY)+TINY)));
+    ) : ( comp_db = 0; );
+
+    memcpy(dspDB, bandDB, NB);   // memcpy has no loop counter to share
+  );
+
+  // outside the have_data guard: Manual Offset must work even on a signal
+  // that never opens the gate
+  tilt_total = tilt_auto + offset_db;
+);
+
+// ---- everything a slider move can change --------------------------------
+function update_all() local(reb)(
+  gate_lin  = 10^(gate_db/20);
+  alpha_ana = 1 - exp(-HOP/(srate*max(ana_s,0.1)));
+  alpha_g   = 1 - exp(-HOP/(srate*max(resp_s,0.1)));
+  trim_lin  = 10^(trim_db/20);
+
+  flop = max(20, min(ana_lo, srate*0.15));
+  fhip = min(min(20000, srate*0.45), max(ana_hi, flop*4));
+  fcp  = max(flop*1.5, min(tilt_fc, fhip*0.6));   // keep the pivot in-band
+
+  reb = 0;
+  (flop != flop_p || fhip != fhip_p || srate != srate_p) ? (
+    flop_p = flop; fhip_p = fhip; srate_p = srate;
+    build_bands(); build_disp(); reb = 1;
+  );
+  (reb || fcp != fcp_p || shelf_s != shelf_s_p) ? (
+    fcp_p = fcp; shelf_s_p = shelf_s;
+    calc_shape();
+  );
+);
+
+// ---- one-time state (guarded: @init also reruns on samplerate change) ----
+initdone != 20260828 ? (
+  initdone = 20260828;
+  apos = 0; hopct = 0; refct = 0;
+  have_data = 0; nana = 0; ngain = 0;
+  tilt_auto = 0; tilt_total = 0; tilt_app = 0; tilt_dsg = -999;
+  meas_slope = 0; targ_slope = 0; tilt_need = 0; frms = 0;
+  comp_db = 0; comp_s = 0; out_g = 1;
+  memset(bandE, 0, NB);
+  memset(St, 0, 16);
+);
+
+// rate-dependent scalars, refreshed on every @init
+ai = 0;
+loop(FFTSIZE, wind[ai] = 0.5 - 0.5*cos(2*$pi*ai/FFTSIZE); ai += 1;);
+wsum2 = 0; ai = 0; loop(FFTSIZE, wsum2 += sqr(wind[ai]); ai += 1;);
+// summed-over-bins power estimate needs the window's POWER sum: a band
+// holding a sine of amplitude A then reads 10*log10(A^2/2).
+nrm = 1/(2*FFTSIZE*wsum2);
+glide_a = 1 - exp(-REFRESH/(0.05*srate));      // 50 ms coefficient glide
+
+flop_p = -1; fhip_p = -1; srate_p = -1; fcp_p = -1; shelf_s_p = -1;
+update_all();
+design_tilt(0, tilt_app);
+tilt_dsg = tilt_app;
+
+@slider
+update_all();
+
+@sample
+// analysis tap is PRE-EQ: the measurement must not see its own correction
+inbufL[apos] = spl0;
+inbufR[apos] = spl1;
+apos = (apos+1)&MASK;
+
+refct += 1;
+refct >= REFRESH ? (
+  refct = 0;
+  tilt_app += glide_a*(tilt_total - tilt_app);
+  comp_s   += glide_a*(comp_db - comp_s);
+  out_g     = trim_lin*10^(comp_s/20);
+  abs(tilt_app - tilt_dsg) > 0.0005 ? (
+    design_tilt(0, tilt_app);
+    tilt_dsg = tilt_app;
+  );
+);
+
+spl0 = bq(bq(spl0, 0, 0), 5, 8 )*out_g;
+spl1 = bq(bq(spl1, 0, 4), 5, 12)*out_g;
+
+hopct += 1;
+hopct >= HOP ? (
+  hopct = 0;
+  analyze();
+  ai = 0; loop(DISPN, dspR[ai] = tiltdb(dspF[ai]); ai += 1;);
+);
+
+@serialize
+// The converged tilt travels with the project so reopening it sounds the
+// same instantly.  The measured spectrum is deliberately NOT stored: it is
+// relearned in a couple of seconds (nana reset), while the restored gain is
+// pinned steady meanwhile (ngain parked at BIGN).
+ser_reading = file_avail(0) >= 0;
+ser_magic = 20260828;
+file_var(0, ser_magic);
+file_var(0, tilt_auto);
+file_var(0, comp_s);
+ser_reading ? (
+  ser_magic != 20260828 ? ( tilt_auto = 0; comp_s = 0; );
+  have_data = 0; nana = 0; ngain = BIGN;
+  tilt_total = tilt_auto + offset_db;
+);
+
+@gfx 760 420
+// every variable here is g_-prefixed: audio-thread names must never be reused
+gfx_clear = 18 + 20*256 + 24*65536;
+gfx_setfont(1, "Arial", 13);
+
+g_lm = 48; g_rm = 14; g_tm = 44; g_bm = 26;
+g_w = gfx_w - g_lm - g_rm;
+g_h = gfx_h - g_tm - g_bm;
+g_flo = 20; g_fhi = min(20000, srate*0.5);
+g_lr = log(g_fhi/g_flo);
+g_dbr = 12;                                   // +/- dB shown
+
+// ---- frequency grid ----
+g_dec = 10;
+while (g_dec < g_fhi) (
+  g_m = 1;
+  while (g_m < 10) (
+    g_f = g_m*g_dec;
+    (g_f >= g_flo && g_f <= g_fhi) ? (
+      g_x = g_lm + g_w*log(g_f/g_flo)/g_lr;
+      g_maj = (g_m == 1 || g_m == 2 || g_m == 5);
+      gfx_r = gfx_g = gfx_b = g_maj ? 0.28 : 0.17; gfx_a = 1;
+      gfx_line(g_x, g_tm, g_x, g_tm+g_h);
+      g_maj ? (
+        gfx_r = gfx_g = gfx_b = 0.55;
+        g_f >= 1000 ? sprintf(#g_fl, "%dk", g_f/1000) : sprintf(#g_fl, "%d", g_f);
+        gfx_measurestr(#g_fl, g_tw, g_th);
+        gfx_x = g_x-g_tw*0.5; gfx_y = g_tm+g_h+4;
+        gfx_drawstr(#g_fl);
+      );
+    );
+    g_m += 1;
+  );
+  g_dec *= 10;
+);
+
+// ---- dB grid ----
+g_db = -g_dbr;
+while (g_db <= g_dbr) (
+  g_y = g_tm + g_h*(0.5 - g_db/(2*g_dbr));
+  gfx_r = gfx_g = gfx_b = g_db == 0 ? 0.38 : 0.20; gfx_a = 1;
+  gfx_line(g_lm, g_y, g_lm+g_w, g_y);
+  gfx_r = gfx_g = gfx_b = 0.55;
+  sprintf(#g_dl, "%+d", g_db);
+  gfx_measurestr(#g_dl, g_tw, g_th);
+  gfx_x = g_lm-g_tw-5; gfx_y = g_y-g_th*0.5;
+  gfx_drawstr(#g_dl);
+  g_db += 6;
+);
+
+// ---- analysis range + pivot markers ----
+gfx_a = 0.85; gfx_r = 0.75; gfx_g = 0.40; gfx_b = 0.40;
+g_x = g_lm + g_w*log(max(g_flo,flop)/g_flo)/g_lr; gfx_line(g_x, g_tm, g_x, g_tm+g_h);
+g_x = g_lm + g_w*log(min(g_fhi,fhip)/g_flo)/g_lr; gfx_line(g_x, g_tm, g_x, g_tm+g_h);
+gfx_r = 0.45; gfx_g = 0.70; gfx_b = 0.45;
+g_x = g_lm + g_w*log(fcp/g_flo)/g_lr; gfx_line(g_x, g_tm, g_x, g_tm+g_h);
+
+// ---- measured spectrum, target line and fit, all mean-removed so the plot
+//      is about SHAPE only (bandX is already zero-mean, so is the fit) ----
+have_data ? (
+  g_mean = 0; g_b = 0;
+  loop(NB, g_mean += dspDB[g_b]; g_b += 1;);
+  g_mean /= NB;
+
+  gfx_a = 0.55; gfx_r = 0.55; gfx_g = 0.55; gfx_b = 0.60;   // target slope
+  g_b = 0;
+  loop(NB,
+    g_x = g_lm + g_w*log(bandFC[g_b]/g_flo)/g_lr;
+    g_y = g_tm + g_h*(0.5 - max(-g_dbr,min(g_dbr,targ_slope*bandX[g_b]))/(2*g_dbr));
+    g_b == 0 ? ( gfx_x = g_x; gfx_y = g_y; ) : gfx_lineto(g_x, g_y);
+    g_b += 1;
+  );
+
+  gfx_a = 1; gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.95;      // measured
+  g_b = 0;
+  loop(NB,
+    g_x = g_lm + g_w*log(bandFC[g_b]/g_flo)/g_lr;
+    g_y = g_tm + g_h*(0.5 - max(-g_dbr,min(g_dbr,dspDB[g_b]-g_mean))/(2*g_dbr));
+    g_b == 0 ? ( gfx_x = g_x; gfx_y = g_y; ) : gfx_lineto(g_x, g_y);
+    g_b += 1;
+  );
+
+  gfx_a = 0.8; gfx_r = 0.30; gfx_g = 0.45; gfx_b = 0.70;    // its fitted slope
+  g_b = 0;
+  loop(NB,
+    g_x = g_lm + g_w*log(bandFC[g_b]/g_flo)/g_lr;
+    g_y = g_tm + g_h*(0.5 - max(-g_dbr,min(g_dbr,meas_slope*bandX[g_b]))/(2*g_dbr));
+    g_b == 0 ? ( gfx_x = g_x; gfx_y = g_y; ) : gfx_lineto(g_x, g_y);
+    g_b += 1;
+  );
+);
+
+// ---- the tilt curve actually being applied ----
+gfx_a = 1; gfx_r = 0.98; gfx_g = 0.62; gfx_b = 0.20;
+g_i = 0;
+loop(DISPN,
+  g_x = g_lm + g_w*log(dspF[g_i]/g_flo)/g_lr;
+  g_y = g_tm + g_h*(0.5 - max(-g_dbr,min(g_dbr,dspR[g_i]))/(2*g_dbr));
+  g_i == 0 ? ( gfx_x = g_x; gfx_y = g_y; ) : gfx_lineto(g_x, g_y);
+  g_i += 1;
+);
+
+// ---- readouts ----
+gfx_r = gfx_g = gfx_b = 0.82; gfx_a = 1;
+gfx_x = g_lm; gfx_y = 8;
+sprintf(#g_r1, "measured %+.2f    target %+.2f dB per oct     tilt %+.2f dB",
+        meas_slope, targ_slope, tilt_app);
+gfx_drawstr(#g_r1);
+gfx_r = gfx_g = gfx_b = 0.60;
+gfx_x = g_lm; gfx_y = 24;
+#g_st = "";
+freeze ? ( #g_st = "   FROZEN"; );
+(!freeze && frms <= gate_lin) ? ( #g_st = "   GATED"; );
+sprintf(#g_r2, "auto %+.2f  offset %+.2f  comp %+.2f dB   sens %.3f dB per oct per dB   in %.1f dBFS%s",
+        tilt_auto, offset_db, comp_s, sens, 20*log10(max(frms,TINY)), #g_st);
+gfx_drawstr(#g_r2);
+
+gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.95;
+gfx_x = g_lm+g_w-250; gfx_y = 8; gfx_drawstr("input shape");
+gfx_r = 0.98; gfx_g = 0.62; gfx_b = 0.20;
+gfx_x = g_lm+g_w-140; gfx_y = 8; gfx_drawstr("applied tilt");
+gfx_r = 0.55; gfx_g = 0.55; gfx_b = 0.60;
+gfx_x = g_lm+g_w-50;  gfx_y = 8; gfx_drawstr("target");
+// bump on every edit: REAPER caches compiled JSFX per FX instance, so a
+// stale version number here is how you spot an instance running old code
+gfx_r = gfx_g = gfx_b = 0.40;
+gfx_x = g_lm+g_w-30; gfx_y = gfx_h-16; gfx_drawstr("v1.0");
+
+!have_data ? (
+  gfx_r = gfx_g = gfx_b = 0.6;
+  gfx_x = g_lm + g_w*0.5 - 60; gfx_y = g_tm + g_h*0.5 - 8;
+  gfx_drawstr("waiting for signal...");
+);

@@ -1,0 +1,930 @@
+desc:Vocal Splitter (breath / sibilance / consonant / residual separator)
+
+// ---------------------------------------------------------------------------
+// THREADING CONVENTION (do not undo - looks verbose, prevents real corruption):
+//   audio thread (@init/@slider/@block/@sample): loop counters ai/aj only.
+//   @gfx thread: EVERY variable prefixed g_, loop counters gi/gj.
+//   Nothing is named in both. @gfx never calls audio-side functions.
+// LATENCY: cons_maxdur + 20 ms, reported via PDC. The consonant detector can
+//   only confirm a peak once the window that must contain it has gone by, so
+//   the budget follows that slider - and moving "Cons max duration" therefore
+//   DOES force a REAPER audio reset (a click / FX reload). Every other slider
+//   is reset-free; in particular the lookahead slider only pre-opens the gain
+//   envelope (shifts which classification slot the output reads).
+// ---------------------------------------------------------------------------
+
+in_pin:input L
+in_pin:input R
+out_pin:residual L
+out_pin:residual R
+out_pin:breath L
+out_pin:breath R
+out_pin:sibilance L
+out_pin:sibilance R
+out_pin:consonant L
+out_pin:consonant R
+
+// Consonants are detected by SHAPE: a peak in the consonant-band envelope
+// with a low point on each side of it, inside a sliding window of the maximum
+// duration. cons_prom (how far the peak must rise above the HIGHER of the two
+// low points) is the dominant control - see the detector in @sample.
+slider1:cons_prom=2<0.5,30,0.5>Cons peak prominence (dB)
+slider2:cons_mindur=8<2,60,1>Cons min duration (ms)
+slider3:cons_lvl=25<10,40,1>Cons level floor (dB below phrase)
+slider4:cons_maxdur=80<20,200,5>Cons max duration (ms) - sets latency
+slider5:cons_att=0.5<0.1,3,0.01>Cons env attack (ms)
+slider6:cons_rel=8<1,30,0.5>Cons env release (ms)
+slider7:sib_sens=0<-24,24,0.1>Sib sensitivity (dB)
+slider8:sib_lo=3000<1500,6000,10>Sib band low (Hz)
+slider9:sib_hi=8000<4000,12000,10>Sib band high (Hz)
+slider10:sib_mindur=40<10,100,1>Sib min duration (ms)
+slider11:br_sens=0<-24,24,0.1>Breath sensitivity (dB)
+slider12:br_below=25<5,40,0.5>Breath below phrase (dB)
+slider13:br_zcr=0.15<0.05,0.45,0.005>Breath noisiness ZCR
+slider14:br_mindur=80<40,300,5>Breath min duration (ms)
+slider15:br_tc=1500<100,3000,10>Phrase average (ms)
+slider16:hardness=0<0,100,1>Confidence hardness (pct)
+slider17:transition=8<3,20,0.5>Transition (ms)
+slider18:lookahead=10<0,20,1>Pre-open lookahead (ms) - never changes latency
+slider19:outmode=0<0,1,1{Sum to stereo,Split 8ch}>Output mode
+slider20:listen=0<0,4,1{All,Residual,Breath,Sibilance,Consonant}>Listen
+slider21:gain_res=0<-60,12,0.1>Residual gain (dB) - min is mute
+slider22:gain_br=0<-60,12,0.1>Breath gain (dB) - min is mute
+slider23:gain_sib=0<-60,12,0.1>Sibilance gain (dB) - min is mute
+slider24:gain_cons=0<-60,12,0.1>Consonant gain (dB) - min is mute
+slider25:cons_lo=1500<800,4000,10>Cons band low (Hz)
+slider26:cons_hi=6000<3000,12000,10>Cons band high (Hz)
+slider27:cons_aper=0.58<0.30,0.90,0.01>Cons periodicity (fires below)
+
+@serialize
+// Non-empty @serialize keeps plugin RAM alive across transport starts
+// (REAPER zeroes all RAM before @init otherwise). Load-bearing, do not remove.
+serdummy = 0;
+
+@init
+// ext_noinit: don't re-run @init on every playback start. Together with the
+// @serialize block above, rings survive transport without clicks.
+ext_noinit = 1;
+
+// ---- memory map (bump allocated, fixed sizes independent of srate) --------
+// The sample rings are 32768 (not 8192) because latency now follows
+// cons_maxdur: 200 ms at 96 kHz is 19200 samples and must fit behind the
+// write pointer with room to spare.
+// 0       dly0    32768   delayed input L (ring, RMASK)
+// 32768   dly1    32768   delayed input R
+// 65536   r_econs 32768   consonant evidence per input sample (ring)
+// 98304   r_esib  32768   raw sibilance evidence (pre duration gate)
+// 131072  r_ebr   32768   raw breath evidence (pre duration gate)
+// 163840  r_gsib  32768   sibilance duration gate (retroactively promoted)
+// 196608  r_gbr   32768   breath duration gate (retroactively promoted)
+// 229376  zring    2048   zero-crossing flags (ZMASK)
+// 231424  colring 16384   gfx columns: 4096 cols x [min,max,class,conf] (CMASK)
+// 247808  fenv      512   per-frame cons-band envelope peak, dB (FMASK)
+// 248320  ffb       512   per-frame full-band level peak, dB
+// 248832  fper      512   per-frame envelope periodicity (unvoiced proxy)
+// 249344  pring     256   DC-blocked amplitude envelope at ~4 kHz (PMASK)
+RMASK = 32767;
+ZMASK = 2047;
+CMASK = 4095;
+FMASK = 511;
+PMASK = 255;
+dly0    = 0;
+dly1    = 32768;
+r_econs = 65536;
+r_esib  = 98304;
+r_ebr   = 131072;
+r_gsib  = 163840;
+r_gbr   = 196608;
+zring   = 229376;
+colring = 231424;
+fenv    = 247808;
+ffb     = 248320;
+fper    = 248832;
+pring   = 249344;
+MEMTOP  = 249600;
+
+EPS = 10^(-10);          // EEL2 has no scientific notation; ^ is pow
+SILENCE_DB = -70;
+
+initdone != 12345 ? (
+  initdone = 12345;
+  memset(0, 0, MEMTOP);
+  phr2 = 0.001;          // phrase power starts near -30 dBFS, converges fast
+  cs_r = 1;              // smoothed confidences start as pure residual
+  cs_b = 0; cs_s = 0; cs_c = 0;
+  claim_end_fr = -1;     // no consonant claimed yet (see the de-dup note)
+  vper = 1; cper = 1;    // assume voiced until measured: fires nothing
+  memset(fper, 1, 512);  // ditto for the frames the detector reads
+  br_lvl = -100; br_trk = -100;   // breath-run level: nothing characterised yet
+  colmin = 1000; colmax = -1000;
+);
+
+// ---- rate-dependent scalars (recomputed on every @init rerun) -------------
+// dlylen (and therefore pdc_delay) is slider-dependent now and lives in
+// refresh_sliders(); see the LAT_MARGIN_MS note there.
+LAT_MARGIN_MS = 20;      // envelope release lag + one frame + onset pre-roll
+zwin   = min(floor(srate * 0.010 + 0.5), 2047);   // 10 ms ZCR window
+// zwin changed => ring contents no longer match zsum; safe to clear (analysis only)
+memset(zring, 0, 2048); zsum = 0; zi = 0;
+colsz  = 256;                                      // samples per gfx column
+
+function ms2coef(ms) ( 1 - exp(-1 / (max(ms, 0.01) * 0.001 * srate)) );
+
+// fixed-rate followers (not slider driven)
+// hffrac's envelopes must be FAST: a slow release holds a preceding vowel in
+// the denominator, delaying sibilance detection ~100 ms after the vowel ends
+// (measured). The sib min-duration gate provides the "sustained" requirement,
+// so a fast ratio here cannot misfire on transients by itself.
+hfmed_atk  = ms2coef(2);   hfmed_rel  = ms2coef(6);
+fbmed_atk  = ms2coef(2);   fbmed_rel  = ms2coef(6);
+fbfast_atk = ms2coef(1);   fbfast_rel = ms2coef(10);
+preroll_smp     = floor(srate * 0.008);            // onset backfill pre-roll 8 ms
+gap_max_smp     = floor(srate * 0.010);            // duration counters tolerate 10 ms dips
+
+// ---- consonant frame layer ------------------------------------------------
+// The consonant detector looks for a SHAPE, not for a spectral property: a
+// peak with a low point on each side of it. That search runs on the
+// consonant-band envelope decimated to 1 ms frames, not per sample - 1 ms is
+// finer than any distinction a 10..80 ms burst can carry, and it turns the
+// window scan into a couple of hundred comparisons per millisecond.
+//
+// What this replaced, and why: the previous detector was a normalized
+// autocorrelation over a 30 ms window, thresholded on absence of voicing. A
+// hard consonant is 10..25 ms. A burst that short between two vowels never
+// fills the window, so the surrounding voiced audio dominated the
+// autocorrelation, voicing never dropped, and the detector was structurally
+// blind to exactly the events it existed to find. (The metric BEFORE that one
+// was HF/full spectral balance, which did not separate consonants from vowels
+// at all - vowel p95 sat above consonant p50. Both failures are on record so
+// nobody re-derives them.)
+FHOP  = max(floor(srate * 0.001), 1);              // samples per frame (1 ms)
+fr_ms = FHOP * 1000 / srate;                       // true frame length, ms
+// (VAL_TOL_DB, the local-minimum hysteresis, is derived from cons_prom in
+// refresh_sliders - see the note there.)
+// Width of the peak "core" the unvoiced proxy is measured over: the shape
+// tells you WHERE the event is, the proxy tells you WHETHER it is a
+// consonant, and it is worth asking that question only where the event
+// actually has energy.
+CORE_DB = 6;
+
+// ---- unvoiced proxy: periodicity of the AMPLITUDE ENVELOPE ---------------
+// A voiced sound is a glottal pulse train, so its amplitude envelope pulses
+// at F0 (70-400 Hz => 2.5-14 ms). An unvoiced obstruent is noise, and noise
+// has no periodic envelope. Autocorrelating the ENVELOPE rather than the
+// waveform is both the cheaper and the better measurement: the envelope is
+// already decimated to ~4 kHz, and it survives a burst sitting on top of a
+// sustained vowel, which a waveform autocorrelation does not.
+//
+// Measured on the reference clip against the same independent ground truth
+// the realclip test uses (worst case over each region, so these are extremes,
+// not medians):
+//   envelope periodicity   consonant max 0.60 | vowel min 0.66   gap +0.06
+//   waveform AC, 30 ms     consonant max 0.66 | vowel min 0.61   gap -0.05
+//   waveform AC, 12 ms     consonant max 0.59 | vowel min 0.53   gap -0.06
+//   band ZCR 3-9 kHz       consonant p25 3364 | vowel p75 4909   INVERTED
+//   band ZCR 1.5-6 kHz     consonant p25 1682 | vowel p75 2182   INVERTED
+//   HF/full ratio          consonant p25 -32  | vowel p75 -30    no gap
+//   band env prominence    consonant med 5.2  | vowel max 6.5    no gap
+// This is the ONLY feature measured on this material with a positive gap.
+// Note especially that the two ZCR rows come out backwards: on a dark voice
+// the vowel carries more high-frequency breath than the consonants do, so a
+// brightness-flavoured proxy does not merely fail, it votes the wrong way.
+// The 150 Hz highpass before rectification is load-bearing - without it the
+// gap goes to -0.39, because low-frequency energy dominates the envelope and
+// swamps the F0 pulsing.
+PDEC  = max(floor(srate / 4000), 1);               // -> ~4 kHz envelope rate
+psrd  = srate / PDEC;
+PWIN  = min(floor(0.025 * psrd), 100);             // 25 ms AC window
+PLMIN = max(floor(psrd * 0.0025), 2);              // 2.5 ms lag = 400 Hz F0
+PLMAX = min(floor(psrd * 0.014), 60);              // 14 ms lag  = 71 Hz F0
+PUPD  = max(floor(0.005 * psrd), 1);               // recompute every 5 ms
+// NOTE: pdcnt/pucnt, NOT pdec/pupd. EEL2 identifiers are CASE-INSENSITIVE, so
+// a counter named pdec IS the constant PDEC and "pdec >= PDEC" is a
+// self-comparison. That exact bug silently disabled decimation in the
+// analyser this one replaces; do not rename these.
+penv_atk = ms2coef(0.2); penv_rel = ms2coef(1.0);
+// DC block on the decimated envelope, so the autocorrelation needs no
+// per-lag mean removal (which would cost as much again as the AC itself)
+// The corner has to sit ABOVE any envelope trend and BELOW the lowest F0.
+// A decaying plosive burst has a ~12 ms envelope decay = a ~13 Hz component,
+// and a smooth exponential autocorrelates near 1, so at the 4 Hz corner this
+// started with, a lone burst measured 0.76 "periodic" and was rejected - the
+// analyser was reading the shape of the burst, not its pitch. The lowest F0
+// worth keeping is 70 Hz. 30 Hz is the middle of that gap.
+pblk_c = 1 - exp(-2 * $pi * 30 / psrd);
+// The analyser is a TRAILING window plus a lagged copy, so a value produced
+// now describes audio about half a window plus half the lag range old. It
+// must be stored against the frames it actually describes, or the whole
+// measurement is useless: measured on a synthetic /t/, the burst's own frames
+// held 0.77 (the vowel and closure that preceded them) while the value that
+// actually described the burst, 0.45, landed 20 ms too late to gate anything.
+// Every consonant test read as voiced. The analyser this replaced carried the
+// same compensation as voi_lag_smp; do not drop it again.
+per_lag_fr = max(floor((PWIN * 0.5 + PLMAX * 0.5) * 1000 / psrd / fr_ms
+                       + 0.5), 1);
+hang_smp        = floor(srate * 0.350);            // breath hangover: one breath, one gesture
+// classification evidence smoother: fast attack, slow release. The raw
+// fast-envelope evidence flickers on noise; at high hardness a dip below the
+// residual tie point flips the winner sample-by-sample. Raw evidence drives
+// the run counters (onset timing), smoothed evidence drives classification.
+cls_atk = ms2coef(3); cls_rel = ms2coef(25);
+brtrk_up = ms2coef(5); brtrk_dn = ms2coef(300);  // breath-run level tracker
+// band peak tracker for the sibilance presence factor (-8.7 dB per 80 ms)
+pkdec = exp(-1 / (0.080 * srate));
+
+function bq_lp(f) instance(b0,b1,b2,a1,a2) local(w,cw,al,a0) (
+  f = min(f, srate * 0.45);
+  w = 2 * $pi * f / srate; cw = cos(w); al = sin(w) / 1.41421356;
+  a0 = 1 + al;
+  b0 = (1 - cw) * 0.5 / a0; b1 = (1 - cw) / a0; b2 = b0;
+  a1 = -2 * cw / a0; a2 = (1 - al) / a0;
+);
+function bq_hp(f) instance(b0,b1,b2,a1,a2) local(w,cw,al,a0) (
+  f = min(f, srate * 0.45);
+  w = 2 * $pi * f / srate; cw = cos(w); al = sin(w) / 1.41421356;
+  a0 = 1 + al;
+  b0 = (1 + cw) * 0.5 / a0; b1 = -(1 + cw) / a0; b2 = b0;
+  a1 = -2 * cw / a0; a2 = (1 - al) / a0;
+);
+function bq_run(x) instance(b0,b1,b2,a1,a2,x1,x2,y1,y2) local(y) (
+  y = b0*x + b1*x1 + b2*x2 - a1*y1 - a2*y2;
+  x2 = x1; x1 = x; y2 = y1; y1 = y;
+  y
+);
+function lin01(x) ( max(0, min(1, x)) );
+// breath onset promotion walk (audio thread only; called from @sample)
+function br_promote(brv) local(bi, bj) (
+  bi = min(br_run, dlylen);
+  while (bi < dlylen && r_ebr[(wpos - bi - 1) & RMASK] > 0.12) ( bi += 1; );
+  bi = min(bi + preroll_smp, dlylen);
+  while (bi > 0) (
+    bj = (wpos - bi) & RMASK;
+    r_ebr[bj] = max(r_ebr[bj], brv);
+    r_gbr[bj] = 1;
+    bi -= 1;
+  );
+);
+
+// slider-derived state must exist before the first block even if @slider
+// hasn't fired; fall through to the same routine @slider uses.
+function refresh_sliders() (
+  hp1.bq_hp(sib_lo); hp2.bq_hp(sib_lo);
+  lp1.bq_lp(sib_hi); lp2.bq_lp(sib_hi);
+  // consonant band: THE detection band now. The peak/valley search runs on
+  // this band's envelope, so cons_lo/cons_hi matter as much as cons_prom.
+  chp1.bq_hp(cons_lo); chp2.bq_hp(cons_lo);
+  clp1.bq_lp(cons_hi); clp2.bq_lp(cons_hi);
+  // fixed 150 Hz highpass feeding the envelope-periodicity analyser
+  php1.bq_hp(150); php2.bq_hp(150);
+  // These shape the envelope the peak/valley search reads, so they are
+  // detection-critical, not cosmetic: too long a release erases the trailing
+  // valley, too short lets band ripple through as false turning points.
+  hffast_atk = ms2coef(cons_att); hffast_rel = ms2coef(cons_rel);
+  phr_c   = ms2coef(br_tc);
+  tr_c    = ms2coef(transition);
+  // Latency: the detector cannot confirm a peak until the window that has to
+  // contain it has gone by, so the budget is the window plus the envelope's
+  // own lag. Changing this changes pdc_delay, which forces a REAPER audio
+  // reset - documented at the top of the file and on the slider itself.
+  // At 192 kHz a 200 ms window clamps to RMASK exactly as the old fixed
+  // 64 ms version clamped at 8191; the backfill reach degrades gracefully.
+  dlylen = min(floor(srate * (cons_maxdur + LAT_MARGIN_MS) * 0.001 + 0.5), RMASK);
+  // window and minimum span, in frames. The window is capped well inside the
+  // frame ring so the scan can never wrap onto its own history.
+  fwin = min(max(floor(cons_maxdur / fr_ms + 0.5), 4), FMASK - 8);
+  cons_min_fr = max(floor(cons_mindur / fr_ms + 0.5), 1);
+  // Hysteresis for "this frame is a local minimum": the valley walk carries
+  // on past any bump smaller than this. It has to scale with cons_prom, and
+  // that is the single most load-bearing number in the detector. A real
+  // vocal's band envelope ripples continuously, so with a small fixed
+  // tolerance the "nearest local minimum" is one or two frames from the peak
+  // and prominence collapses: measured on the reference clip at 1.5 dB,
+  // consonants scored 2.2-6.8 dB against vowels at 2.2-3.4 dB - no
+  // separation at all, and 0/14 consonants caught. The tolerance must be
+  // large enough that only a structural return counts as a turning point.
+  VAL_TOL_DB = max(cons_prom * 0.5, 2);
+  sibmin_smp  = max(floor(sib_mindur * 0.001 * srate), 1);
+  brmin_smp   = max(floor(br_mindur * 0.001 * srate), 1);
+  // provisional promotion point: early enough that the onset backfill can
+  // still reach slots the output hasn't consumed yet (see read-side timing)
+  sibprov_smp = max(floor(sibmin_smp * 0.4), 1);
+  brprov_smp  = max(floor(brmin_smp * 0.4), 1);
+  // evidence sustained past this is no consonant burst: reclaim the onset
+  sibrev_smp  = min(floor(srate * 0.030), sibmin_smp);
+  la_smp  = min(floor(lookahead * 0.001 * srate), dlylen);
+  kexp    = 1 + sqr(hardness * 0.01) * 15;
+  g_lin_r = gain_res  <= -60 ? 0 : 10^(gain_res  / 20);
+  g_lin_b = gain_br   <= -60 ? 0 : 10^(gain_br   / 20);
+  g_lin_s = gain_sib  <= -60 ? 0 : 10^(gain_sib  / 20);
+  g_lin_c = gain_cons <= -60 ? 0 : 10^(gain_cons / 20);
+  // hffrac_db separation measured on synthetic material: vowels ~ -68 dB,
+  // in-band noise ~ -7 dB (LR4 edges + envelope smoothing eat a few dB, so
+  // "dominant" never reaches 0 dB). -8 sits comfortably between.
+  sib_th  = -8 - sib_sens;
+  br_th   = br_below - br_sens;
+);
+refresh_sliders();
+
+@slider
+refresh_sliders();
+
+@block
+pdc_delay = dlylen;
+pdc_bot_ch = 0; pdc_top_ch = 8;
+// display copies for @gfx (scalars only; tearing is benign)
+disp_ec = e_cons; disp_es = es_dbg; disp_eb = eb_dbg;
+disp_cr = cs_r; disp_cb = cs_b; disp_cs = cs_s; disp_cc = cs_c;
+disp_prom = cprom; disp_per = cper; disp_cdb = hf_cdb;
+disp_fb = fb_db; disp_phr = phr_db;
+disp_nch = num_ch; disp_split = outmode;
+
+@sample
+in0 = spl0; in1 = spl1;
+xm = (in0 + in1) * 0.5;
+dly0[wpos & RMASK] = in0;
+dly1[wpos & RMASK] = in1;
+
+// ---- features -------------------------------------------------------------
+xb = lp2.bq_run(lp1.bq_run(hp2.bq_run(hp1.bq_run(xm))));   // sibilance band
+xc = clp2.bq_run(clp1.bq_run(chp2.bq_run(chp1.bq_run(xm)))); // consonant band
+axb = abs(xb); axc = abs(xc); axm = abs(xm);
+
+// consonant-band envelope: the signal the peak/valley detector runs on
+axc > hf_fast ? hf_fast += (axc - hf_fast) * hffast_atk : hf_fast += (axc - hf_fast) * hffast_rel;
+// sibilance-ratio envelopes stay on the sibilance band
+axb > hf_med  ? hf_med  += (axb - hf_med)  * hfmed_atk  : hf_med  += (axb - hf_med)  * hfmed_rel;
+axm > fb_med  ? fb_med  += (axm - fb_med)  * fbmed_atk  : fb_med  += (axm - fb_med)  * fbmed_rel;
+axm > fb_fast ? fb_fast += (axm - fb_fast) * fbfast_atk : fb_fast += (axm - fb_fast) * fbfast_rel;
+
+hffrac_db = 20 * log10((hf_med + EPS) / (fb_med + EPS));
+fb_db     = 20 * log10(fb_fast + EPS);
+hf_db     = 20 * log10(hf_med + EPS);
+hf_cdb    = 20 * log10(hf_fast + EPS);   // consonant-band env, dB (readout)
+
+// phrase-level average: it must track the VOICE, so it only updates at full
+// speed on voice-level signal. Frozen during silence, and material well
+// below the phrase (breaths!) only leaks in at 1/10 speed - otherwise a
+// long breath drags the reference down toward itself, the "below phrase"
+// evidence collapses mid-gesture, and the breath splits in two. The slow
+// leak still lets the reference follow a singer who genuinely gets quieter.
+fb_db > SILENCE_DB ? (
+  fb_db > phr_db - 15 ? ( phr2 += (fb_fast * fb_fast - phr2) * phr_c; )
+  : ( phr2 += (fb_fast * fb_fast - phr2) * phr_c * 0.1; );
+);
+phr_db = 10 * log10(phr2 + EPS);
+
+// zero-crossing rate over 10 ms sliding window
+zc = ((xm >= 0) != (pxm >= 0)) ? 1 : 0;
+pxm = xm;
+zsum += zc - zring[zi];
+zring[zi] = zc;
+zi = (zi + 1) & ZMASK;
+zi >= zwin ? ( zi = 0; );        // keep window compact; ring larger than zwin
+zcr = zsum / zwin;
+
+// ---- consonant detector: low - peak - low ---------------------------------
+// Envelope periodicity (the unvoiced proxy - see the @init note). Rectify a
+// 150 Hz-highpassed mid signal, follow it fast enough to see F0 pulsing,
+// decimate to ~4 kHz, DC-block, then take the peak normalized autocorrelation
+// over the F0 lag range. vper ~ 1 = the envelope pulses periodically (voiced);
+// vper low = noise (unvoiced). ~0.9 M mult-adds/s.
+xp = php2.bq_run(php1.bq_run(xm));
+axp = abs(xp);
+axp > p_env ? ( p_env += (axp - p_env) * penv_atk )
+            : ( p_env += (axp - p_env) * penv_rel );
+pdcnt += 1;
+pdcnt >= PDEC ? (
+  pdcnt = 0;
+  p_lp += (p_env - p_lp) * pblk_c;
+  // Below the silence gate, write a hard zero rather than what the DC
+  // blocker happens to be doing. Its own decay is a smooth exponential
+  // lasting ~200 ms, and a smooth exponential autocorrelates beautifully:
+  // measured, an isolated burst preceded by digital silence read 0.76
+  // "periodic" and was rejected, purely because the analyser was looking at
+  // the tail of its own highpass. Real room tone sits above the gate and is
+  // measured normally - it is noise and reads aperiodic, as it should.
+  pring[pwp & PMASK] = fb_db > SILENCE_DB ? (p_env - p_lp) : 0;
+  pwp += 1;
+  pucnt += 1;
+  pucnt >= PUPD ? (
+    pucnt = 0;
+    // energy of the newest window is common to every lag - hoist it out
+    pe1 = 0; ai = 0;
+    loop(PWIN,
+      pv = pring[(pwp - 1 - ai) & PMASK];
+      pe1 += pv * pv;
+      ai += 1;
+    );
+    pbest = 0; plag = PLMIN;
+    loop(PLMAX - PLMIN,
+      pnum = 0; pe2 = 0; ai = 0;
+      loop(PWIN,
+        pva = pring[(pwp - 1 - ai) & PMASK];
+        pvb = pring[(pwp - 1 - ai - plag) & PMASK];
+        pnum += pva * pvb;
+        pe2 += pvb * pvb;
+        ai += 1;
+      );
+      pden = sqrt(pe1 * pe2);
+      pden > 0 ? (
+        pvr = pnum / pden;
+        pvr > pbest ? ( pbest = pvr; );
+      );
+      plag += 1;
+    );
+    vper = pbest;
+  );
+);
+
+// Per-sample accumulation into the current 1 ms frame. fenv takes the frame
+// MAXIMUM, not its mean: a burst peak has to survive decimation intact.
+hf_fast > facc_env ? ( facc_env = hf_fast; );
+fb_fast > facc_fb  ? ( facc_fb  = fb_fast; );
+fcnt += 1;
+fcnt >= FHOP ? (
+  fcnt = 0;
+  aj = fwp & FMASK;
+  fenv[aj] = 20 * log10(facc_env + EPS);
+  ffb[aj]  = 20 * log10(facc_fb + EPS);
+  // stored per_lag_fr frames BACK - see the per_lag_fr note in @init
+  fper[(fwp - per_lag_fr) & FMASK] = vper;
+  fwp += 1;
+  facc_env = 0; facc_fb = 0;
+
+  // The scan may not look back past the last claim. Without that limit the
+  // window maximum keeps re-finding the loud burst it already claimed, and a
+  // second quieter consonant arriving inside the same window can never be
+  // the argmax - "hats" loses its /s/ to its /t/. It doubles as the
+  // de-duplication guard: one claim per shape, not one per frame.
+  // Ages run 0 = newest .. flim = oldest usable, so frame age a lives at
+  // ring index (fwp - 1 - a) and covers input samples
+  // wpos - a*FHOP - FHOP + 1 .. wpos - a*FHOP.
+  flim = min(fwin - 1, fwp - 2 - claim_end_fr);
+  flim >= 2 ? (
+    fbest = -1000; fbestk = 0; ai = 0;
+    loop(flim + 1,
+      fv = fenv[(fwp - 1 - ai) & FMASK];
+      fv > fbest ? ( fbest = fv; fbestk = ai; );
+      ai += 1;
+    );
+    // A peak needs a side to fall away on at both ends of the window, and it
+    // must be old enough that the periodicity analyser has already written
+    // its verdict onto these frames (see per_lag_fr). Costs nothing in
+    // practice: prominence takes longer than that to develop anyway.
+    (fbestk >= max(1, per_lag_fr) && fbestk <= flim - 1) ? (
+      // Trailing low point: walk toward the newest frame tracking the running
+      // minimum, and stop where the envelope turns back up by VAL_TOL_DB.
+      // That hysteresis is what makes this the NEAREST LOCAL MINIMUM rather
+      // than the window minimum - the claim then hugs the consonant instead
+      // of stretching to the window edges.
+      rmin = 1000; rmink = fbestk; brkr = 0; ai = fbestk - 1;
+      while (ai >= 0 && brkr == 0) (
+        fv = fenv[(fwp - 1 - ai) & FMASK];
+        fv <= rmin ? ( rmin = fv; rmink = ai; )
+                   : ( fv > rmin + VAL_TOL_DB ? ( brkr = 1; ) );
+        ai -= 1;
+      );
+      // leading low point: the same walk toward the oldest usable frame
+      lmin = 1000; lmink = fbestk; brkl = 0; ai = fbestk + 1;
+      while (ai <= flim && brkl == 0) (
+        fv = fenv[(fwp - 1 - ai) & FMASK];
+        fv <= lmin ? ( lmin = fv; lmink = ai; )
+                   : ( fv > lmin + VAL_TOL_DB ? ( brkl = 1; ) );
+        ai += 1;
+      );
+      // Prominence against the HIGHER of the two low points: the peak has to
+      // stand clear of BOTH sides, so a burst riding on the shoulder of a
+      // loud vowel does not qualify. cprom is also the live tuning readout,
+      // so it updates every frame whether or not anything fires.
+      cprom = fbest - max(lmin, rmin);
+      cspan = lmink - rmink;
+
+      // Unvoiced proxy over the peak core: the LEAST periodic frame there.
+      // A minimum rather than an average because a consonant only has to be
+      // unvoiced somewhere in its core - averaging lets the voiced material
+      // either side of a short burst pull the score back over the threshold,
+      // which is the exact failure that made the previous waveform-domain
+      // analyser blind to mid-word consonants.
+      ccore_lo = fbestk; ai = fbestk;
+      while (ai <= flim && fenv[(fwp - 1 - ai) & FMASK] > fbest - CORE_DB) (
+        ccore_lo = ai; ai += 1;
+      );
+      ccore_hi = fbestk; ai = fbestk;
+      while (ai >= 0 && fenv[(fwp - 1 - ai) & FMASK] > fbest - CORE_DB) (
+        ccore_hi = ai; ai -= 1;
+      );
+      ncore = ccore_lo - ccore_hi + 1;
+      ncore < 3 ? (
+        ccore_lo = min(ccore_lo + 1, flim); ccore_hi = max(ccore_hi - 1, 0);
+        ncore = ccore_lo - ccore_hi + 1;
+      );
+      cper = 1; ai = ccore_hi;
+      while (ai <= ccore_lo) (
+        cper = min(cper, fper[(fwp - 1 - ai) & FMASK]);
+        ai += 1;
+      );
+
+      // Fire on the FIRST frame where the shape qualifies - there is no
+      // separate "wait until the trailing valley is a confirmed local
+      // minimum" step, because the prominence test already is that test: it
+      // cannot pass until the trailing side has fallen cons_prom below the
+      // peak. Waiting for the turn-up as well does not work, and this is the
+      // trap worth recording: the peak, both low points and the turn-up
+      // beyond them all drift one frame older per frame, so the LEADING side
+      // slides out of the window first. Any deadline expressed in terms of
+      // the peak's age fires long after the onset is gone and reads a
+      // prominence of nothing - measured on a /t/ with a 30 ms closure, 50 dB
+      // of prominence while it waited and 2 dB at the moment it decided, so
+      // nothing was ever claimed anywhere in the file. Deadlines phrased on
+      // the leading valley's age are no better: the walk stops at the turn-up
+      // frame, not at the valley, so brkl drops as soon as the turn-up
+      // crosses the edge - one to several frames BEFORE the valley does, and
+      // the two conditions never overlap.
+      // The claim's trailing edge is therefore the running minimum at the
+      // moment of firing, cons_prom down the decay rather than at the true
+      // valley. The transition crossfade covers the difference.
+      // cons_maxdur needs no explicit test: the window IS the maximum, so
+      // cspan cannot exceed it.
+      cok = cprom >= cons_prom && cspan >= cons_min_fr &&
+            ffb[(fwp - 1 - fbestk) & FMASK] > phr_db - cons_lvl &&
+            cper <= cons_aper;
+      // Ownership interlocks, carried over unchanged in spirit: a promoted
+      // breath run made of real breath material owns any moment at breath
+      // depth, and a CONFIRMED sibilant (stage 2 = "this is not a burst")
+      // owns its body. Stage 1 must NOT block - it is provisional and fires
+      // early, so blocking on it hands every broadband burst to sibilance.
+      cok = cok &&
+        !(br_prom >= 1 && br_gap <= gap_max_smp && br_lvl > phr_db - 32 &&
+          ffb[(fwp - 1 - fbestk) & FMASK] < phr_db - 18) &&
+        !(sib_prom >= 2 && sib_gap <= gap_max_smp);
+      cok ? (
+        // strength stays above the residual tie point at 100% hardness,
+        // matching the sibilance and breath commitment floors
+        cstr = max(0.6, min(1, 0.6 + 0.4 * (cprom - cons_prom) / 12));
+        claim_end_fr = fwp - 1 - rmink;
+        // Claim the span: first low point through last low point - but never
+        // over a slot a promoted sibilant already owns. The fire-time
+        // interlock is not enough on its own, because this claim reaches up
+        // to cons_maxdur into the PAST and the sibilance state it tested is
+        // only the state as of now. A long fricative is unvoiced, so the
+        // periodicity gate passes it, and its interior is full of 8-80 ms
+        // spans between envelope wiggles: without this the consonant class
+        // ate 63 % of a 150 ms /s/ and 21 % of the sibilance stem.
+        // Reclaims in the other direction (a sibilant confirming AFTER a
+        // consonant claimed its onset) are handled by sibilance stage 2.
+        ai = min(lmink * FHOP + FHOP - 1, dlylen);
+        cend = rmink * FHOP;
+        while (ai >= cend) (
+          aj = (wpos - ai) & RMASK;
+          r_econs[aj] >= 0 ? (          // -1 = a confirmed sibilant owns it
+            r_econs[aj] = max(r_econs[aj], cstr);
+          );
+          ai -= 1;
+        );
+      );
+    );
+  );
+);
+
+// ---- evidence -------------------------------------------------------------
+silent = fb_db < SILENCE_DB;
+
+// consonant evidence is written retroactively by the detector above, into
+// r_econs slots the read pointer has not reached yet. Nothing to do here.
+
+// sibilance: HF band dominates the full band, sustained, and still PRESENT.
+// The presence factor (band env near its recent peak) is what separates a
+// sustained /s/ from the decay tail of a consonant burst: after a burst both
+// envelopes decay together, so the dominance ratio alone stays high for
+// ~20 ms of ring-out and would extend the run into the consonant-reclaim
+// stage below.
+hf_pk = max(hf_med, hf_pk * pkdec);
+es_dbg = lin01((hffrac_db - (sib_th - 4)) / 8) *
+         lin01((hf_db - (phr_db - 35)) / 8) *
+         lin01((hf_med / (hf_pk + EPS) - 0.35) / 0.25);
+silent ? ( es_dbg = 0; );
+// gap-tolerant run counter: the fast hffrac envelopes make the evidence
+// flicker on noise, and a hard reset on every dip would keep the duration
+// gate from ever confirming
+es_dbg > 0.2 ? (
+  sib_run += 1; sib_gap = 0;
+) : (
+  sib_gap += 1;
+  sib_gap > gap_max_smp ? (
+    // candidate died before full confirmation: revoke the provisional
+    // promotion on every slot the output has not consumed yet
+    (sib_prom >= 1 && sib_prom < 3) ? (
+      ai = min(sib_run + preroll_smp, dlylen);
+      while (ai > 0) (
+        aj = (wpos - ai) & RMASK;
+        r_gsib[aj] = min(r_gsib[aj], 0.15);
+        ai -= 1;
+      );
+    );
+    sib_run = 0; sib_prom = 0;
+  ) : ( sib_run > 0 ? ( sib_run += 1; ) );
+);
+es_dbg > es_cls ? ( es_cls += (es_dbg - es_cls) * cls_atk; )
+                : ( es_cls += (es_dbg - es_cls) * cls_rel; );
+// once promoted the candidate is committed: the live gate must be 1, not
+// the min-duration ramp. Otherwise evidence*gate dips below the residual
+// tie point between provisional and full confirmation, and every event
+// plays as onset-breath/middle-residual/rest-breath - a guaranteed split.
+// False commits are handled by the death revocation, not by the ramp.
+sib_gate = (sib_prom >= 1 && sib_gap <= gap_max_smp)
+           ? 1 : min(sib_run / sibmin_smp, 1);
+// Onset promotion, staged (sib_prom advances 0->1->2->3; events fire only
+// while evidence is actually present, never on gap-extended run counts).
+// Stage 1 at 40% of min duration: promote the onset PROVISIONALLY. The raw
+// evidence at a real /s/ onset is understated by envelope lag (a preceding
+// vowel holds the ratio's denominator up), and waiting for full confirmation
+// is too late for the earliest slots - the output, 64 ms behind the
+// detector, has consumed them by then. Walk back through the low-evidence
+// ramp (hysteresis at 0.12) plus an 8 ms pre-roll and lift those slots to a
+// winning evidence level, not just gate=1, or high hardness still hands the
+// onset to residual. A candidate that dies before stage 3 is revoked above.
+sib_gap == 0 && sib_run >= sibprov_smp && sib_prom == 0 ? (
+  sib_prom = 1;
+  ai = min(sib_run, dlylen);
+  while (ai < dlylen && r_esib[(wpos - ai - 1) & RMASK] > 0.12) ( ai += 1; );
+  ai = min(ai + preroll_smp, dlylen);
+  while (ai > 0) (
+    aj = (wpos - ai) & RMASK;
+    r_esib[aj] = max(r_esib[aj], max(es_cls, 0.55));
+    r_gsib[aj] = 1;
+    ai -= 1;
+  );
+);
+// Stage 2 at 30 ms: HF dominance this sustained is not a consonant burst.
+// A fricative onset can look like a peak with a low point on each side if it
+// is short enough to fit the consonant window; this is where sibilance takes
+// it back and reclaims the already-classified onset slots. Duration does most
+// of that work now - a /s/ longer than cons_maxdur has no low point on the
+// trailing side inside the window and is never claimed in the first place -
+// but a short fricative still lands here, and this is the hand-off.
+sib_gap == 0 && sib_run >= sibrev_smp && sib_prom == 1 ? (
+  sib_prom = 2;
+  ai = min(sib_run + preroll_smp, dlylen);
+  while (ai > 0) (
+    aj = (wpos - ai) & RMASK;
+    r_econs[aj] = -1;          // owned: also blocks any LATER consonant claim
+    ai -= 1;
+  );
+);
+// Stage 3: full confirmation at the min-duration slider.
+sib_gap == 0 && sib_run >= sibmin_smp && sib_prom == 2 ? (
+  sib_prom = 3;
+  ai = min(sib_run, dlylen);
+  while (ai < dlylen && r_esib[(wpos - ai - 1) & RMASK] > 0.12) ( ai += 1; );
+  ai = min(ai + preroll_smp, dlylen);
+  while (ai > 0) (
+    aj = (wpos - ai) & RMASK;
+    r_esib[aj] = max(r_esib[aj], es_cls);
+    r_gsib[aj] = 1;
+    ai -= 1;
+  );
+);
+
+// breath: well below phrase level, noisy, not HF-dominant
+eb_dbg = lin01(((phr_db - fb_db) - (br_th - 6)) / 12) *
+         lin01((fb_db - (SILENCE_DB + 5)) / 10) *
+         lin01((zcr - br_zcr) / 0.08) *
+         (1 - es_dbg);
+silent ? ( eb_dbg = 0; );
+// Breath hangover: a breath is one gesture - once confirmed it must not be
+// split in the middle by an evidence dip (a louder swell rising toward the
+// level threshold, a noisiness wobble, or the near-silent turn-around
+// between inhale and exhale). While the hangover runs, the moment stays a
+// breath; only real voice (level within 8 dB of the phrase average) ends it
+// early - deliberately NOT silence, because bridging straight through a
+// silent gap is what keeps the second half of the gesture classified from
+// its first sample. Voice kills the hangover within a millisecond via the
+// fast broadband envelope, so it cannot bleed into singing.
+eb_dbg > 0.2 && br_prom >= 1 ? ( br_hang = hang_smp; )
+: ( br_hang > 0 ? ( br_hang -= 1; ) );
+hang_ok = br_hang > 0 && fb_db < phr_db - 8;
+// the floor must beat the residual complement even at 100% hardness
+hang_ok ? ( eb_dbg = max(eb_dbg, 0.55); );
+// breath-run level tracker: peak-style (fast up, slow down) over whatever
+// the run is currently made of, frozen below the silence gate so a
+// hangover-bridged silent turn-around cannot drag it to the floor.
+// br_lvl (the value the consonant interlock reads) is SNAPSHOTTED from this
+// at promotion and then held for the life of the run - see below.
+(eb_dbg > 0.2 && fb_db > SILENCE_DB) ? (
+  fb_db > br_trk ? ( br_trk += (fb_db - br_trk) * brtrk_up; )
+                 : ( br_trk += (fb_db - br_trk) * brtrk_dn; );
+);
+eb_dbg > 0.2 ? (
+  br_run += 1; br_gap = 0;
+) : (
+  br_gap += 1;
+  br_gap > gap_max_smp ? (
+    (br_prom == 1) ? (
+      ai = min(br_run + preroll_smp, dlylen);
+      while (ai > 0) (
+        aj = (wpos - ai) & RMASK;
+        r_gbr[aj] = min(r_gbr[aj], 0.15);
+        ai -= 1;
+      );
+    );
+    br_run = 0; br_prom = 0;
+    br_lvl = -100; br_trk = -100;   // next run re-characterises from scratch
+  ) : ( br_run > 0 ? ( br_run += 1; ) );
+);
+eb_dbg > eb_cls ? ( eb_cls += (eb_dbg - eb_cls) * cls_atk; )
+                : ( eb_cls += (eb_dbg - eb_cls) * cls_rel; );
+// committed candidates write gate 1 - see the sibilance comment above
+br_gate = (br_prom >= 1 && br_gap <= gap_max_smp)
+          ? 1 : min(br_run / brmin_smp, 1);
+// same staged provisional promotion as sibilance (reach capped by the
+// buffer); no fabricated evidence floor - breath onsets are naturally soft
+// There is deliberately NO breath->consonant reclaim here. The old
+// brightness-based detector fired on every breath onset, so a reclaim had to
+// undo it 30 ms later. Voicing-based detection does not need one: a breath
+// sits 25-40 dB below the phrase average and a consonant 3-14 dB, so the
+// consonant's own level floor excludes breaths outright. The reclaim's only
+// remaining effect was to DELETE genuine consonants that happened to start
+// a breath-evidence run - measured: an isolated burst in room tone fired
+// correctly, then had its claim scrubbed 30 ms later. Ownership of a
+// breath already in progress is handled by the interlock at the trigger.
+br_gap == 0 && br_run >= brprov_smp && br_prom == 0 ? (
+  br_prom = 1;
+  // snapshot what this run is MADE of, once, from material that precedes
+  // any later event. A live tracker cannot do this job: a consonant burst
+  // inside a room-tone run is 15 dB louder than the room tone, so it drags
+  // a live level up past the interlock's scope and blocks itself (measured
+  // - the burst turned on the very interlock that must ignore it).
+  br_lvl = br_trk;
+  br_promote(eb_cls);
+);
+br_gap == 0 && br_run >= brmin_smp && br_prom == 1 ? (
+  br_prom = 2;
+  br_promote(eb_cls);
+);
+
+// The newest slot starts empty; the detector fills it retroactively once the
+// shape it belongs to has resolved (always well inside dlylen). -1 marks a
+// slot a CONFIRMED sibilant owns, which the consonant backfill must not
+// overwrite - stage 1 is provisional and deliberately does not claim
+// ownership, or no broadband burst could ever win the arbitration. The read
+// side clamps the sentinel back to 0.
+r_econs[wpos & RMASK] =
+  (sib_prom >= 2 && sib_gap <= gap_max_smp) ? -1 : 0;
+// a promoted sibilant is held decisively: while its run lives, the written
+// evidence must not wobble below the residual tie point (mirrors the breath
+// hangover floor; a dying candidate gets its gates revoked instead)
+r_esib[wpos & RMASK]  = (sib_prom >= 1 && sib_gap <= gap_max_smp)
+                        ? max(es_cls, 0.55) : es_cls;
+r_gsib[wpos & RMASK]  = sib_gate;
+r_ebr[wpos & RMASK]   = eb_cls;
+r_gbr[wpos & RMASK]   = br_gate;
+
+// ---- read side: delayed audio + (optionally pre-opened) classification ----
+sp = (wpos - dlylen) & RMASK;
+rp = (wpos - dlylen + la_smp) & RMASK;
+d0 = dly0[sp]; d1 = dly1[sp];
+
+ec = max(r_econs[rp], 0);           // clamp the sibilance-ownership sentinel
+e_cons = ec;                        // display copy (@block reads this)
+es = r_esib[rp] * r_gsib[rp] * (1 - ec);
+eb = r_ebr[rp]  * r_gbr[rp]  * (1 - ec) * (1 - es);
+er = max(1 - ec - es - eb, 0.02);
+
+// hardness exponent, then normalize (sum-to-1 invariant)
+pc = ec ^ kexp; ps = es ^ kexp; pb = eb ^ kexp; pr = er ^ kexp;
+pinv = 1 / (pc + ps + pb + pr);
+// identical linear smoothers preserve the sum-to-1 invariant exactly
+cs_r += (pr * pinv - cs_r) * tr_c;
+cs_b += (pb * pinv - cs_b) * tr_c;
+cs_s += (ps * pinv - cs_s) * tr_c;
+cs_c += (pc * pinv - cs_c) * tr_c;
+
+// ---- gains ----------------------------------------------------------------
+// Sum mode is written as 1 + sum(c_i*(g_i-1)) so that at unity gain every
+// correction term is exactly 0 and the output is bit-identical to the input.
+w_r = cs_r * g_lin_r; w_b = cs_b * g_lin_b;
+w_s = cs_s * g_lin_s; w_c = cs_c * g_lin_c;
+
+listen == 0 ? (
+  outmode == 0 ? (
+    tot = 1 + cs_r * (g_lin_r - 1) + cs_b * (g_lin_b - 1)
+            + cs_s * (g_lin_s - 1) + cs_c * (g_lin_c - 1);
+    spl0 = d0 * tot; spl1 = d1 * tot;
+    spl2 = 0; spl3 = 0; spl4 = 0; spl5 = 0; spl6 = 0; spl7 = 0;
+  ) : (
+    spl0 = d0 * w_r; spl1 = d1 * w_r;
+    spl2 = d0 * w_b; spl3 = d1 * w_b;
+    spl4 = d0 * w_s; spl5 = d1 * w_s;
+    spl6 = d0 * w_c; spl7 = d1 * w_c;
+  );
+) : (
+  wsel = w_c;
+  listen == 1 ? ( wsel = w_r; );
+  listen == 2 ? ( wsel = w_b; );
+  listen == 3 ? ( wsel = w_s; );
+  spl0 = d0 * wsel; spl1 = d1 * wsel;
+  spl2 = 0; spl3 = 0; spl4 = 0; spl5 = 0; spl6 = 0; spl7 = 0;
+);
+
+// ---- gfx column feed (audio writes, @gfx reads strictly behind colw) ------
+dmn = (d0 + d1) * 0.5;
+dmn < colmin ? ( colmin = dmn; );
+dmn > colmax ? ( colmax = dmn; );
+colcnt += 1;
+colcnt >= colsz ? (
+  aj = colring + (colw & CMASK) * 4;
+  aj[0] = colmin; aj[1] = colmax;
+  dom = 0; domv = cs_r;
+  cs_b > domv ? ( dom = 1; domv = cs_b; );
+  cs_s > domv ? ( dom = 2; domv = cs_s; );
+  cs_c > domv ? ( dom = 3; domv = cs_c; );
+  aj[2] = dom; aj[3] = domv;
+  colw += 1; colcnt = 0; colmin = 1000; colmax = -1000;
+);
+
+wpos += 1;
+
+@gfx 700 360
+// g_ prefix everywhere: shared-memory threading rule, see header comment.
+g_wavh = gfx_h - 96;
+g_wavh < 40 ? ( g_wavh = 40; );
+
+// class colors: residual gray, breath blue, sib amber, consonant red
+function g_classcol(cls, conf) local(cr, cg, cb) (
+  cls == 1 ? ( cr = 0.30; cg = 0.55; cb = 1.00; )
+  : cls == 2 ? ( cr = 1.00; cg = 0.75; cb = 0.15; )
+  : cls == 3 ? ( cr = 1.00; cg = 0.28; cb = 0.22; )
+  : ( cr = 0.55; cg = 0.55; cb = 0.55; );
+  // fade toward gray at low confidence -> threshold problems visible at a glance
+  gfx_set(0.55 + (cr - 0.55) * conf, 0.55 + (cg - 0.55) * conf,
+          0.55 + (cb - 0.55) * conf, 1);
+);
+
+// resize or first run: rebuild history image
+(g_lastw != gfx_w || g_lasth != g_wavh || g_inited != 1) ? (
+  g_inited = 1; g_lastw = gfx_w; g_lasth = g_wavh;
+  gfx_setimgdim(1, gfx_w, g_wavh);
+  gfx_setimgdim(2, gfx_w, g_wavh);
+  g_cur = 1;
+  g_drawn = colw - gfx_w;           // redraw everything available
+);
+g_drawn < colw - gfx_w ? ( g_drawn = colw - gfx_w; );
+g_drawn < 0 ? ( g_drawn = 0; );
+g_new = colw - g_drawn - 1;          // -1 margin: stay clear of the newest column
+g_new > gfx_w ? ( g_new = gfx_w; );
+
+g_new > 0 ? (
+  g_nxt = 3 - g_cur;
+  gfx_dest = g_nxt;
+  gfx_set(0.09, 0.09, 0.10, 1);
+  gfx_rect(0, 0, gfx_w, g_wavh);
+  gfx_blit(g_cur, 1, 0, g_new, 0, gfx_w - g_new, g_wavh, 0, 0, gfx_w - g_new, g_wavh);
+  gi = 0;
+  while (gi < g_new) (
+    g_col = colring + ((g_drawn + gi) & CMASK) * 4;
+    g_x = gfx_w - g_new + gi;
+    g_classcol(g_col[2], g_col[3]);
+    g_y0 = (0.5 - g_col[1] * 0.48) * g_wavh;
+    g_y1 = (0.5 - g_col[0] * 0.48) * g_wavh;
+    g_y1 - g_y0 < 1 ? ( g_y1 = g_y0 + 1; );
+    gfx_rect(g_x, g_y0, 1, g_y1 - g_y0);
+    gi += 1;
+  );
+  g_drawn += g_new;
+  g_cur = g_nxt;
+);
+gfx_dest = -1;
+gfx_set(0.09, 0.09, 0.10, 1);
+gfx_rect(0, 0, gfx_w, gfx_h);
+gfx_blit(g_cur, 1, 0, 0, 0, gfx_w, g_wavh, 0, 0, gfx_w, g_wavh);
+
+// confidence meters
+function g_bar(gxi, glabel, gval) (
+  gfx_x = 8 + gxi * (gfx_w - 16) / 4;
+  gfx_y = g_wavh + 8;
+  gfx_drawstr(glabel);
+  gfx_rect(8 + gxi * (gfx_w - 16) / 4, g_wavh + 24,
+           max((gfx_w - 16) / 4 - 12, 4) * max(min(gval, 1), 0), 10);
+);
+g_classcol(0, 1); g_bar(0, "residual", disp_cr);
+g_classcol(1, 1); g_bar(1, "breath", disp_cb);
+g_classcol(2, 1); g_bar(2, "sibilance", disp_cs);
+g_classcol(3, 1); g_bar(3, "consonant", disp_cc);
+
+gfx_set(0.7, 0.7, 0.7, 1);
+gfx_x = 8; gfx_y = g_wavh + 44;
+sprintf(#g_s1, "prom %.1f dB   periodicity %.2f   band %.1f dB   lvl %.1f dB   phrase %.1f dB",
+        disp_prom, disp_per, disp_cdb, disp_fb, disp_phr);
+gfx_drawstr(#g_s1);
+// split mode on a too-narrow track: spl2..spl7 are silently dropped by
+// REAPER, which looks exactly like "the stem outputs are dead". Say so.
+(disp_split == 1 && disp_nch < 8) ? (
+  gfx_set(1, 0.75, 0.15, 1);
+  gfx_x = 8; gfx_y = 4;
+  sprintf(#g_s2, "SPLIT MODE NEEDS AN 8-CHANNEL TRACK (this track has %d) - Route / Track channels 8",
+          disp_nch);
+  gfx_drawstr(#g_s2);
+);
+gfx_set(0.7, 0.7, 0.7, 1);
+gfx_x = gfx_w - 40; gfx_y = 4;
+gfx_drawstr("v1.2");

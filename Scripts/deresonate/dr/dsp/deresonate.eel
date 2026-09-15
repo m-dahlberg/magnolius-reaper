@@ -1,0 +1,906 @@
+// @noindex
+// DeResonate -- analysis kernel.
+//
+// Runs under ReaImGui's CreateFunctionFromEEL. That sandbox is standard EEL2
+// plus memcpy/memset, but NOT the JSFX fft/fft_permute builtins, so the
+// radix-2 FFT below is lifted verbatim from DeNoise, where it is checked
+// against a naive DFT headlessly.
+//
+// The design idea, inherited from DeNoise: reduce the whole file to a compact
+// summary that lives in this heap, then let every control re-derive its answer
+// from that summary in Lua in under a millisecond instead of re-reading audio.
+// Here there are two summaries, and they answer different questions.
+//
+//   THE MODAL CUBE   a level histogram per FFT bin, at _MRATE (4 kHz) with a
+//                    2048-point FFT -- 1.95 Hz spacing over a 512 ms window.
+//                    Reading low is better than reading fast: this is finer
+//                    than a 16384-point FFT at 48 kHz and eight times cheaper.
+//                    Percentiles taken from it in Lua give the level curves.
+//
+//   THE RING CUBE    per 1/12-octave band, a histogram of the RING TIMES the
+//                    band exhibits, at _PRATE with a short window. A room
+//                    resonance is defined by ringing, not by level: measured
+//                    on a real take, 515.6 Hz stood +10 dB above its
+//                    neighbours and was still not a resonance -- it was the
+//                    third harmonic of the singer, and it did not ring.
+//
+// Why ring TIMES and not envelopes: keeping every band's envelope costs
+// O(bands x frames) and runs to tens of megabytes on a long take. A histogram
+// of -60/slope costs O(bands x buckets) whatever the file length. The slope is
+// taken over a fixed window, and every frame contributes -- the obvious
+// alternative of finding each decay and fitting it yielded 1-13 usable
+// segments per band on real material, which is not a statistic.
+//
+// Slopes are additionally binned by the level they START from, in coarse
+// classes, so Lua can apply a noise-floor gate after the fact without a second
+// pass over the audio.
+//
+// Tasks (set _TASK, then Execute):
+//   0  setup    allocate and clear for _FFT / _RFFT / _NCH; call on any change
+//   1  modal    consume a block at _MRATE into the modal cube
+//   2  ring     consume a block at _PRATE into the ring cube
+//   3  reset    clear streaming state, keep both cubes
+//   4  rewind   task 3, and empty both cubes
+//
+// Lua sets:  _IN _NSAMP _FFT _RFFT _NCH _MRATE _PRATE _ANAHOP _RHOP
+//            _RLO _RHI _RWIN _F0 _MASKC _HEAP _TASK _RD
+//            _GATE _GATEFB _GMODE _GRATIO _FBOFF
+// Lua reads: mcube rlev plev rslope rband rhz nband half nlev lev0
+//            nring nlevclass mframes rframes memtop heap_ok
+
+MAXFFT   = 4096;
+HALFMAX  = 2049;
+// The level axis must reach ABOVE full scale: a full-scale sine reads
+// -3.01 dBFS in its own bin, and a band sums several bins, so a range ending
+// at -45 silently clamps every loud frame into the top bucket.
+NLEV     = 160;                 // 1 dB buckets, -140 .. +19 dBFS
+LEV0     = -140;
+MAXBAND  = 128;                 // 1/12 octave, 30 Hz .. 2 kHz needs ~72
+// Coarse classes of the level a slope STARTS from, so Lua can apply a
+// noise-floor gate after the fact without a second pass over the audio. They
+// must span the same range as the level axis, or a gate above the top class
+// excludes everything and no slope is ever counted.
+NLEVCLASS = 20;
+LEVCLASS_DB = 8;                // -140 .. +20
+NRING    = 80;                  // ring-time buckets, logarithmic
+RING_LO  = 0.02;                // seconds
+RING_HI  = 5.0;
+MAXW     = 64;                  // longest slope window, in frames
+MAXCH    = 2;
+MAXBQ    = 16;                  // peaking sections in the render cascade
+DMAX     = 40;                  // late-reverb lookback ceiling, in STFT frames
+// ---- the multiband gate ---------------------------------------------------
+// Band gains on the SAME STFT the dereverb runs on, so the two are factors on
+// one frame rather than two stages. The band geometry itself lives in
+// `dr/gate.lua` and arrives as a per-bin band index and crossfade weight --
+// nothing here knows where a band edge is.
+//
+// GATE_HYST and GATE_HOLD MUST match `dr/gate.lua`'s M.HYST_DB and M.HOLD_S.
+// test/selftest_in_reaper.lua drives the two implementations against the same
+// levels and asserts they agree, which is what stops them drifting apart.
+NGATE     = 8;
+NSPLIT    = 7;                  // crossovers in the filterbank tree
+GATE_HYST = 3;                  // dB; gate mode only, an expander is continuous
+GATE_HOLD = 0.030;              // s before a closing band starts to release
+
+// ---- the decay cube -------------------------------------------------------
+// T60 measured directly, by fitting the decay in each PAUSE rather than by
+// calibrating the ring statistic. The ring figure is the FASTEST decay a band
+// ever achieves, and in a live room the singer stops faster than the room
+// does, so it saturates: measured, a 10.7x range of real decay arrives as a
+// 2.3x range of ring figure. Conditioning on "the voice has stopped" removes
+// the voice from the statistic and leaves the room.
+//
+// Per gap, per band: find where the level has fallen EDC_TOP dB below what it
+// was at the offset, fit a line from there to EDC_BOT, and bin -60/slope. The
+// POPULATION is kept, not its mean -- one contaminated pause cannot move a
+// median the way it moves an averaged curve. This is the same trick the ring
+// cube uses, and it is what keeps the cost independent of file length.
+EDCLAG   = 96;                  // longest pause worth following, in frames
+EDCMINQ  = 15;                  // shortest that qualifies as a pause
+EDC_TOP  = -3;                  // fit between these two levels, relative to
+EDC_BOT  = -18;                 // the band's level when the voice stopped
+EDC_FALL = 8;                   // and refuse a fit that spans less than this
+EDC_DEAD = -100;                // edited-in silence is not a decay
+EDC_TC   = 2.0;                 // seconds; the running level the gate is set from
+
+DRYLEN   = 8192;                // dry delay ring: must EXCEED the largest
+                                // latency (one FFT), or the read wraps onto
+                                // the write and returns the current sample
+
+function halloc(n) (
+  _ha = memptr; memptr += n; memset(_ha, 0, n); _ha;
+);
+function fft_tables() local(i, j, b, k, lg, n) (
+  n = fft_size;
+  lg = 0;
+  i = 1;
+  while (i < n) ( lg += 1; i *= 2; );
+  i = 0;
+  while (i < n) (
+    j = 0;
+    b = i;
+    k = 0;
+    while (k < lg) (
+      j = j * 2 + (b - floor(b * 0.5) * 2);
+      b = floor(b * 0.5);
+      k += 1;
+    );
+    brev[i] = j;
+    i += 1;
+  );
+  i = 0;
+  while (i < n * 0.5) (
+    twr[i] = cos(2 * $pi * i / n);
+    twi[i] = -sin(2 * $pi * i / n);
+    i += 1;
+  );
+);
+
+function fft_fwd(buf) local(i, j, len, hf, step, k, tr, ti, ur, ui, vr, vi, i0, i1, n, ar, ai) (
+  n = fft_size;
+  i = 0;
+  while (i < n) (
+    j = brev[i];
+    j > i ? (
+      tr = buf[2 * i];     ti = buf[2 * i + 1];
+      buf[2 * i] = buf[2 * j];     buf[2 * i + 1] = buf[2 * j + 1];
+      buf[2 * j] = tr;             buf[2 * j + 1] = ti;
+    );
+    i += 1;
+  );
+  len = 2;
+  while (len <= n) (
+    hf = len * 0.5;
+    step = n / len;
+    i = 0;
+    while (i < n) (
+      k = 0;
+      j = 0;
+      while (j < hf) (
+        tr = twr[k]; ti = twi[k];
+        i0 = i + j; i1 = i0 + hf;
+        ar = buf[2 * i1]; ai = buf[2 * i1 + 1];
+        vr = ar * tr - ai * ti;
+        vi = ar * ti + ai * tr;
+        ur = buf[2 * i0]; ui = buf[2 * i0 + 1];
+        buf[2 * i0] = ur + vr; buf[2 * i0 + 1] = ui + vi;
+        buf[2 * i1] = ur - vr; buf[2 * i1 + 1] = ui - vi;
+        k += step;
+        j += 1;
+      );
+      i += len;
+    );
+    len *= 2;
+  );
+);
+
+// Unscaled inverse, matching the JSFX ifft() convention: the 1/N is folded
+// into outscale instead. conj -> forward -> conj.
+function fft_inv(buf) local(i, n) (
+  n = fft_size;
+  i = 0;
+  while (i < n) ( buf[2 * i + 1] = -buf[2 * i + 1]; i += 1; );
+  fft_fwd(buf);
+  i = 0;
+  while (i < n) ( buf[2 * i + 1] = -buf[2 * i + 1]; i += 1; );
+);
+
+// The FFT tables are size-dependent and this kernel uses two sizes, so switch
+// them on demand. An Execute processes thousands of frames, so rebuilding once
+// per task costs nothing measurable.
+function use_fft(n) (
+  n != tab_fft ? ( fft_size = n; fft_tables(); tab_fft = n; );
+  fft_size = n;
+);
+
+function build_window(dst, n) local(i) (
+  i = 0;
+  while (i < n) ( dst[i] = 0.5 - 0.5 * cos(2 * $pi * i / n); i += 1; );
+);
+
+// ------------------------------------------------------------------ setup
+function ksetup() local(i, k, f, nb) (
+  memptr = _HEAP;
+  nlev = NLEV; lev0 = LEV0; nring = NRING; nlevclass = NLEVCLASS;
+  tab_fft = 0;
+
+  brev   = halloc(MAXFFT);
+  twr    = halloc(MAXFFT * 0.5);
+  twi    = halloc(MAXFFT * 0.5);
+  mwin   = halloc(MAXFFT);
+  rwin   = halloc(MAXFFT);
+  fbuf   = halloc(MAXFFT * 2);      // shared transform scratch
+  mring  = halloc(MAXFFT);
+  rrng   = halloc(MAXFFT);
+  mcube  = halloc(HALFMAX * NLEV);
+  rbandi = halloc(HALFMAX);
+  rhz    = halloc(MAXBAND);
+  rlev   = halloc(MAXBAND * NLEV);
+  plev   = halloc(MAXBAND * NLEV);    // the same, but only while the voice is
+                                      // off: where a band sits in a PAUSE is
+                                      // the level a threshold has to land above
+  rslope = halloc(MAXBAND * NLEVCLASS * NRING);
+  rdelay = halloc(MAXBAND * MAXW);
+  bacc   = halloc(MAXBAND);
+  edch   = halloc(MAXBAND * NRING);   // the decay cube: T60 per band, binned
+  eprev  = halloc(MAXBAND);           // last frame's band level
+  eref   = halloc(MAXBAND);           // the band's level when the voice stopped
+  estate = halloc(MAXBAND);
+  et0    = halloc(MAXBAND);
+  ev0    = halloc(MAXBAND);
+  et1    = halloc(MAXBAND);
+  ev1    = halloc(MAXBAND);
+
+  // render chain
+  bq     = halloc(MAXBQ * 5);              // b0 b1 b2 a1 a2 per section
+  bqz    = halloc(MAXBQ * MAXCH * 2);      // transposed DF-II state
+  dwin   = halloc(MAXFFT);
+  dring  = halloc(MAXCH * MAXFFT);
+  dola   = halloc(MAXCH * MAXFFT);
+  dmag   = halloc(MAXCH * DMAX * HALFMAX); // past |X|^2, for the late estimate
+  dt60   = halloc(HALFMAX);                // T60 per bin
+  dgain  = halloc(HALFMAX);
+  dryring = halloc(MAXCH * DRYLEN);        // latency-aligned dry, for residual
+  // gate: the analysed spectrum is kept per channel, because the band levels
+  // have to be pooled across channels BEFORE any gain is applied -- gating the
+  // two channels independently makes the image wander in the pauses
+  dspec  = halloc(MAXCH * MAXFFT * 2);
+  gbandi = halloc(HALFMAX);                // bin -> gate band, from Lua
+  gmix   = halloc(HALFMAX);                // crossfade weight toward band+1
+  gthr   = halloc(NGATE);
+  grange = halloc(NGATE);
+  grel   = halloc(NGATE);
+  gacc   = halloc(NGATE);
+  gg     = halloc(NGATE);                  // current gain, dB
+  ghold  = halloc(NGATE);                  // seconds spent below threshold
+  glin   = halloc(NGATE);
+  // the FILTERBANK gate: a Linkwitz-Riley tree in the time domain, running
+  // after the STFT and adding no latency of its own. Coefficients are designed
+  // in dr/gate.lua and arrive here ready to run, as the peaking cascade does.
+  fbco   = halloc(NSPLIT * 4 * 5);         // lp lp hp hp per split
+  fbap   = halloc(NSPLIT * 5);             // the allpass their sum equals
+  fbz    = halloc(NSPLIT * 4 * MAXCH * 2);
+  fbapz  = halloc(NSPLIT * NGATE * MAXCH * 2);  // one state per (split, band)
+  fbband = halloc(NGATE * MAXCH);          // this sample's band outputs
+  fbenv  = halloc(NGATE);                  // detector, mean square
+  fbdc   = halloc(NGATE);                  // its one-pole coefficient
+  fbac   = halloc(NGATE);                  // and the attack's
+  fbrc   = halloc(NGATE);                  // and the release's
+  fbgg   = halloc(NGATE);                  // gain in dB
+  fbhold = halloc(NGATE);
+  fbglin = halloc(NGATE);
+  facc   = halloc(NGATE);
+  xtmp   = halloc(MAXCH);                  // one sample, every channel, so the
+  rawtmp = halloc(MAXCH);                  // detector can pool across them
+  glev   = halloc(NGATE);                  // the band level this frame, in dB.
+                                           // Read back by the selftest, which
+                                           // asserts it agrees with the dB the
+                                           // ring cube reports for the same
+                                           // band -- the two normalisations are
+                                           // easy to get wrong and impossible
+                                           // to notice.
+  memtop = memptr;
+
+  mfft = _FFT;  half = mfft * 0.5;
+  rfft = _RFFT; rhalf = rfft * 0.5;
+  // single-bin normalisation: coherent gain squared over two, (0.5^2)/2 = 1/8.
+  // NOT the broadband Parseval constant 0.375 -- that reads 4.77 dB low on a
+  // single bin, which is 10*log10(3) and silently wrong everywhere.
+  mnorm = mfft * mfft * 0.125;
+  rnorm = rfft * rfft * 0.125;
+  build_window(mwin, mfft);
+  build_window(rwin, rfft);
+
+  // 1/12-octave band map for the ring cube
+  nb = ceil(log(_RHI / _RLO) / log(2) * 12);
+  nb > MAXBAND ? nb = MAXBAND;
+  nband = nb;
+  k = 0;
+  while (k < nb) ( rhz[k] = _RLO * exp(log(2) * (k + 0.5) / 12); k += 1; );
+  k = 0;
+  while (k <= rhalf) (
+    f = k * _PRATE / rfft;
+    (f >= _RLO && f <= _RHI) ? (
+      i = floor(log(f / _RLO) / log(2) * 12);
+      i < 0 ? i = 0;
+      i >= nb ? i = nb - 1;
+      rbandi[k] = i;
+    ) : ( rbandi[k] = -1; );
+    k += 1;
+  );
+
+  // Heap probe. EEL redirects every out-of-range access to ONE shared scratch
+  // slot, so writing to the two ENDS of a buffer and reading both back passes
+  // even when the far end is missing -- both land in that one slot and agree.
+  // Two ADJACENT slots at the very top do catch it.
+  mcube[0] = 1;
+  _tp = memtop - 2; _tp[0] = 2; _tp[1] = 3;
+  heap_ok = (mcube[0] == 1 && _tp[0] == 2 && _tp[1] == 3) ? 1 : 0;
+  mcube[0] = 0; _tp[0] = 0; _tp[1] = 0;
+);
+
+// ----------------------------------------------------------------- render
+function kreset_render() (
+  memset(bqz, 0, MAXBQ * MAXCH * 2);
+  memset(dring, 0, MAXCH * MAXFFT);
+  memset(dola, 0, MAXCH * MAXFFT);
+  memset(dmag, 0, MAXCH * DMAX * HALFMAX);
+  memset(dryring, 0, MAXCH * DRYLEN);
+  memset(dspec, 0, MAXCH * MAXFFT * 2);
+  memset(gacc, 0, NGATE);
+  memset(gg, 0, NGATE);                 // 0 dB: a gate starts open
+  memset(glev, 0, NGATE);
+  memset(fbz, 0, NSPLIT * 4 * MAXCH * 2);
+  memset(fbapz, 0, NSPLIT * NGATE * MAXCH * 2);
+  memset(fbband, 0, NGATE * MAXCH);
+  memset(fbenv, 0, NGATE);
+  memset(fbgg, 0, NGATE);
+  memset(fbhold, 0, NGATE);
+  _gi = 0;
+  while (_gi < NGATE) ( fbglin[_gi] = 1; _gi += 1; );
+  memset(ghold, 0, NGATE);
+  _gi = 0;
+  while (_gi < NGATE) ( glin[_gi] = 1; _gi += 1; );
+  dpos = 0; dsince = 0; dframe = 0; drypos = 0; out_peak = 0;
+);
+
+// One dereverb frame for one channel. The late reverberation in this frame is
+// modelled as a decayed copy of what the bin held _DDELAY frames ago -- the
+// only parameter that needs is T60, which the analysis measures.
+function kreset() (
+  mpos = 0; mfill = 0; msince = 0; mframes = 0;
+  rpos = 0; rfill = 0; rsince = 0; rframes = 0;
+  memset(mring, 0, MAXFFT);
+  memset(rrng, 0, MAXFFT);
+  memset(rdelay, 0, MAXBAND * MAXW);
+  kreset_render();
+  egapn = 0; egaps = 0; eavg = 0;
+  memset(estate, 0, MAXBAND);
+  memset(eprev, 0, MAXBAND);
+);
+
+// The dereverb/gate frame, in two halves.
+//
+// It is ONE transform split across two calls, and the split is what makes the
+// gate channel-linked: every channel must be analysed before any band level is
+// known, because a band level is pooled across channels. Gating the two
+// channels from their own levels lets the image wander in the pauses, where
+// there is nothing left to hold it.
+//
+//   dere_analyse(c)  window, transform, keep the spectrum, add to the bands
+//   gate_gains()     once, on the pooled band levels
+//   dere_synth(c)    dereverb gain x gate gain, inverse, overlap-add
+//
+// The late reverberation in a frame is modelled as a decayed copy of what the
+// bin held _DDELAY frames ago -- the only parameter that needs is T60, which
+// the analysis measures.
+function dere_analyse(ch) local(i, j, k, pr, pi, sp, b, m) (
+  i = 0;
+  while (i < dfft) (
+    j = dpos + i; j >= dfft ? j -= dfft;
+    fbuf[2 * i] = dring[ch * MAXFFT + j] * dwin[i];
+    fbuf[2 * i + 1] = 0;
+    i += 1;
+  );
+  use_fft(dfft);
+  fft_fwd(fbuf);
+  memcpy(dspec + ch * MAXFFT * 2, fbuf, dfft * 2);
+  _GATE > 0 ? (
+    k = 0;
+    while (k <= dhalf) (
+      pr = fbuf[2 * k]; pi = fbuf[2 * k + 1];
+      sp = pr * pr + pi * pi;
+      // a bin belongs to one band and, near an edge, partly to the next. The
+      // weights come from Lua and sum to 1, so this splits energy rather than
+      // duplicating it
+      b = gbandi[k]; m = gmix[k];
+      gacc[b] += sp * (1 - m);
+      b + 1 < NGATE ? gacc[b + 1] += sp * m;
+      k += 1;
+    );
+  );
+);
+
+// Band levels -> band gains. Must agree with `M.step` in dr/gate.lua.
+function gate_gains() local(b, db, thr, rng, rel, tgt, a, op, e) (
+  b = 0;
+  while (b < NGATE) (
+    // The SAME dBFS convention the analysis uses: a power sum over the band
+    // normalised by N^2/8, and the channel mean, because the ring pass
+    // analyses (L+R)/2. Get this wrong and every suggested threshold lands
+    // somewhere else, plausibly.
+    db = 10 * log10(gacc[b] / (_NCH * dnorm) + 0.000000000000000001);
+    glev[b] = db;
+    thr = gthr[b]; rng = grange[b]; rel = grel[b];
+    // hysteresis in gate mode only: a band sitting on its threshold chatters.
+    // An expander is continuous and needs none.
+    op = (_GMODE > 0 && gg[b] < 0) ? thr + GATE_HYST : thr;
+    e = (db - op) * (_GRATIO - 1);
+    tgt = db >= op ? 0 : ( _GMODE > 0 ? -rng : ( e < -rng ? -rng : e ) );
+    tgt >= gg[b] ? (
+      // Opening is instant. The analysis window is 43 ms wide, so the gain a
+      // frame carries is already smeared either side of the moment it was
+      // decided -- the stage cannot clip a syllable onset, it opens slightly
+      // early, and early is the safe direction.
+      gg[b] = tgt; ghold[b] = 0;
+    ) : (
+      ghold[b] += dhopdt;
+      ghold[b] >= GATE_HOLD ? (
+        a = 1 - exp(-dhopdt / (rel < 0.0001 ? 0.0001 : rel));
+        gg[b] += (tgt - gg[b]) * a;
+      );
+    );
+    glin[b] = pow(10, gg[b] / 20);
+    b += 1;
+  );
+);
+
+// ------------------------------------------------------- the filterbank gate
+// One sample, every channel. Splits each channel into the eight bands, pools
+// the band levels ACROSS channels, computes one set of gains, and recombines.
+//
+// Two passes over the channels for the same reason the STFT path has an
+// analyse half and a synth half: a band level is pooled, so none of them is
+// known until every channel has been split. Gating each channel from its own
+// level lets the image wander in the pauses.
+//
+// The tree is serial -- split, keep the low half, split the high half again --
+// and every band already extracted is passed through the ALLPASS of each later
+// split. Without that the bank sums with ripple at every crossover; with it,
+// it sums to AP1*AP2*...*AP7, which is flat.
+function fb_process() local(c, b, s, i, x, lo, hi, y, v, ci, zi, cb, p, db,
+                            thr, rng, tgt, op, e, a) (
+  memset(facc, 0, NGATE);
+  c = 0;
+  while (c < _NCH) (
+    x = xtmp[c];
+    cb = c * NGATE;
+    s = 0;
+    while (s < NSPLIT) (
+      // allpass-correct every band extracted before this split
+      b = 0;
+      while (b < s) (
+        zi = ((s * NGATE + b) * MAXCH + c) * 2;
+        v = fbband[cb + b];
+        y = fbap[s * 5] * v + fbapz[zi];
+        fbapz[zi]     = fbap[s*5+1] * v - fbap[s*5+3] * y + fbapz[zi+1];
+        fbapz[zi + 1] = fbap[s*5+2] * v - fbap[s*5+4] * y;
+        fbband[cb + b] = y;
+        b += 1;
+      );
+      // the lowpass half, twice: Linkwitz-Riley 4 is Butterworth squared
+      lo = x;
+      i = 0;
+      while (i < 2) (
+        ci = (s * 4 + i) * 5; zi = ((s * 4 + i) * MAXCH + c) * 2;
+        y = fbco[ci] * lo + fbz[zi];
+        fbz[zi]     = fbco[ci+1] * lo - fbco[ci+3] * y + fbz[zi+1];
+        fbz[zi + 1] = fbco[ci+2] * lo - fbco[ci+4] * y;
+        lo = y; i += 1;
+      );
+      // and the highpass half, which becomes the input to the next split
+      hi = x;
+      i = 2;
+      while (i < 4) (
+        ci = (s * 4 + i) * 5; zi = ((s * 4 + i) * MAXCH + c) * 2;
+        y = fbco[ci] * hi + fbz[zi];
+        fbz[zi]     = fbco[ci+1] * hi - fbco[ci+3] * y + fbz[zi+1];
+        fbz[zi + 1] = fbco[ci+2] * hi - fbco[ci+4] * y;
+        hi = y; i += 1;
+      );
+      fbband[cb + s] = lo;
+      x = hi;
+      s += 1;
+    );
+    fbband[cb + NSPLIT] = x;
+    b = 0;
+    while (b < NGATE) ( v = fbband[cb + b]; facc[b] += v * v; b += 1; );
+    c += 1;
+  );
+
+  // the same law as gate_gains, at sample rate. Must agree with M.step in
+  // dr/gate.lua, which the selftest drives against this.
+  b = 0;
+  while (b < NGATE) (
+    p = facc[b] / _NCH;
+    fbenv[b] = fbdc[b] * fbenv[b] + (1 - fbdc[b]) * p;
+    // _FBOFF puts the mean square into the units the analysis reports a band
+    // in, which is a power sum over N^2/8 rather than a mean square
+    db = 10 * log10(fbenv[b] + 0.000000000000000001) + _FBOFF;
+    glev[b] = db;
+    thr = gthr[b]; rng = grange[b];
+    op = (_GMODE > 0 && fbgg[b] < 0) ? thr + GATE_HYST : thr;
+    e = (db - op) * (_GRATIO - 1);
+    tgt = db >= op ? 0 : ( _GMODE > 0 ? -rng : ( e < -rng ? -rng : e ) );
+    tgt >= fbgg[b] ? (
+      // unlike the STFT path this opens through a one-pole: there is no window
+      // to smooth a gain step here, and a step at sample rate is a click
+      fbhold[b] = 0;
+      fbgg[b] += (tgt - fbgg[b]) * fbac[b];
+    ) : (
+      fbhold[b] += fbdt;
+      fbhold[b] >= GATE_HOLD ? fbgg[b] += (tgt - fbgg[b]) * fbrc[b];
+    );
+    fbglin[b] = pow(10, fbgg[b] / 20);
+    b += 1;
+  );
+
+  c = 0;
+  while (c < _NCH) (
+    cb = c * NGATE; y = 0; b = 0;
+    while (b < NGATE) ( y += fbband[cb + b] * fbglin[b]; b += 1; );
+    xtmp[c] = y;
+    c += 1;
+  );
+);
+
+function dere_synth(ch) local(i, j, k, pr, pi, sp, lam, g, snr, a, sn, t60,
+                              dec, sl, base, prevb, b, m) (
+  memcpy(fbuf, dspec + ch * MAXFFT * 2, dfft * 2);
+  base   = (ch * DMAX + (dframe % DMAX)) * HALFMAX;
+  prevb  = (ch * DMAX + ((dframe - _DDELAY + DMAX * 2) % DMAX)) * HALFMAX;
+  sl     = _DDELAY * dhop / _SRATE;          // lookback in seconds
+
+  k = 0;
+  while (k <= dhalf) (
+    pr = fbuf[2 * k]; pi = fbuf[2 * k + 1];
+    sp = pr * pr + pi * pi;
+    g = 1;
+    _DEREV > 0 ? (
+      t60 = dt60[k];
+      dec = t60 > 0 ? pow(10, -6 * sl / t60) : 0;
+      lam = (dframe >= _DDELAY) ? dmag[prevb + k] * dec * dstrength : 0;
+      // Berouti oversubtraction, then the Wiener gain -- the same chain DeNoise
+      // uses, with the late estimate standing in for the noise profile
+      snr = 10 * log10((sp + 0.000000000001) / (lam + 0.000000000001));
+      a = snr <= -5 ? damax : ( snr >= 20 ? 1 : damax - (snr + 5) / 25 * (damax - 1) );
+      sn = lam * a;
+      g = sn <= 0.00000000000000000001 ? 1 : ( sp > sn ? (sp - sn) / sp : 0 );
+      g < dfloor ? g = dfloor;
+    );
+    dmag[base + k] = sp;
+    // the gate is the second factor on the same bin, interpolated across the
+    // band edge so the gain curve stays smooth. A step here would make the
+    // implied impulse response long enough to wrap the frame, and circular
+    // convolution of that is heard as pre-echo.
+    _GATE > 0 ? (
+      b = gbandi[k]; m = gmix[k];
+      g *= (b + 1 < NGATE) ? (glin[b] * (1 - m) + glin[b + 1] * m) : glin[b];
+    );
+    dgain[k] = g;
+    k += 1;
+  );
+  // apply to the bin and its mirror. The gain is REAL, so scaling both by the
+  // same number preserves conjugate symmetry for free.
+  k = 0;
+  while (k <= dhalf) (
+    g = dgain[k];
+    fbuf[2 * k] *= g; fbuf[2 * k + 1] *= g;
+    k > 0 && k < dhalf ? (
+      j = dfft - k;
+      fbuf[2 * j] *= g; fbuf[2 * j + 1] *= g;
+    );
+    k += 1;
+  );
+  use_fft(dfft);
+  fft_inv(fbuf);
+  i = 0;
+  while (i < dfft) (
+    dola[ch * MAXFFT + i] += fbuf[2 * i] * dwin[i] * doutscale;
+    i += 1;
+  );
+  // dframe counts HOPS, not calls: krender advances it once after every
+  // channel has been transformed. Incrementing it here instead made it run at
+  // _NCH frames per hop, so on stereo `prevb` addressed a slot only
+  // _DDELAY/_NCH hops back while `sl` still computed the decay for the full
+  // _DDELAY -- half the lookback the config asks for, against a decay factor
+  // that did not match it. Every dereverb test drives mono, so nothing saw it.
+);
+
+function kparams() local(i) (
+  dfft = _DFFT; dhalf = dfft * 0.5; dhop = dfft * 0.25;
+  // hann^2 at 75% overlap-add sums to 1.5, and fft_inv is unscaled
+  doutscale = (2 / 3) / dfft;
+  dfloor = pow(10, -_REDUCTION / 20);
+  damax = 1 + (_STRENGTH / 100) * 3;
+  dstrength = _STRENGTH / 100;
+  // single-bin normalisation again, so a band level here reads the same dBFS
+  // the ring cube reports for the same band
+  dnorm = dfft * dfft * 0.125;
+  dhopdt = dhop / _SRATE;
+  // The STFT is shared. Either stage alone runs it, and it costs exactly one
+  // window either way -- which is what Config.latency reports.
+  dstft = (_DEREV > 0 || _GATE > 0) ? 1 : 0;
+  // the filterbank's one-poles. The detector and attack coefficients are
+  // designed in Lua, which knows the rate; the release follows `grel`, which
+  // the analysis sets per band and the panel trims, so it is derived here for
+  // the same reason the STFT path derives its own.
+  fbdt = 1 / _SRATE;
+  _GATEFB > 0 ? (
+    i = 0;
+    while (i < NGATE) (
+      fbrc[i] = 1 - exp(-fbdt / (grel[i] < 0.0001 ? 0.0001 : grel[i]));
+      i += 1;
+    );
+  );
+  // the chain's own latency: the biquads are transposed DF-II and add none,
+  // only the STFT does. The residual has to subtract the dry signal delayed by
+  // exactly this, or it is a comb of the delay rather than what the processing
+  // removed.
+  dlat = dstft > 0 ? dfft : 0;
+  dwin_built != dfft ? ( build_window(dwin, dfft); dwin_built = dfft; );
+);
+
+// Render _NSAMP frames from _IN to _OUT: the peaking cascade first (zero
+// latency, transposed direct form II), then the dereverb STFT if it is on.
+//
+// The output sample is read from the overlap-add accumulator BEFORE the new
+// input is stored, mirroring how a JSFX @sample block behaves. The accumulator
+// is shifted by one hop when a frame is synthesised, never per sample, and the
+// analysis window ends at the write head -- so the latency is exactly dfft,
+// which is what Config.latency reports and what render.lua compensates for.
+// Off by one and the whole take slides, so the selftest asserts it at +-1.
+function krender() local(n, c, x, y, s, i, z1, z2, b0, b1, b2, a1, a2, o, raw, ridx) (
+  kparams();
+  n = 0;
+  while (n < _NSAMP) (
+    c = 0;
+    while (c < _NCH) (
+      raw = _IN[n * _NCH + c];
+      x = raw;
+      i = 0;
+      while (i < _NBQ) (
+        b0 = bq[i * 5]; b1 = bq[i * 5 + 1]; b2 = bq[i * 5 + 2];
+        a1 = bq[i * 5 + 3]; a2 = bq[i * 5 + 4];
+        s = (i * MAXCH + c) * 2;
+        z1 = bqz[s]; z2 = bqz[s + 1];
+        y = b0 * x + z1;
+        bqz[s]     = b1 * x - a1 * y + z2;
+        bqz[s + 1] = b2 * x - a2 * y;
+        x = y;
+        i += 1;
+      );
+      dstft > 0 ? (
+        o = dola[c * MAXFFT + dsince];
+        dring[c * MAXFFT + dpos] = x;
+        x = o;
+      );
+      xtmp[c] = x;
+      rawtmp[c] = raw;
+      c += 1;
+    );
+    // The filterbank gate pools its band levels ACROSS channels, so it sits
+    // between the two loops rather than inside one. It runs after the STFT and
+    // before the residual, which keeps `kept + residual == input` exact.
+    _GATEFB > 0 ? fb_process();
+    c = 0;
+    while (c < _NCH) (
+      x = xtmp[c];
+      // write the dry sample first, then read it back `dlat` samples earlier;
+      // at zero latency that reads what was just written, which is what the
+      // residual of a zero-latency chain should compare against
+      dryring[c * DRYLEN + drypos] = rawtmp[c];
+      ridx = drypos - dlat; ridx < 0 ? ridx += DRYLEN;
+      _RESID > 0 ? x = dryring[c * DRYLEN + ridx] - x;
+      _OUT[n * _NCH + c] = x;
+      abs(x) > out_peak ? out_peak = abs(x);
+      c += 1;
+    );
+    drypos += 1; drypos >= DRYLEN ? drypos = 0;
+    dstft > 0 ? (
+      dpos += 1; dpos >= dfft ? dpos = 0;
+      dsince += 1;
+      dsince >= dhop ? (
+        dsince = 0;
+        // analyse every channel first: the gate's band levels are pooled
+        // across channels, so none of them is known until all are transformed
+        memset(gacc, 0, NGATE);
+        c = 0;
+        while (c < _NCH) (
+          memcpy(dola + c * MAXFFT, dola + c * MAXFFT + dhop, dfft - dhop);
+          memset(dola + c * MAXFFT + dfft - dhop, 0, dhop);
+          dere_analyse(c);
+          c += 1;
+        );
+        _GATE > 0 ? gate_gains();
+        c = 0;
+        while (c < _NCH) ( dere_synth(c); c += 1; );
+        dframe += 1;              // once per hop, whatever _NCH is
+      );
+    );
+    n += 1;
+  );
+);
+
+function kclear() (
+  memset(mcube, 0, HALFMAX * NLEV);
+  memset(rlev, 0, MAXBAND * NLEV);
+  memset(plev, 0, MAXBAND * NLEV);
+  memset(rslope, 0, MAXBAND * NLEVCLASS * NRING);
+  memset(edch, 0, MAXBAND * NRING);
+  egaps = 0;
+);
+
+
+// ------------------------------------------------------------------ modal
+// One frame: window the ring buffer, transform, and add each bin's level to
+// its own histogram. Channels are averaged to mono first -- this kernel
+// characterises a room, not a stereo image.
+function modal_frame() local(i, k, pr, pi, p, db, b, j) (
+  i = 0;
+  while (i < mfft) (
+    j = mpos + i; j >= mfft ? j -= mfft;
+    fbuf[2 * i] = mring[j] * mwin[i];
+    fbuf[2 * i + 1] = 0;
+    i += 1;
+  );
+  use_fft(mfft);
+  fft_fwd(fbuf);
+  k = 1;
+  while (k <= half) (
+    pr = fbuf[2 * k]; pi = fbuf[2 * k + 1];
+    p = pr * pr + pi * pi;
+    db = 10 * log10(p / mnorm + 0.000000000000000001);
+    b = floor(db - lev0 + 0.5);
+    b < 0 ? b = 0 : ( b >= nlev ? b = nlev - 1 );
+    mcube[(k - 1) * nlev + b] += 1;
+    k += 1;
+  );
+  mframes += 1;
+);
+
+function kmodal() local(n, i, c, s) (
+  n = 0;
+  while (n < _NSAMP) (
+    s = 0; c = 0;
+    while (c < _NCH) ( s += _IN[n * _NCH + c]; c += 1; );
+    mring[mpos] = s / _NCH;
+    mpos += 1; mpos >= mfft ? mpos = 0;
+    mfill < mfft ? mfill += 1;
+    msince += 1;
+    (mfill >= mfft && msince >= _ANAHOP) ? ( msince = 0; modal_frame(); );
+    n += 1;
+  );
+);
+
+// -------------------------------------------------------------- decay cube
+// Close out the pause that has just ended: every band that saw a usable fall
+// contributes one T60 to its own histogram. Called before the band loop, so it
+// reads only state saved on previous frames.
+function edc_commit() local(b, sl, t, bu) (
+  egapn >= EDCMINQ ? (
+    b = 0;
+    while (b < nband) (
+      (estate[b] >= 1 && et1[b] > et0[b] && (ev0[b] - ev1[b]) >= EDC_FALL) ? (
+        sl = (ev1[b] - ev0[b]) / ((et1[b] - et0[b]) * _RDT);
+        sl < 0 ? (
+          t = -60 / sl;
+          (t >= RING_LO && t <= RING_HI) ? (
+            bu = floor(log(t / RING_LO) / log(RING_HI / RING_LO) * nring);
+            bu < 0 ? bu = 0 : ( bu >= nring ? bu = nring - 1 );
+            edch[b * nring + bu] += 1;
+          );
+        );
+      );
+      b += 1;
+    );
+    egaps += 1;
+  );
+  egapn = 0;
+  memset(estate, 0, nband);
+);
+
+// ------------------------------------------------------------------- ring
+// One frame: band energies, then for each band the slope against the frame
+// _RWIN frames ago. A band that rings cannot decay quickly, so the shallow end
+// of its slope distribution is what Lua reads.
+function ring_frame() local(i, k, pr, pi, p, b, db, cur, old, sl, rt, bu, lc, w, idx,
+                            tot, ea, quiet, d) (
+  i = 0;
+  while (i < rfft) (
+    k = rpos + i; k >= rfft ? k -= rfft;
+    fbuf[2 * i] = rrng[k] * rwin[i];
+    fbuf[2 * i + 1] = 0;
+    i += 1;
+  );
+  use_fft(rfft);
+  fft_fwd(fbuf);
+  memset(bacc, 0, nband);
+  k = 1;
+  while (k <= rhalf) (
+    b = rbandi[k];
+    b >= 0 ? (
+      pr = fbuf[2 * k]; pi = fbuf[2 * k + 1];
+      bacc[b] += pr * pr + pi * pi;
+    );
+    k += 1;
+  );
+  // ---- the decay cube's gate: is the voice off right now?
+  // Set against a slow running average of the take's own level rather than an
+  // absolute threshold, so it calibrates itself to the material.
+  tot = 0; b = 0;
+  while (b < nband) ( tot += bacc[b]; b += 1; );
+  tot = 10 * log10(tot / rnorm + 0.000000000000000001);
+  ea = exp(-_RDT / EDC_TC);
+  rframes < 1 ? eavg = tot : eavg = ea * eavg + (1 - ea) * tot;
+  quiet = (tot < eavg - _EDCGATE) && (tot > EDC_DEAD);
+  // A pause that has ended is a pause that can be fitted. egapn == -1 means
+  // "this pause is already accounted for": without it a pause longer than
+  // EDCLAG would start a second one inside itself, whose reference level is
+  // the middle of a decay rather than the voice.
+  !quiet ? ( egapn > 0 ? edc_commit() : egapn = 0; );
+  (quiet && egapn >= 0) ? (
+    egapn += 1;
+    egapn > EDCLAG ? ( edc_commit(); egapn = -1; );
+  );
+
+  w = _RWIN;
+  b = 0;
+  while (b < nband) (
+    db = 10 * log10(bacc[b] / rnorm + 0.000000000000000001);
+    // ---- decay cube: follow this band down through the pause
+    egapn == 1 ? ( eref[b] = eprev[b]; estate[b] = 0; );
+    egapn >= 1 ? (
+      d = db - eref[b];
+      (estate[b] == 0 && d <= EDC_TOP) ? (
+        estate[b] = 1; et0[b] = egapn; ev0[b] = d; et1[b] = egapn; ev1[b] = d;
+      ) : (
+        (estate[b] == 1 && d >= EDC_BOT && d < ev1[b]) ? ( et1[b] = egapn; ev1[b] = d; );
+        (estate[b] == 1 && d < EDC_BOT) ? estate[b] = 2;
+      );
+    );
+    eprev[b] = db;
+    // level histogram, for the noise-floor gate Lua applies later
+    i = floor(db - lev0 + 0.5);
+    i < 0 ? i = 0 : ( i >= nlev ? i = nlev - 1 );
+    rlev[b * nlev + i] += 1;
+    // and the same bucket again, conditioned on the voice having stopped.
+    // That is the gate the decay cube already computes, and it is the one
+    // condition that takes the singer out of a level statistic -- so this is
+    // the distribution of the TAIL, which is what a threshold must sit above.
+    quiet ? plev[b * nlev + i] += 1;
+    rframes >= w ? (
+      idx = rframes - w; idx -= floor(idx / w) * w;
+      old = rdelay[b * MAXW + idx];
+      sl = (db - old) / (w * _RDT);
+      sl < 0 ? (
+        rt = -60 / sl;
+        (rt >= RING_LO && rt <= RING_HI) ? (
+          bu = floor(log(rt / RING_LO) / log(RING_HI / RING_LO) * nring);
+          bu < 0 ? bu = 0 : ( bu >= nring ? bu = nring - 1 );
+          lc = floor((old - lev0) / LEVCLASS_DB);
+          lc < 0 ? lc = 0 : ( lc >= nlevclass ? lc = nlevclass - 1 );
+          rslope[(b * nlevclass + lc) * nring + bu] += 1;
+        );
+      );
+    );
+    idx = rframes; idx -= floor(idx / w) * w;
+    rdelay[b * MAXW + idx] = db;
+    b += 1;
+  );
+  rframes += 1;
+);
+
+function kring() local(n, c, s) (
+  n = 0;
+  while (n < _NSAMP) (
+    s = 0; c = 0;
+    while (c < _NCH) ( s += _IN[n * _NCH + c]; c += 1; );
+    rrng[rpos] = s / _NCH;
+    rpos += 1; rpos >= rfft ? rpos = 0;
+    rfill < rfft ? rfill += 1;
+    rsince += 1;
+    (rfill >= rfft && rsince >= _RHOP) ? ( rsince = 0; ring_frame(); );
+    n += 1;
+  );
+);
+
+// -------------------------------------------------------------- dispatcher
+_TASK == 0 ? ( ksetup(); kreset(); kclear(); ) :
+_TASK == 1 ? ( kmodal(); ) :
+_TASK == 2 ? ( kring(); ) :
+_TASK == 3 ? ( kreset(); ) :
+_TASK == 4 ? ( kreset(); kclear(); ) :
+_TASK == 5 ? ( kreset_render(); kparams(); ) :
+_TASK == 6 ? ( krender(); ) : 0;

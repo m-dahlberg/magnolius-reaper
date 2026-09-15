@@ -1,0 +1,935 @@
+desc:Convolution Reverb (true-stereo, partitioned FFT)
+// @description Convolution Reverb
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   SETUP FIRST: create the folder REAPER/Data/ReverbIRs and put your impulse
+//   responses in it (on Linux that is usually
+//   ~/.config/REAPER/Data/ReverbIRs). The plugin scans that folder; with it
+//   empty there is nothing to load and no sound.
+//
+//   True-stereo convolution reverb. A 4-channel IR WAV (LL, LR, RL, RR - input
+//   letter first) is run through uniform partitioned FFT convolution.
+//
+//   Latency of one partition (2048 samples) is reported via pdc_delay; REAPER
+//   compensates, and the dry path is internally delayed to match.
+//
+//   The repository also carries tools/RescanReverbIRs.lua, a ReaScript that
+//   rebuilds the IR index after you add files. It is not installed by this
+//   package - grab it from GitHub if you want it.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - reverb convolution true-stereo
+// True-stereo convolution reverb. A 4-channel IR WAV (LL,LR,RL,RR — input
+// letter first) from Data/ReverbIRs is run through uniform partitioned FFT
+// convolution. Latency of one partition (2048 samples) is reported via
+// pdc_delay; REAPER compensates, and the dry path is internally delayed to
+// stay sample-aligned with the wet path.
+//
+// Channel formats:
+//   4-ch WAV = true stereo, order LL LR RL RR (ch1 = L in -> L out, ch2 = L->R,
+//              ch3 = R->L, ch4 = R->R).
+//   2-ch WAV = parallel stereo (LL, RR; no cross-feed).
+//   mono WAV = the same IR on both channels.
+//
+// IRs are resampled to the project rate on load, capped at 262144 samples
+// (~5.5 s @48k), and energy-normalized (a unit-impulse IR passes at 0 dB).
+// The reverb is active whenever a valid IR is loaded; wet/dry set the mix.
+//
+// Wet-path shaping (dry is never touched): pre-delay, IR length (resampling
+// stretch), and 12 dB/oct high-pass + low-pass on the wet output.
+//
+// IR SELECTION — two independent sources, last one touched wins:
+//   * slider1, REAPER's native file slider. It already recurses into
+//     subdirectories of Data/ReverbIRs and lists them as "Folder/Name".
+//   * the built-in browser in the graphics pane (search box + folder list).
+//     REAPER's host owns the file-slider index->filename mapping and code
+//     cannot write it (slider_automate on a file slider changes the number
+//     but not the file), so the browser instead loads by path with
+//     file_open(#string) and keeps its choice in @serialize.
+//     It needs Data/ConvReverbIRs.idx — a plain text file, one IR path per
+//     line relative to Data/ReverbIRs. Generate it with tools/index_irs.py
+//     or the bundled ReaScript tools/RescanReverbIRs.lua.
+
+options:maxmem=16777216
+
+slider1:/ReverbIRs:none:Reverb IR wav - 4ch order LL LR RL RR
+slider2:rvb_wet=-12<-60,12,0.1>Reverb wet (dB, -60=off)
+slider3:rvb_dry=0<-60,12,0.1>Reverb dry (dB, -60=off)
+slider4:rvb_pre=0<0,500,0.1>Pre-delay (ms, wet only)
+slider5:rvb_len=100<25,400,0.1>IR length (%, stretches the IR)
+slider6:rvb_hpf=20<20,2000,1>Wet high-pass (Hz, 12 dB/oct, 20=off)
+slider7:rvb_lpf=20000<200,20000,1>Wet low-pass (Hz, 12 dB/oct, 20000=off)
+
+in_pin:left
+in_pin:right
+out_pin:left
+out_pin:right
+
+@init
+// ---- convolution reverb memory ----
+// Allocated from 65536 upward with a running cursor. Every buffer handed to
+// fft()/ifft()/convolve_c() is exactly CONV_N2 = 8192 words and starts on a
+// multiple of 8192, so no FFT buffer ever crosses a 65536-word boundary
+// (a JSFX FFT requirement). Everything allocated after CSCR is either a
+// multiple of 8192 (the pre-delay rings) or never seen by the FFT, so the
+// alignment of the FFT-visible block above is preserved.
+CONV_P   = 2048;              // partition size (samples) = reported latency
+CONV_N   = 4096;              // FFT size (complex points), 2*CONV_P
+CONV_N2  = 8192;              // words per spectrum (interleaved re,im)
+MAXPARTS = 128;               // IR cap: 128*2048 = 262144 samples (~5.5 s @48k)
+IRRAW_CAP = 8*MAXPARTS*CONV_P; // interleaved load staging (words)
+PRE_N    = 131072;            // pre-delay ring (power of two), 2.7 s @48k
+PRE_MASK = PRE_N - 1;
+PRE_XF   = 512;               // pre-delay change crossfade (samples)
+MAXIR    = 1024;              // IR index: max files
+MAXFLD   = 128;               // IR index: max distinct folders
+IRTXT_CAP = 65536;            // IR index: packed name characters
+SELP_CAP = 1024;              // selected-IR path, packed characters
+
+conv_alloc = 65536;
+FDL_L  = conv_alloc; conv_alloc += MAXPARTS*CONV_N2; // input spectrum history L
+FDL_R  = conv_alloc; conv_alloc += MAXPARTS*CONV_N2; // input spectrum history R
+IRSPEC = conv_alloc; conv_alloc += 4*MAXPARTS*CONV_N2; // IR spectra, path-major LL,LR,RL,RR
+ACC_L  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator L
+ACC_R  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator R
+CSCR   = conv_alloc; conv_alloc += CONV_N2; // convolve_c scratch
+PRE_L  = conv_alloc; conv_alloc += PRE_N;   // wet-path pre-delay rings
+PRE_R  = conv_alloc; conv_alloc += PRE_N;
+OLAP_L = conv_alloc; conv_alloc += CONV_P;  // overlap-add tails
+OLAP_R = conv_alloc; conv_alloc += CONV_P;
+INB_L  = conv_alloc; conv_alloc += CONV_P;  // time-domain partition input rings
+INB_R  = conv_alloc; conv_alloc += CONV_P;
+OUTB_L = conv_alloc; conv_alloc += CONV_P;  // wet output for the current period
+OUTB_R = conv_alloc; conv_alloc += CONV_P;
+DRY_L  = conv_alloc; conv_alloc += CONV_P;  // dry-path alignment delay rings
+DRY_R  = conv_alloc; conv_alloc += CONV_P;
+IRRAW  = conv_alloc; conv_alloc += IRRAW_CAP; // interleaved IR file staging
+// ---- IR index (browser) ----
+// Built once by idx_load() on the audio thread; @gfx only ever READS it.
+IRTXT  = conv_alloc; conv_alloc += IRTXT_CAP; // all names, packed chars
+IROFF  = conv_alloc; conv_alloc += MAXIR;     // per file: offset into IRTXT
+IRLEN  = conv_alloc; conv_alloc += MAXIR;     // per file: length
+IRFLD  = conv_alloc; conv_alloc += MAXIR;     // per file: folder id
+FLDOFF = conv_alloc; conv_alloc += MAXFLD;    // per folder: offset into IRTXT
+FLDLEN = conv_alloc; conv_alloc += MAXFLD;    // per folder: length
+FLDCNT = conv_alloc; conv_alloc += MAXFLD;    // per folder: file count
+SELP   = conv_alloc; conv_alloc += SELP_CAP;  // selected path (browser), packed
+GFLT   = conv_alloc; conv_alloc += MAXIR;     // UI-thread-owned filter results
+
+// maxmem is not reliably honoured and writes past the real ceiling are dropped
+// silently. Two sentinels at different addresses near the top; a shared
+// out-of-range dummy cannot fake both.
+conv_alloc[-1] = 12345; conv_alloc[-3] = 54321;
+mem_ok = (conv_alloc[-1] == 12345 && conv_alloc[-3] == 54321) ? 1 : 0;
+conv_alloc[-1] = 0; conv_alloc[-3] = 0;
+
+// THREADING RULE: @gfx runs on the UI thread; @slider/@block/@sample on the
+// audio thread. EEL2 globals and function locals (static!) are shared, so
+// @gfx must never call functions the audio thread uses, never write memory
+// the audio thread reads, and audio code must not use variable names that
+// @gfx uses. DO NOT UNDO: every @gfx-only variable and function here is
+// named g_*, and nothing else in this file uses that prefix. @gfx writes
+// exactly two things the audio thread looks at — the pend_* request scalars —
+// and one memory region (GFLT) the audio thread never reads.
+
+function db2lin(db) ( 10^(db*0.05) );
+
+// ---- IR index file (audio thread: @init and @block only) ----
+
+// true if the packed strings IRTXT[a..a+n) and IRTXT[b..b+n) are equal
+function pk_same(a, alen, b, blen) local(i, ok) (
+  alen != blen ? 0 : (
+    i = 0; ok = 1;
+    while(i < alen && ok) ( IRTXT[a+i] != IRTXT[b+i] ? ok = 0; i += 1; );
+    ok;
+  );
+);
+
+// Read Data/ConvReverbIRs.idx: one IR path per line, relative to
+// Data/ReverbIRs (e.g. "Bricasti M7/1 Halls 01 Large Hall, 48K.wav").
+// Fills IRTXT/IROFF/IRLEN and derives the folder list from the path prefixes.
+function idx_load() local(h, n, sl, i, cur, o, fo, fl, j, found, guard) (
+  idx_ready = 0;                 // @gfx draws nothing while this is 0
+  nir = 0; nfld = 0; cur = 0;
+  h = file_open("ConvReverbIRs.idx");
+  h > 0 ? (
+    n = 0; guard = 0;
+    // guard advances on EVERY iteration: a line that trims to nothing (blank
+    // line, stray CR) must not leave the loop condition unchanged forever
+    while(guard < 4*MAXIR && n < MAXIR && cur < IRTXT_CAP - 512) (
+      guard += 1;
+      file_string(h, #ln) > 0 ? (
+      // file_string keeps the line terminator, and @serialize-written strings
+      // keep a trailing NUL: drop everything below space at the end
+      sl = strlen(#ln);
+      while(sl > 0 && str_getchar(#ln, sl-1) < 32) ( sl -= 1; );
+      sl > 0 ? (
+        o = cur;
+        i = 0;
+        loop(sl, IRTXT[cur] = str_getchar(#ln, i); cur += 1; i += 1; );
+        IROFF[n] = o; IRLEN[n] = sl;
+        // folder = everything before the last '/', or "" at the root
+        fl = 0; i = 0;
+        loop(sl, IRTXT[o+i] == '/' ? fl = i; i += 1; );
+        fo = o;
+        // find or append the folder
+        found = -1; j = 0;
+        while(j < nfld && found < 0) (
+          pk_same(FLDOFF[j], FLDLEN[j], fo, fl) ? found = j;
+          j += 1;
+        );
+        found < 0 && nfld < MAXFLD ? (
+          found = nfld;
+          FLDOFF[nfld] = fo; FLDLEN[nfld] = fl; FLDCNT[nfld] = 0;
+          nfld += 1;
+        );
+        IRFLD[n] = found;
+        found >= 0 ? FLDCNT[found] += 1;
+        n += 1;
+      );
+      ) : ( guard = 4*MAXIR; );   // EOF
+    );
+    file_close(h);
+    nir = n;
+  );
+  idx_txtlen = cur;
+  idx_gen += 1;    // @gfx watches this to know a rescan landed
+  idx_ready = 1;
+);
+
+// index of the currently selected browser path within the index list, or -1
+function sel_index() local(i, r, ok, j) (
+  r = -1;
+  sel_len > 0 ? (
+    i = 0;
+    while(i < nir && r < 0) (
+      IRLEN[i] == sel_len ? (
+        ok = 1; j = 0;
+        while(j < sel_len && ok) ( IRTXT[IROFF[i]+j] != SELP[j] ? ok = 0; j += 1; );
+        ok ? r = i;
+      );
+      i += 1;
+    );
+  );
+  r;
+);
+
+// ---- true-stereo convolution reverb (audio thread only — never from @gfx) ----
+// Uniform partitioned FFT convolution. Spectra are kept in fft()'s permuted
+// order throughout: convolve_c is element-wise, so matching permuted order on
+// both operands is fine — only bin ORDER would need fft_permute, not products.
+
+function rvb_clear_state() (
+  memset(FDL_L, 0, MAXPARTS*CONV_N2);
+  memset(FDL_R, 0, MAXPARTS*CONV_N2);
+  memset(OLAP_L, 0, CONV_P); memset(OLAP_R, 0, CONV_P);
+  memset(INB_L, 0, CONV_P);  memset(INB_R, 0, CONV_P);
+  memset(OUTB_L, 0, CONV_P); memset(OUTB_R, 0, CONV_P);
+  memset(DRY_L, 0, CONV_P);  memset(DRY_R, 0, CONV_P);
+  memset(PRE_L, 0, PRE_N);   memset(PRE_R, 0, PRE_N);
+  conv_pos = 0; fdl_pos = 0; pre_w = 0; pre_xf = 0;
+  hp_l1 = 0; hp_l2 = 0; hp_r1 = 0; hp_r2 = 0;
+  lp_l1 = 0; lp_l2 = 0; lp_r1 = 0; lp_r2 = 0;
+);
+
+// IR sample for conv path (0=LL,1=LR,2=RL,3=RR) at output frame t, resampled
+// from the staged file data. 2ch files = parallel stereo (LL,RR), mono = dual
+// mono; missing cross paths read as silence.
+// ir_ratio <= 1 (upsampling / stretching longer) interpolates linearly;
+// ir_ratio > 1 (downsampling / squeezing shorter, which is what a 96k IR in a
+// 48k project or IR length < 100% asks for) box-averages the whole source span
+// that maps onto this output frame, so shortening does not alias.
+function ir_samp(path, t) local(sch, sp, s0, fr, v0, v1, a, b, acc, k) (
+  sch = ir_nch == 4 ? path :
+        ir_nch == 2 ? (path == 0 ? 0 : path == 3 ? 1 : -1) :
+        (path == 0 || path == 3 ? 0 : -1);
+  sch < 0 ? 0 : (
+    ir_ratio <= 1 ? (
+      sp = t * ir_ratio;
+      s0 = floor(sp);
+      fr = sp - s0;
+      v0 = s0 >= 0 && s0 < ir_src_frames ? IRRAW[s0*ir_nch + sch] : 0;
+      v1 = s0 + 1 >= 0 && s0 + 1 < ir_src_frames ? IRRAW[(s0+1)*ir_nch + sch] : 0;
+      v0 + fr*(v1 - v0);
+    ) : (
+      a = floor(t * ir_ratio);
+      b = floor((t + 1) * ir_ratio);
+      b <= a ? b = a + 1;
+      acc = 0; k = a;
+      while(k < b) (
+        k >= 0 && k < ir_src_frames ? acc += IRRAW[k*ir_nch + sch];
+        k += 1;
+      );
+      acc / (b - a);
+    );
+  );
+);
+
+// Stage an already-opened IR file into IRRAW. Returns 1 on success.
+// file_open() itself must be written with the slider variable LITERALLY at the
+// call site (passing it through a variable makes JSFX treat it as an index
+// into an empty filename list and return -1), which is why the two callers
+// below are unrolled instead of sharing one "open by whatever" helper.
+function rvb_stage(h) local(nch, sr, frames, capfr, ok) (
+  ok = 0;
+  h > 0 ? (
+    nch = 0; sr = 0;
+    file_riff(h, nch, sr);
+    ((nch == 1 || nch == 2 || nch == 4) && sr > 0) ? (
+      frames = floor(file_avail(h) / nch);
+      capfr = floor(IRRAW_CAP / nch);
+      frames > capfr ? frames = capfr;
+      file_mem(h, IRRAW, frames * nch);
+      ir_nch = nch;
+      ir_src_rate = sr;
+      ir_src_frames = frames;
+      ok = frames > 0;
+    );
+    file_close(h);
+  );
+  ok;
+);
+
+// Resample the staged IR to srate (scaled by the IR length slider),
+// energy-normalize (unity energy per output channel, so a unit-impulse IR at
+// 100% length passes at exactly 0 dB), partition, FFT into IRSPEC.
+// No file I/O: an IR length change re-runs only this.
+function rvb_build() local(out_frames, e_l, e_r, sc, p, k, t, n, buf, v, stretch) (
+  ir_ready = 0; ir_trunc = 0;
+  (ir_staged && mem_ok && ir_src_frames > 0) ? (
+    stretch = max(rvb_len, 1) * 0.01;
+    ir_ratio = ir_src_rate / (srate * stretch);
+    out_frames = floor(ir_src_frames * srate * stretch / ir_src_rate);
+    out_frames > MAXPARTS*CONV_P ? out_frames = MAXPARTS*CONV_P;
+    ir_trunc = out_frames >= MAXPARTS*CONV_P ? 1 : 0;
+    out_frames > 0 ? (
+      e_l = 0; e_r = 0;
+      t = 0;
+      loop(out_frames,
+        v = ir_samp(0, t); e_l += v*v;
+        v = ir_samp(2, t); e_l += v*v;
+        v = ir_samp(1, t); e_r += v*v;
+        v = ir_samp(3, t); e_r += v*v;
+        t += 1;
+      );
+      sc = 1 / sqrt(max(max(e_l, e_r), 0.000000000001));
+      ir_nparts = ceil(out_frames / CONV_P);
+      p = 0;
+      loop(4,
+        k = 0;
+        loop(ir_nparts,
+          buf = IRSPEC + (p*MAXPARTS + k)*CONV_N2;
+          memset(buf, 0, CONV_N2);
+          n = 0;
+          loop(CONV_P,
+            t = k*CONV_P + n;
+            t < out_frames ? ( buf[2*n] = ir_samp(p, t) * sc; );
+            n += 1;
+          );
+          fft(buf, CONV_N);
+          k += 1;
+        );
+        p += 1;
+      );
+      ir_len_sec = out_frames / srate;
+      ir_nch_disp = ir_nch;
+      ir_built_srate = srate;
+      ir_ready = 1;
+    );
+  );
+  rvb_clear_state();
+);
+
+// Full load from whichever source is current. ir_from_browser picks between
+// the browser's stored path (SELP) and REAPER's native file slider.
+function rvb_load() local(i) (
+  ir_staged = 0;
+  ir_from_browser && sel_len > 0 ? (
+    strcpy(#irpath, "ReverbIRs/");
+    str_setlen(#irname, sel_len);
+    i = 0;
+    loop(sel_len, str_setchar(#irname, i, SELP[i]); i += 1; );
+    strcat(#irpath, #irname);
+    ir_staged = rvb_stage(file_open(#irpath));
+  ) : (
+    ir_staged = rvb_stage(file_open(slider1));
+  );
+  rvb_build();
+);
+
+// spectral accumulate: dst += src over one spectrum (unrolled: this is the
+// hot loop — 4 paths x ir_nparts runs per partition period)
+function rvb_acc(dst, src) local(n) (
+  n = 0;
+  loop(CONV_N2*0.125,
+    dst[n]   += src[n];   dst[n+1] += src[n+1];
+    dst[n+2] += src[n+2]; dst[n+3] += src[n+3];
+    dst[n+4] += src[n+4]; dst[n+5] += src[n+5];
+    dst[n+6] += src[n+6]; dst[n+7] += src[n+7];
+    n += 8;
+  );
+);
+
+// acc += IR-path spectra (pbase) convolved with input history (fbase)
+function rvb_mac(acc, pbase, fbase) local(k, fs) (
+  k = 0;
+  loop(ir_nparts,
+    fs = fbase + ((fdl_pos + k) % MAXPARTS)*CONV_N2;
+    memcpy(CSCR, pbase + k*CONV_N2, CONV_N2);
+    convolve_c(CSCR, fs, CONV_N);
+    rvb_acc(acc, CSCR);
+    k += 1;
+  );
+);
+
+// One partition step, run inline in @sample when the input ring wraps:
+// FFT both input blocks into the newest FDL slots, MAC all partitions of the
+// four true-stereo paths into two output spectra, IFFT, overlap-add.
+function rvb_process() local(sl, n) (
+  fdl_pos = fdl_pos > 0 ? fdl_pos - 1 : MAXPARTS - 1;
+  sl = FDL_L + fdl_pos*CONV_N2;
+  memset(sl, 0, CONV_N2);
+  n = 0;
+  loop(CONV_P, sl[2*n] = INB_L[n]; n += 1; );
+  fft(sl, CONV_N);
+  sl = FDL_R + fdl_pos*CONV_N2;
+  memset(sl, 0, CONV_N2);
+  n = 0;
+  loop(CONV_P, sl[2*n] = INB_R[n]; n += 1; );
+  fft(sl, CONV_N);
+
+  memset(ACC_L, 0, CONV_N2);
+  memset(ACC_R, 0, CONV_N2);
+  rvb_mac(ACC_L, IRSPEC + 0*MAXPARTS*CONV_N2, FDL_L); // LL: L in -> L out
+  rvb_mac(ACC_L, IRSPEC + 2*MAXPARTS*CONV_N2, FDL_R); // RL: R in -> L out
+  rvb_mac(ACC_R, IRSPEC + 1*MAXPARTS*CONV_N2, FDL_L); // LR: L in -> R out
+  rvb_mac(ACC_R, IRSPEC + 3*MAXPARTS*CONV_N2, FDL_R); // RR: R in -> R out
+  ifft(ACC_L, CONV_N);
+  ifft(ACC_R, CONV_N);
+  n = 0;
+  loop(CONV_P,
+    OUTB_L[n] = ACC_L[2*n]*conv_scale + OLAP_L[n];
+    OUTB_R[n] = ACC_R[2*n]*conv_scale + OLAP_R[n];
+    OLAP_L[n] = ACC_L[2*(n+CONV_P)]*conv_scale;
+    OLAP_R[n] = ACC_R[2*(n+CONV_P)]*conv_scale;
+    n += 1;
+  );
+);
+
+function rvb_gains() (
+  wet_g = rvb_wet <= -59.9 ? 0 : db2lin(rvb_wet);
+  dry_g = rvb_dry <= -59.9 ? 0 : db2lin(rvb_dry);
+);
+
+// Pre-delay: target tap in samples, clamped to the ring. A change is not
+// applied by moving one read pointer (that pitch-shifts the tail); the old and
+// new taps are equal-power crossfaded over PRE_XF samples instead.
+function pre_update() local(d) (
+  d = floor(rvb_pre * 0.001 * srate + 0.5);
+  d < 0 ? d = 0;
+  d > PRE_N - 1 ? d = PRE_N - 1;
+  d != pre_d ? (
+    pre_d_old = pre_d;
+    pre_d = d;
+    pre_xf = PRE_XF;
+  );
+);
+
+// 12 dB/oct (2-pole Butterworth, Q = 1/sqrt(2)) RBJ biquads on the WET signal.
+// Designed from the smoothed cutoffs once per block, so moving a knob glides
+// instead of stepping. Always clamped below Nyquist.
+function biq_design() local(f, w0, cs, sn, alpha, a0, nyq) (
+  nyq = srate * 0.45;
+  hp_on = hpf_s > 20.001 ? 1 : 0;
+  hp_on ? (
+    f = min(max(hpf_s, 5), nyq);
+    w0 = 2*$pi*f/srate; cs = cos(w0); sn = sin(w0);
+    alpha = sn / 1.41421356;
+    a0 = 1 + alpha;
+    hp_b0 = ((1 + cs)*0.5)/a0;
+    hp_b1 = (-(1 + cs))/a0;
+    hp_b2 = hp_b0;
+    hp_a1 = (-2*cs)/a0;
+    hp_a2 = (1 - alpha)/a0;
+  );
+  lp_on = lpf_s < 19999 ? 1 : 0;
+  lp_on ? (
+    f = min(max(lpf_s, 20), nyq);
+    w0 = 2*$pi*f/srate; cs = cos(w0); sn = sin(w0);
+    alpha = sn / 1.41421356;
+    a0 = 1 + alpha;
+    lp_b0 = ((1 - cs)*0.5)/a0;
+    lp_b1 = (1 - cs)/a0;
+    lp_b2 = lp_b0;
+    lp_a1 = (-2*cs)/a0;
+    lp_a2 = (1 - alpha)/a0;
+  );
+);
+
+// ifft() needs a 1/N scale; convolve_c adds none (verified by the unity-IR
+// render test — see tools/render_test.py)
+conv_scale = 1/CONV_N;
+rvb_gains();
+l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry;
+l_rvb_len = rvb_len;
+
+// smoothed filter cutoffs start settled so the first block is not a sweep
+hpf_s = rvb_hpf; lpf_s = rvb_lpf;
+biq_design();
+pre_d = -1; pre_d_old = 0;
+pre_update();
+pre_xf = 0; pre_d_old = pre_d;   // first block starts settled, no crossfade
+
+// @init reruns on srate change, transport start and recompile. Re-reading the
+// IR file and re-running 512 FFTs on every play press is a waste, so the
+// expensive part only runs when it has to. This plugin has a non-empty
+// @serialize, which is what keeps RAM (the loaded IR, the index) alive across
+// those reruns; if that ever stopped holding, ir_ready would come back 0 and
+// this reloads anyway, so the guard is safe either way.
+ir_from_browser = sel_len > 0 ? ir_from_browser : 0;
+(ir_built_srate != srate || !ir_ready) ? (
+  idx_load();
+  rvb_load();
+  sel_idx = sel_index();
+);
+l_irslider = slider1;
+pend_pick = 0; pend_rescan = 0; pend_reload = 0;
+
+@serialize
+// Saves the browser's chosen IR as a path (not an index), so adding IRs to the
+// folder later does not silently repoint saved projects at a different file.
+// Runs AFTER @init on project load (verified), so setting pend_reload here is
+// enough to have @block pick it up on the first audio block.
+file_avail(0) < 0 ? (
+  str_setlen(#sv, sel_len);
+  ser_i = 0;
+  loop(sel_len, str_setchar(#sv, ser_i, SELP[ser_i]); ser_i += 1; );
+  file_string(0, #sv);
+) : (
+  file_string(0, #sv);
+  ser_n = strlen(#sv);
+  // strings come back with a trailing NUL from the writer
+  while(ser_n > 0 && str_getchar(#sv, ser_n-1) < 32) ( ser_n -= 1; );
+  ser_n > SELP_CAP ? ser_n = SELP_CAP;
+  ser_i = 0;
+  loop(ser_n, SELP[ser_i] = str_getchar(#sv, ser_i); ser_i += 1; );
+  sel_len = ser_n;
+  ir_from_browser = sel_len > 0 ? 1 : 0;
+  pend_reload = 1;
+);
+
+@slider
+// REAPER fires @slider spuriously (transport, undo); only react to real changes
+slider1 != l_irslider ? (
+  l_irslider = slider1;
+  ir_from_browser = 0;   // touching the native slider takes selection back
+  sel_len = 0;
+  pend_reload = 1;
+);
+rvb_len != l_rvb_len ? (
+  l_rvb_len = rvb_len;
+  pend_rebuild = 1;      // resample + re-FFT only; no file I/O
+);
+(rvb_wet != l_rvb_wet || rvb_dry != l_rvb_dry) ? (
+  l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry;
+  rvb_gains();
+);
+
+@block
+// UI requests are consumed here, on the audio thread, never executed in @gfx.
+pend_rescan ? ( pend_rescan = 0; idx_load(); );
+pend_pick > 0 ? (
+  blk_k = pend_pick - 1;
+  pend_pick = 0;
+  blk_k >= 0 && blk_k < nir ? (
+    sel_len = min(IRLEN[blk_k], SELP_CAP);
+    blk_i = 0;
+    loop(sel_len, SELP[blk_i] = IRTXT[IROFF[blk_k]+blk_i]; blk_i += 1; );
+    ir_from_browser = 1;
+    pend_reload = 1;
+  );
+);
+pend_reload ? ( pend_reload = 0; pend_rebuild = 0; rvb_load(); sel_idx = sel_index(); );
+pend_rebuild ? ( pend_rebuild = 0; rvb_build(); );
+
+pre_update();
+
+// glide the filter cutoffs (~30 ms) in the log domain and redesign
+blk_g = 1 - exp(-samplesblock / (srate * 0.03));
+hpf_s = exp(log(max(hpf_s,1)) + (log(max(rvb_hpf,1)) - log(max(hpf_s,1))) * blk_g);
+lpf_s = exp(log(max(lpf_s,1)) + (log(max(rvb_lpf,1)) - log(max(lpf_s,1))) * blk_g);
+abs(hpf_s - rvb_hpf) < 0.01 ? hpf_s = rvb_hpf;
+abs(lpf_s - rvb_lpf) < 0.5 ? lpf_s = rvb_lpf;
+biq_design();
+
+// Reverb latency: one partition while a valid IR is loaded. REAPER's PDC
+// compensates it (offline renders included); the dry path is delayed to match.
+// Pre-delay is NOT latency — it delays only the wet path, inside the plugin.
+rvb_act = ir_ready;
+pdc_delay = rvb_act ? CONV_P : 0;
+pdc_bot_ch = 0; pdc_top_ch = 2;
+
+@sample
+rvb_act ? (
+  // wet = partitioned convolution (one-partition latency); dry runs through
+  // a matching CONV_P delay ring so the two stay sample-aligned
+  cvdl = DRY_L[conv_pos]; cvdr = DRY_R[conv_pos];
+  DRY_L[conv_pos] = spl0; DRY_R[conv_pos] = spl1;
+
+  // pre-delay ring feeds the convolver input only
+  PRE_L[pre_w] = spl0; PRE_R[pre_w] = spl1;
+  prd = (pre_w - pre_d + PRE_N) & PRE_MASK;
+  pwl = PRE_L[prd]; pwr = PRE_R[prd];
+  pre_xf > 0 ? (
+    pro = (pre_w - pre_d_old + PRE_N) & PRE_MASK;
+    pxg = pre_xf / PRE_XF;              // 1 -> 0 across the fade
+    pxa = sqrt(1 - pxg); pxb = sqrt(pxg);
+    pwl = pwl*pxa + PRE_L[pro]*pxb;
+    pwr = pwr*pxa + PRE_R[pro]*pxb;
+    pre_xf -= 1;
+  );
+  pre_w = (pre_w + 1) & PRE_MASK;
+  INB_L[conv_pos] = pwl; INB_R[conv_pos] = pwr;
+
+  // wet output, then the 12 dB/oct shaping filters (transposed direct form II)
+  wl = OUTB_L[conv_pos]; wr = OUTB_R[conv_pos];
+  hp_on ? (
+    hy = hp_b0*wl + hp_l1; hp_l1 = hp_b1*wl - hp_a1*hy + hp_l2; hp_l2 = hp_b2*wl - hp_a2*hy; wl = hy;
+    hy = hp_b0*wr + hp_r1; hp_r1 = hp_b1*wr - hp_a1*hy + hp_r2; hp_r2 = hp_b2*wr - hp_a2*hy; wr = hy;
+  );
+  lp_on ? (
+    ly = lp_b0*wl + lp_l1; lp_l1 = lp_b1*wl - lp_a1*ly + lp_l2; lp_l2 = lp_b2*wl - lp_a2*ly; wl = ly;
+    ly = lp_b0*wr + lp_r1; lp_r1 = lp_b1*wr - lp_a1*ly + lp_r2; lp_r2 = lp_b2*wr - lp_a2*ly; wr = ly;
+  );
+
+  spl0 = dry_g * cvdl + wet_g * wl;
+  spl1 = dry_g * cvdr + wet_g * wr;
+  conv_pos += 1;
+  conv_pos >= CONV_P ? ( conv_pos = 0; rvb_process(); );
+);
+// no valid IR: samples pass through untouched
+
+@gfx 640 560
+// UI THREAD ONLY. Everything below is named g_* (see the threading rule in
+// @init); the only things written back to the audio thread are pend_pick,
+// pend_rescan and the GFLT array, which no audio code reads.
+
+function g_lc(c) ( c >= 'A' && c <= 'Z' ? c + 32 : c );
+
+// case-insensitive search for the query substring [ts,te) inside the packed
+// name IRTXT[fo, fo+fl)
+function g_sub(fo, fl, ts, te) local(i, j, n, ok) (
+  n = te - ts;
+  n <= 0 ? 1 : n > fl ? 0 : (
+    ok = 0; i = 0;
+    while(i <= fl - n && !ok) (
+      j = 0;
+      while(j < n && g_lc(IRTXT[fo+i+j]) == g_lc(str_getchar(#g_query, ts+j))) ( j += 1; );
+      j >= n ? ok = 1;
+      i += 1;
+    );
+    ok;
+  );
+);
+
+// every whitespace-separated query term must appear somewhere in the name
+function g_match(fi) local(ql, ts, te, all, fo, fl) (
+  ql = strlen(#g_query);
+  ql <= 0 ? 1 : (
+    fo = IROFF[fi]; fl = IRLEN[fi];
+    all = 1; ts = 0;
+    while(ts < ql && all) (
+      while(ts < ql && str_getchar(#g_query, ts) <= 32) ( ts += 1; );
+      te = ts;
+      while(te < ql && str_getchar(#g_query, te) > 32) ( te += 1; );
+      te > ts ? ( g_sub(fo, fl, ts, te) ? 0 : all = 0; );
+      ts = te + 1;
+    );
+    all;
+  );
+);
+
+function g_refilter() local(i, n) (
+  n = 0; i = 0;
+  loop(nir,
+    ((g_fold < 0 || IRFLD[i] == g_fold) && g_match(i)) ? ( GFLT[n] = i; n += 1; );
+    i += 1;
+  );
+  g_nflt = n;
+  g_sel >= g_nflt ? g_sel = g_nflt - 1;
+  g_sel < 0 ? g_sel = 0;
+  g_scroll > g_nflt - 1 ? g_scroll = g_nflt - 1;
+  g_scroll < 0 ? g_scroll = 0;
+);
+
+// #g_row = IRTXT[o,o+l), with an optional leading strip (folder prefix) and
+// the .wav extension removed
+function g_setrow(o, l, strip) local(i) (
+  strip > 0 && strip < l ? ( o += strip; l -= strip; );
+  l >= 4 && IRTXT[o+l-4] == '.' &&
+    g_lc(IRTXT[o+l-3]) == 'w' && g_lc(IRTXT[o+l-2]) == 'a' &&
+    g_lc(IRTXT[o+l-1]) == 'v' ? l -= 4;
+  str_setlen(#g_row, l);
+  i = 0;
+  loop(l, str_setchar(#g_row, i, IRTXT[o+i]); i += 1; );
+);
+
+// trim #g_row until it fits maxw pixels
+function g_cliprow(maxw) local(n, done) (
+  done = 0;
+  gfx_measurestr(#g_row, g_mw, g_mh);
+  g_mw > maxw && strlen(#g_row) > 1 ? (
+    n = floor(strlen(#g_row) * maxw / g_mw);
+    n < 1 ? n = 1;
+    str_setlen(#g_row, n);
+  );
+  while(!done) (
+    gfx_measurestr(#g_row, g_mw, g_mh);
+    (g_mw <= maxw || strlen(#g_row) <= 1) ? ( done = 1; ) : ( str_setlen(#g_row, strlen(#g_row) - 1); );
+  );
+);
+
+function g_col(r, g, b) ( gfx_r = r; gfx_g = g; gfx_b = b; gfx_a = 1; );
+function g_box(x, y, w, h, r, g, b) ( g_col(r, g, b); gfx_rect(x, y, w, h); );
+function g_at(x, y) ( gfx_x = x; gfx_y = y; );
+function g_hit(x, y, w, h) ( g_mx >= x && g_mx < x + w && g_my >= y && g_my < y + h );
+
+g_init != 777 ? (
+  g_init = 777;
+  g_fold = -1; g_sel = 0; g_scroll = 0; g_fscroll = 0;
+  g_dirty = 1; g_idxgen = -1; g_rescanning = 0;
+  strcpy(#g_query, "");
+);
+
+gfx_setfont(1, "Arial", 18, 'b');
+gfx_setfont(2, "Arial", 15);
+gfx_setfont(3, "Arial", 13);
+gfx_setfont(4, "Arial", 14);
+
+g_mx = mouse_x; g_my = mouse_y;
+g_click = (mouse_cap & 1) && !g_lastcap;
+g_lastcap = mouse_cap & 1;
+
+// ---- layout ----
+g_pad = 16;
+g_sy = 44; g_sh = 28;                            // search box
+g_bw = 96;                                       // rescan button
+g_ly = g_sy + g_sh + 10; g_lh = 250;             // list panels
+g_fw = 176;                                      // folder panel width
+g_fx = g_pad; g_ix = g_pad + g_fw + 10;
+g_iw = gfx_w - g_ix - g_pad;
+g_rowh = 19;
+g_rows = floor((g_lh - 8) / g_rowh);
+g_paramy = g_ly + g_lh + 60;
+
+g_box(0, 0, gfx_w, gfx_h, 0.09, 0.10, 0.12);
+
+gfx_setfont(1); g_col(0.85, 0.87, 0.9);
+g_at(g_pad, 14); gfx_drawstr("Convolution Reverb");
+gfx_setfont(3); g_col(0.4, 0.42, 0.45);
+g_at(gfx_w - 46, 20); gfx_drawstr("v0.2");
+
+// ---- keyboard ----
+g_ch = gfx_getchar();
+while(g_ch) (
+  g_ch >= 32 && g_ch < 127 ? (
+    strcpy(#g_ch1, "");
+    str_setlen(#g_ch1, 1); str_setchar(#g_ch1, 0, g_ch);
+    strcat(#g_query, #g_ch1);
+    g_dirty = 1; g_scroll = 0; g_sel = 0;
+  );
+  g_ch == 8 && strlen(#g_query) > 0 ? (       // backspace
+    str_setlen(#g_query, strlen(#g_query) - 1);
+    g_dirty = 1; g_scroll = 0; g_sel = 0;
+  );
+  g_ch == 27 ? ( strcpy(#g_query, ""); g_dirty = 1; g_scroll = 0; g_sel = 0; );
+  g_ch == 30064 ? ( g_sel -= 1; g_sel < 0 ? g_sel = 0; );                 // up
+  g_ch == 1685026670 ? ( g_sel += 1; g_sel > g_nflt - 1 ? g_sel = g_nflt - 1; ); // down
+  g_ch == 1885828464 ? ( g_sel -= g_rows; g_sel < 0 ? g_sel = 0; );       // pgup
+  g_ch == 1885824110 ? ( g_sel += g_rows; g_sel > g_nflt - 1 ? g_sel = g_nflt - 1; ); // pgdn
+  g_ch == 13 && g_nflt > 0 ? ( pend_pick = GFLT[g_sel] + 1; );            // enter
+  g_ch = gfx_getchar();
+);
+
+// a rebuilt index replaces every offset, so the filter results are stale.
+// Only an explicit Rescan can renumber the folders, so only that resets the
+// view — an @init rerun rebuilds an identical index and must not wipe what
+// the user had narrowed to.
+idx_ready && idx_gen != g_idxgen ? (
+  g_idxgen = idx_gen; g_dirty = 1;
+  g_rescanning ? (
+    g_rescanning = 0;
+    g_fold = -1; g_scroll = 0; g_fscroll = 0; g_sel = 0;
+  );
+);
+idx_ready && g_dirty ? ( g_dirty = 0; g_refilter(); );
+
+// keep the selection visible
+g_sel < g_scroll ? g_scroll = g_sel;
+g_sel > g_scroll + g_rows - 1 ? g_scroll = g_sel - g_rows + 1;
+g_scroll < 0 ? g_scroll = 0;
+
+// ---- search box ----
+g_sw = gfx_w - 2*g_pad - g_bw - 8;
+g_box(g_pad, g_sy, g_sw, g_sh, 0.16, 0.18, 0.22);
+g_col(0.3, 0.32, 0.36); gfx_rect(g_pad, g_sy, g_sw, 1); gfx_rect(g_pad, g_sy + g_sh - 1, g_sw, 1);
+gfx_rect(g_pad, g_sy, 1, g_sh); gfx_rect(g_pad + g_sw - 1, g_sy, 1, g_sh);
+gfx_setfont(4);
+strlen(#g_query) > 0 ? (
+  g_col(0.9, 0.92, 0.95);
+  g_at(g_pad + 9, g_sy + 6); gfx_drawstr(#g_query);
+  gfx_measurestr(#g_query, g_mw, g_mh);
+  g_box(g_pad + 10 + g_mw, g_sy + 6, 1, 16, 0.7, 0.75, 0.8);
+) : (
+  g_col(0.42, 0.44, 0.48);
+  g_at(g_pad + 9, g_sy + 6); gfx_drawstr("Search IRs...");
+);
+
+// rescan button
+g_brx = gfx_w - g_pad - g_bw;
+g_box(g_brx, g_sy, g_bw, g_sh, g_hit(g_brx, g_sy, g_bw, g_sh) ? 0.22 : 0.16,
+      g_hit(g_brx, g_sy, g_bw, g_sh) ? 0.24 : 0.18, g_hit(g_brx, g_sy, g_bw, g_sh) ? 0.28 : 0.21);
+g_col(0.75, 0.78, 0.82);
+gfx_setfont(3);
+gfx_measurestr("Rescan", g_mw, g_mh);
+g_at(g_brx + (g_bw - g_mw)*0.5, g_sy + 7); gfx_drawstr("Rescan");
+
+// ---- panels ----
+g_box(g_fx, g_ly, g_fw, g_lh, 0.12, 0.13, 0.155);
+g_box(g_ix, g_ly, g_iw, g_lh, 0.12, 0.13, 0.155);
+
+!idx_ready ? (
+  gfx_setfont(2); g_col(1, 0.55, 0.4);
+  g_at(g_ix + 12, g_ly + 12); gfx_drawstr("Reading index...");
+) : nir <= 0 ? (
+  gfx_setfont(4); g_col(1, 0.55, 0.4);
+  g_at(g_fx + 12, g_ly + 12); gfx_drawstr("No IR index found.");
+  g_col(0.6, 0.62, 0.66);
+  g_at(g_fx + 12, g_ly + 34); gfx_drawstr("Create Data/ConvReverbIRs.idx with");
+  g_at(g_fx + 12, g_ly + 52); gfx_drawstr("tools/index_irs.py, or run the action");
+  g_at(g_fx + 12, g_ly + 70); gfx_drawstr("\"Rescan reverb IRs\" (ReaScript), then");
+  g_at(g_fx + 12, g_ly + 88); gfx_drawstr("press Rescan. The Reverb IR slider");
+  g_at(g_fx + 12, g_ly + 106); gfx_drawstr("above works without the index.");
+) : (
+  // ---- folder list ----
+  gfx_setfont(3);
+  g_i = 0;
+  while(g_i < g_rows && g_i + g_fscroll - 1 < nfld) (
+    g_fi = g_i + g_fscroll - 1;      // -1 slot is "All"
+    g_ry = g_ly + 4 + g_i*g_rowh;
+    g_on = (g_fi < 0 && g_fold < 0) || (g_fi >= 0 && g_fold == g_fi);
+    g_on ? g_box(g_fx + 2, g_ry, g_fw - 4, g_rowh, 0.20, 0.33, 0.45);
+    g_hit(g_fx, g_ry, g_fw, g_rowh) && !g_on ? g_box(g_fx + 2, g_ry, g_fw - 4, g_rowh, 0.16, 0.17, 0.20);
+    g_col(g_on ? 0.95 : 0.72, g_on ? 0.97 : 0.74, g_on ? 1 : 0.78);
+    g_fi < 0 ? (
+      sprintf(#g_row, "All  (%d)", nir);
+    ) : (
+      FLDLEN[g_fi] > 0 ? ( g_setrow(FLDOFF[g_fi], FLDLEN[g_fi], 0); ) : ( strcpy(#g_row, "(root)"); );
+      sprintf(#g_row2, "%s  (%d)", #g_row, FLDCNT[g_fi]);
+      strcpy(#g_row, #g_row2);
+      g_cliprow(g_fw - 16);
+    );
+    g_at(g_fx + 8, g_ry + 3); gfx_drawstr(#g_row);
+    g_click && g_hit(g_fx, g_ry, g_fw, g_rowh) ? (
+      g_fold = g_fi; g_dirty = 1; g_scroll = 0; g_sel = 0;
+    );
+    g_i += 1;
+  );
+
+  // ---- file list ----
+  g_i = 0;
+  while(g_i < g_rows && g_i + g_scroll < g_nflt) (
+    g_k = GFLT[g_i + g_scroll];
+    g_ry = g_ly + 4 + g_i*g_rowh;
+    g_on = (g_i + g_scroll) == g_sel;
+    g_cur = (ir_from_browser && g_k == sel_idx) ? 1 : 0;
+    g_on ? g_box(g_ix + 2, g_ry, g_iw - 4, g_rowh, 0.20, 0.33, 0.45);
+    g_hit(g_ix, g_ry, g_iw, g_rowh) && !g_on ? g_box(g_ix + 2, g_ry, g_iw - 4, g_rowh, 0.16, 0.17, 0.20);
+    g_cur ? g_box(g_ix + 2, g_ry, 3, g_rowh, 0.35, 0.85, 0.45);
+    // hide the folder prefix when a folder is selected (never for the root
+    // folder, whose prefix is empty — stripping 1 would eat a real character)
+    g_setrow(IROFF[g_k], IRLEN[g_k],
+             (g_fold >= 0 && FLDLEN[g_fold] > 0) ? FLDLEN[g_fold] + 1 : 0);
+    g_cliprow(g_iw - 16);
+    g_col(g_on ? 0.95 : g_cur ? 0.85 : 0.76, g_on ? 0.97 : g_cur ? 0.92 : 0.78, g_on ? 1 : 0.82);
+    g_at(g_ix + 8, g_ry + 3); gfx_drawstr(#g_row);
+    g_click && g_hit(g_ix, g_ry, g_iw, g_rowh) ? (
+      g_sel = g_i + g_scroll;
+      pend_pick = g_k + 1;
+    );
+    g_i += 1;
+  );
+  g_nflt <= 0 ? (
+    gfx_setfont(3); g_col(0.5, 0.52, 0.56);
+    g_at(g_ix + 10, g_ly + 10); gfx_drawstr("no match");
+  );
+);
+
+// scroll wheel over the file list
+mouse_wheel != 0 ? (
+  g_hit(g_fx, g_ly, g_fw, g_lh) ? (
+    g_fscroll -= (mouse_wheel > 0 ? 3 : -3);
+    g_fscroll > nfld + 1 - g_rows ? g_fscroll = nfld + 1 - g_rows;
+    g_fscroll < 0 ? g_fscroll = 0;
+  ) : (
+    g_scroll -= (mouse_wheel > 0 ? 3 : -3);
+    g_scroll > g_nflt - g_rows ? g_scroll = g_nflt - g_rows;
+    g_scroll < 0 ? g_scroll = 0;
+  );
+  mouse_wheel = 0;
+);
+
+g_click && g_hit(g_brx, g_sy, g_bw, g_sh) ? ( pend_rescan = 1; g_rescanning = 1; );
+
+// ---- loaded-IR status ----
+gfx_setfont(2);
+g_at(g_pad, g_ly + g_lh + 12);
+ir_ready ? (
+  g_col(0.4, 0.9, 0.5);
+  gfx_printf("IR  %d-ch, %.2f s%s", ir_nch_disp, ir_len_sec, ir_trunc ? "  (truncated at the 5.5 s cap)" : "");
+) : mem_ok ? (
+  g_col(1, 0.55, 0.4);
+  gfx_drawstr("No valid IR - pick one above, or drop a 1/2/4-ch WAV in Data/ReverbIRs");
+) : (
+  g_col(1, 0.35, 0.35);
+  gfx_drawstr("Out of memory - lower options:maxmem or MAXPARTS");
+);
+
+// which source is driving it, and what it is called
+gfx_setfont(3); g_col(0.55, 0.58, 0.62);
+g_at(g_pad, g_ly + g_lh + 32);
+ir_from_browser && sel_len > 0 ? (
+  str_setlen(#g_row, sel_len);
+  g_i = 0;
+  loop(sel_len, str_setchar(#g_row, g_i, SELP[g_i]); g_i += 1; );
+  g_cliprow(gfx_w - 2*g_pad - 60);
+  gfx_printf("browser: %s", #g_row);
+) : (
+  strcpy_fromslider(#g_row, slider1);
+  g_cliprow(gfx_w - 2*g_pad - 60);
+  gfx_printf("slider: %s", #g_row);
+);
+
+// ---- parameter read-out ----
+gfx_setfont(4);
+g_cw = (gfx_w - 2*g_pad) * 0.5;
+g_col(0.85, 0.87, 0.9);
+g_at(g_pad, g_paramy);              gfx_printf("Wet        %+.1f dB", rvb_wet);
+g_at(g_pad, g_paramy + 22);         gfx_printf("Dry        %+.1f dB", rvb_dry);
+g_at(g_pad, g_paramy + 44);         gfx_printf("Pre-delay  %.1f ms", rvb_pre);
+g_at(g_pad + g_cw, g_paramy);       gfx_printf("Length     %.0f %%", rvb_len);
+g_at(g_pad + g_cw, g_paramy + 22);
+rvb_hpf <= 20 ? gfx_drawstr("High-pass  off") : gfx_printf("High-pass  %.0f Hz", rvb_hpf);
+g_at(g_pad + g_cw, g_paramy + 44);
+rvb_lpf >= 20000 ? gfx_drawstr("Low-pass   off") : gfx_printf("Low-pass   %.0f Hz", rvb_lpf);
+
+gfx_setfont(3); g_col(0.45, 0.47, 0.5);
+g_at(g_pad, gfx_h - 38);
+gfx_drawstr("True-stereo uniform partitioned FFT convolution. Filters are 12 dB/oct, wet only.");
+g_at(g_pad, gfx_h - 21);
+gfx_drawstr("Latency 2048 spl (one partition), reported via PDC. Pre-delay is not latency.");

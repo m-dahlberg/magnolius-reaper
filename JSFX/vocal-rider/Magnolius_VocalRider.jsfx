@@ -1,0 +1,136 @@
+desc:Vocal Rider (auto gain riding + sidechain ducking)
+// @description Vocal Rider
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Automatic gain riding for vocals, with sidechain ducking so the vocal can
+//   hold its place against a backing track.
+//
+//   Rides level toward a target rather than compressing toward a threshold, so
+//   the result reads as a performance that was sung evenly rather than one
+//   that was compressed.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - dynamics gain vocal
+slider1:-18<-40,0,0.1>Target level (dB)
+slider2:6<0,12,0.1>Ride range (+/- dB)
+slider3:300<20,2000,1>Ride speed (ms)
+slider4:-50<-80,-20,0.5>Noise floor (dB)
+slider5:0<0,6,0.1>Sidechain influence (dB)
+slider6:50<5,500,1>Vocal loudness window (ms)
+slider7:200<5,1000,1>Sidechain loudness window (ms)
+slider8:0<-12,12,0.1>Output trim (dB)
+
+in_pin:Vocal L
+in_pin:Vocal R
+in_pin:Sidechain L
+in_pin:Sidechain R
+out_pin:Vocal L
+out_pin:Vocal R
+
+@init
+EPS = 0.000000000001;   // 1e-12, keeps log() finite on silence (EEL2 has no exponent literals)
+LOG10 = log(10);
+rms_v = rms_sc = 0;
+gain_db = 0;
+
+function db2x(db) ( bar_x + bar_w * min(max((db - DB_LO) / -DB_LO, 0), 1) );
+
+@slider
+k_v  = 1 - exp(-1 / (srate * slider6 * 0.001));
+k_sc = 1 - exp(-1 / (srate * slider7 * 0.001));
+k_cut   = 1 - exp(-1 / (srate * slider3 * 0.001));
+k_boost = 1 - exp(-1 / (srate * slider3 * 0.001 * 1.5)); // boost slightly slower than cut
+k_gate  = 1 - exp(-1 / srate);                           // ~1 s glide to unity when gated
+trim = 10^(slider8/20);
+
+@sample
+// one-pole RMS detectors (energy domain), louder channel wins
+e_v  = max(spl0*spl0, spl1*spl1);
+e_sc = max(spl2*spl2, spl3*spl3);
+rms_v  += k_v  * (e_v  - rms_v);
+rms_sc += k_sc * (e_sc - rms_sc);
+
+voc_db = 10 * log(rms_v  + EPS) / LOG10;
+sc_db  = 10 * log(rms_sc + EPS) / LOG10;
+
+gated = voc_db <= slider4;
+gated ? (
+  // below noise floor: glide back to unity, never boost silence/breaths
+  gain_db += k_gate * (0 - gain_db);
+) : (
+  // sidechain raises the target, reaching full influence when the
+  // music is 12 dB above the vocal target
+  sc_amt = min(max((sc_db - slider1) / 12, 0), 1);
+  eff_target = slider1 + slider5 * sc_amt;
+
+  want = eff_target - voc_db;
+  want = min(max(want, -slider2), slider2);
+
+  gain_db += (want < gain_db ? k_cut : k_boost) * (want - gain_db);
+);
+
+g = 10^(gain_db/20) * trim;
+spl0 *= g;
+spl1 *= g;
+
+@gfx 460 132
+DB_LO = -60;
+bar_x = 52;
+bar_w = gfx_w - bar_x - 84;
+bar_h = 22;
+y_in = 22; y_ride = 82;
+
+gfx_setfont(1, "Arial", 14);
+
+gfx_r = 0.09; gfx_g = 0.09; gfx_b = 0.11; gfx_a = 1;
+gfx_rect(0, 0, gfx_w, gfx_h);
+
+// ---- input level bar ----
+gfx_r = 0.16; gfx_g = 0.17; gfx_b = 0.20;
+gfx_rect(bar_x, y_in, bar_w, bar_h);
+gfx_r = 0.30; gfx_g = 0.62; gfx_b = 0.90;
+gfx_rect(bar_x, y_in, db2x(voc_db) - bar_x, bar_h);
+
+// noise floor tick (grey) and target tick (yellow)
+gfx_r = gfx_g = gfx_b = 0.45;
+gfx_rect(db2x(slider4), y_in - 4, 1, bar_h + 8);
+gfx_r = 1; gfx_g = 0.85; gfx_b = 0.30;
+gfx_rect(db2x(slider1), y_in - 4, 2, bar_h + 8);
+
+gfx_r = gfx_g = gfx_b = 0.85;
+gfx_x = 8; gfx_y = y_in + 4; gfx_drawstr("IN");
+gfx_x = bar_x + bar_w + 8; gfx_y = y_in + 4; gfx_printf("%5.1f dB", max(voc_db, DB_LO));
+
+gfx_r = gfx_g = gfx_b = 0.5;
+gfx_x = bar_x; gfx_y = y_in + bar_h + 4; gfx_printf("%d", DB_LO);
+gfx_x = bar_x + bar_w - 8; gfx_y = y_in + bar_h + 4; gfx_drawstr("0");
+
+// ---- ride gain bar (center = 0 dB, extends to +/- ride range) ----
+cx = bar_x + bar_w * 0.5;
+half = bar_w * 0.5;
+gfx_r = 0.16; gfx_g = 0.17; gfx_b = 0.20;
+gfx_rect(bar_x, y_ride, bar_w, bar_h);
+
+ext = slider2 > 0 ? gain_db / slider2 * half : 0;
+ext = min(max(ext, -half), half);
+gated ? ( gfx_r = 0.35; gfx_g = 0.35; gfx_b = 0.38; )        // dim while gated
+: ext >= 0 ? ( gfx_r = 0.35; gfx_g = 0.80; gfx_b = 0.40; )   // boosting
+: ( gfx_r = 0.95; gfx_g = 0.55; gfx_b = 0.30; );             // cutting
+ext >= 0 ? gfx_rect(cx, y_ride, ext, bar_h)
+         : gfx_rect(cx + ext, y_ride, -ext, bar_h);
+
+gfx_r = gfx_g = gfx_b = 0.7;
+gfx_rect(cx, y_ride - 4, 1, bar_h + 8);
+
+gfx_r = gfx_g = gfx_b = 0.85;
+gfx_x = 8; gfx_y = y_ride + 4; gfx_drawstr("RIDE");
+gfx_x = bar_x + bar_w + 8; gfx_y = y_ride + 4; gfx_printf("%+5.1f dB", gain_db);
+
+gfx_r = gfx_g = gfx_b = 0.5;
+gfx_x = bar_x; gfx_y = y_ride + bar_h + 4; gfx_printf("-%.0f", slider2);
+gfx_x = bar_x + bar_w - 16; gfx_y = y_ride + bar_h + 4; gfx_printf("+%.0f", slider2);

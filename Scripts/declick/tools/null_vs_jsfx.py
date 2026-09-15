@@ -1,0 +1,327 @@
+#!/usr/bin/env python3
+"""Null the script's DSP against Magnolius_DeClick.jsfx.
+
+This is the test the whole approach rests on. The script does not re-derive the
+de-clicking algorithm; it ports one that already works. So the question that
+matters is not "does this sound right" but "is this the same DSP", and that has
+an exact answer: render the same audio through the plugin and through the
+script and subtract.
+
+The comparison runs at nphases=1, where the script's parallel step-grid phases
+and the plugin's serial passes are identical by construction, with a fixed
+sensitivity and the cut-depth clamp lifted (the plugin has no clamp).
+
+Needs REAPER already running for the script half (`-nonewinst` hands the file
+to the live instance); the plugin half renders in its own throwaway instance,
+which is safe because `-renderproject` exits on its own.
+
+Prerequisite: Magnolius_DeClick.jsfx symlinked as <resource>/Effects/Magnolius_DeClick.jsfx.
+
+  python3 tools/null_vs_jsfx.py
+Work dir: ~/.cache/declick-nulltest
+"""
+import base64
+import math
+import os
+import struct
+import subprocess
+import sys
+import time
+
+JSFX_TOOLS = os.path.expanduser("~/repos/jsfx/DeClicker/tools")
+sys.path.insert(0, JSFX_TOOLS)
+try:
+    from wavio import read_wav, write_wav_f32
+except ImportError:
+    sys.exit("needs %s/wavio.py (the DeClicker JSFX repo)" % JSFX_TOOLS)
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+WORK = os.environ.get("DECLICK_NULL_DIR",
+                      os.path.expanduser("~/.cache/declick-nulltest"))
+SR = 48000
+IN_LEN = 4.0
+BED_FREQ, BED_AMP = 440.0, 0.3
+CLICKS = [24000, 48000, 72000, 96000, 120000, 144000]
+R_ONLY_CLICK = 156000
+CLICK_SHAPE = [0.6, -0.5, 0.4]
+SENS = 6.0
+
+# Everything the two sides must agree on. nbands/flo/fhi differ from the
+# plugin's own defaults only in that we pin them explicitly.
+P = dict(passes=1, sens=SENS, step_ms=5.0, max_steps=2, sep=3, crackle=-45.0,
+         flo=150.0, fhi=9600.0, nbands=12, xfade=5.0)
+
+RENDER_CFG = base64.b64encode(b"evaw" + struct.pack("<i", 32)).decode()
+# (msteps + max(RISE, skewsep) + 3) * stepsz + xfsamp, with skewsep = sep+sep//3
+_SKEWSEP = P["sep"] + P["sep"] // 3
+_STEPSZ = int(SR * P["step_ms"] / 1000 + 0.5)
+PDC = (P["max_steps"] + max(1, _SKEWSEP) + 3) * _STEPSZ + \
+      int(SR * P["xfade"] / 1000 + 0.5)
+
+
+def make_input(path):
+    n = int(SR * IN_LEN)
+    left = [BED_AMP * math.sin(2 * math.pi * BED_FREQ * t / SR) for t in range(n)]
+    right = list(left)
+    for p in CLICKS:
+        for i, v in enumerate(CLICK_SHAPE):
+            left[p + i] += v
+            right[p + i] += v
+    for i, v in enumerate(CLICK_SHAPE):
+        right[R_ONLY_CLICK + i] += v
+    write_wav_f32(path, SR, [left, right])
+    return [left, right]
+
+
+# The band layout, for the script side. It used to come from Config.defaults,
+# which silently made this test assert "the script agrees with the plugin AND
+# the script's defaults have not moved" -- so widening the analysed span to
+# 20 kHz failed the null with a port bug that did not exist. Both sides are
+# pinned from P now, and the defaults are free to be whatever suits a voice.
+def script_cfg_line():
+    return ("  cfg.flo, cfg.fhi, cfg.nbands = %r, %r, %d\n"
+            "  cfg.det_lo_hz, cfg.det_hi_hz = %r, %r"
+            % (P["flo"], P["fhi"], P["nbands"], P["flo"], P["fhi"]))
+
+
+def slider_line():
+    vals = ["%.6f" % v for v in (1, P["passes"], P["sens"], P["step_ms"],
+                                 P["max_steps"], P["sep"], P["crackle"],
+                                 P["flo"], P["fhi"], P["nbands"], P["xfade"])]
+    return " ".join(vals + ["-"] * 53)
+
+
+def render_jsfx(in_wav, out_wav):
+    rpp = os.path.join(WORK, "jsfx.rpp")
+    item = ('    <ITEM\n      POSITION 0\n      LENGTH %s\n      LOOP 0\n'
+            '      NAME input\n      <SOURCE WAVE\n        FILE "%s"\n      >\n'
+            '    >\n' % (IN_LEN, in_wav))
+    rpp_text = """<REAPER_PROJECT 0.1 "7.0/linux-x86_64" 1721000000
+  SAMPLERATE %d 0 0
+  TEMPO 120 4 4
+  RENDER_FILE "%s"
+  RENDER_PATTERN ""
+  RENDER_FMT 0 2 %d
+  RENDER_1X 0
+  RENDER_RANGE 1 0 %s 18 1000
+  RENDER_RESAMPLE 3 0 1
+  RENDER_ADDTOPROJ 0
+  RENDER_STEMS 0
+  RENDER_DITHER 0
+  <RENDER_CFG
+    %s
+  >
+  <TRACK
+    NAME "test"
+    <FXCHAIN
+      SHOW 0
+      LASTSEL 0
+      DOCKED 0
+      BYPASS 0 0 0
+      <JS "Magnolius_DeClick.jsfx" ""
+        %s
+      >
+    >
+%s  >
+>
+""" % (SR, out_wav, SR, IN_LEN, RENDER_CFG, slider_line(), item)
+    with open(rpp, "w") as f:
+        f.write(rpp_text)
+    if os.path.exists(out_wav):
+        os.remove(out_wav)
+    subprocess.run(["reaper", "-newinst", "-nosplash", "-renderproject", rpp],
+                   check=True, timeout=600,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    if not os.path.exists(out_wav):
+        raise RuntimeError("the plugin render produced no output")
+    return read_wav(out_wav)[1]
+
+
+SHIM = r'''
+-- generated by tools/null_vs_jsfx.py -- paths are baked in because the
+-- environment does not cross into the running REAPER instance
+local ROOT, IN, OUT, DONE = %r, %r, %r, %r
+local SENS = %s
+
+local function finish(msg)
+  local f = io.open(DONE, "w")
+  f:write(msg)
+  f:close()
+end
+
+local ok, err = pcall(function()
+  if not reaper.ImGui_GetBuiltinPath then error("ReaImGui is not installed", 0) end
+  package.path = ROOT .. "/?.lua;" .. reaper.ImGui_GetBuiltinPath()
+              .. "/?.lua;" .. package.path
+  local ImGui  = require "imgui" "0.9"
+  local Kernel = require "dc.kernel"
+  local Config = require "dc.config"
+  local Wav    = require "dc.wav"
+
+  -- minimal 32-bit float WAV reader; the null test never involves a project,
+  -- so there is no accessor and no item, only the DSP
+  local fh = assert(io.open(IN, "rb"))
+  local d = fh:read("a")
+  fh:close()
+  assert(d:sub(1, 4) == "RIFF" and d:sub(9, 12) == "WAVE", "not a RIFF WAVE")
+  local pos, nch, rate, data0, dlen = 13, nil, nil, nil, nil
+  while pos + 8 <= #d do
+    local id = d:sub(pos, pos + 3)
+    local sz = string.unpack("<I4", d, pos + 4)
+    if id == "fmt " then
+      local tag
+      tag, nch, rate = string.unpack("<I2I2I4", d, pos + 8)
+      assert(tag == 3, "expected IEEE float")
+    elseif id == "data" then
+      data0, dlen = pos + 8, sz
+      break
+    end
+    pos = pos + 8 + sz + (sz %% 2)
+  end
+  local total = dlen // (4 * nch)
+  local sig = { string.unpack("<" .. string.rep("f", total * nch), d, data0) }
+
+  local ctx = ImGui.CreateContext("declick null test")
+  local cfg = Config.new()
+  cfg.nphases, cfg.thresh_auto, cfg.sens_db = 1, false, SENS
+  cfg.max_cut_db = 400          -- the plugin has no clamp; lift ours to match
+  cfg.max_event_ms = 0          -- and no event-length test; switch ours off
+  cfg.min_reach_hz = 0          -- nor a reach test
+%s
+  local geo = { nchan = nch, rate = rate, total_samples = total,
+                acc_len = total / rate, playrate = 1, item_len = total / rate }
+  local k = assert(Kernel.new(ImGui, ctx, ROOT .. "/", geo, cfg))
+
+  local function pump(fn)
+    local i = 0
+    while i < total do
+      local n = math.min(k.block, total - i)
+      local t = {}
+      for j = 1, n * nch do t[j] = sig[i * nch + j] or 0 end
+      k.inbuf.clear(0)
+      k.inbuf.copy(t, 1, n * nch, 1)
+      fn(n)
+      i = i + n
+    end
+  end
+
+  k:reset_stream()
+  pump(function(n) k:analyze(n) end)
+  local st = k:detect(cfg, SENS)
+
+  k:reset_stream()
+  local w = assert(Wav.create(OUT, nch, rate))
+  local written = 0
+  pump(function(n)
+    k:process(n, false)
+    local t = k.outbuf.table(1, n * nch)
+    local to = math.min(n * nch, total * nch - written)
+    if to >= 1 then w:write(t, 1, to) written = written + to end
+  end)
+  w:close()
+  finish("ok events=" .. st.events)
+end)
+
+if not ok then finish("ERROR " .. tostring(err)) end
+'''
+
+
+def render_script(in_wav, out_wav):
+    if subprocess.run(["pgrep", "-x", "reaper"],
+                      stdout=subprocess.DEVNULL).returncode != 0:
+        raise RuntimeError(
+            "REAPER is not running. `-nonewinst` would silently BECOME the "
+            "instance, leaving a stray GUI REAPER holding the audio device and "
+            "rewriting ~/.config/REAPER on exit. Open REAPER and re-run.")
+    shim = os.path.join(WORK, "shim.lua")
+    done = os.path.join(WORK, "done.txt")
+    for p in (done, out_wav):
+        if os.path.exists(p):
+            os.remove(p)
+    with open(shim, "w") as f:
+        f.write(SHIM % (ROOT, in_wav, out_wav, done, SENS, script_cfg_line()))
+    subprocess.run(["reaper", "-nonewinst", shim], check=True, timeout=60,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # The launcher returns immediately; the script runs in the other process
+    # and nothing reaches this shell's stdout, ever. Poll for the sentinel.
+    for _ in range(600):
+        if os.path.exists(done):
+            break
+        time.sleep(0.1)
+    else:
+        raise RuntimeError("the script render never finished (no sentinel)")
+    msg = open(done).read().strip()
+    if not msg.startswith("ok"):
+        raise RuntimeError("script render failed: " + msg)
+    return read_wav(out_wav)[1], msg
+
+
+def db(x):
+    return 20 * math.log10(x) if x > 0 else -999.0
+
+
+def compare(a, b, lo, hi, label):
+    worst, at, acc = 0.0, lo, 0.0
+    for i in range(lo, hi):
+        d = abs(a[i] - b[i])
+        acc += d * d
+        if d > worst:
+            worst, at = d, i
+    rms = math.sqrt(acc / max(hi - lo, 1))
+    print("  %-8s peak %7.1f dB (sample %d)   rms %7.1f dB"
+          % (label, db(worst), at, db(rms)))
+    return db(worst), db(rms)
+
+
+def main():
+    os.makedirs(WORK, exist_ok=True)
+    in_wav = os.path.join(WORK, "input.wav")
+    jsfx_wav = os.path.join(WORK, "jsfx.wav")
+    scr_wav = os.path.join(WORK, "script.wav")
+
+    print("input  -> %s" % in_wav)
+    dry = make_input(in_wav)
+
+    print("plugin -> rendering at passes=1, sens=%.1f dB (PDC %d samples)"
+          % (SENS, PDC))
+    t0 = time.time()
+    jsfx = render_jsfx(in_wav, jsfx_wav)
+    print("          %.1fs" % (time.time() - t0))
+
+    print("script -> running the pipeline in the live REAPER")
+    t0 = time.time()
+    scr, msg = render_script(in_wav, scr_wav)
+    print("          %.1fs, %s" % (time.time() - t0, msg))
+
+    n = min(len(jsfx[0]), len(scr[0]), len(dry[0]))
+    # Skip the head and the plugin's un-flushed tail: REAPER compensates the
+    # reported PDC in a render, but the last PDC samples never come out of it.
+    lo, hi = 2 * PDC, n - 2 * PDC
+    print("comparing samples %d .. %d of %d" % (lo, hi, n))
+
+    fails = []
+    for c, name in ((0, "left"), (1, "right")):
+        pk, _ = compare(jsfx[c], scr[c], lo, hi, name)
+        if pk > -80:
+            fails.append("%s differs at %.1f dB" % (name, pk))
+
+    # A null against a bypassed plugin would also be silent, so prove both
+    # sides actually did something.
+    for c, name in ((0, "left"), (1, "right")):
+        moved = max(abs(scr[c][i] - dry[c][i]) for i in range(lo, hi))
+        if db(moved) < -60:
+            fails.append("%s: the script changed nothing (%.1f dB)"
+                         % (name, db(moved)))
+
+    print()
+    if fails:
+        for f in fails:
+            print("FAIL  " + f)
+        print("\nThe port is not faithful. Anything above -80 dB is a port bug.")
+        return 1
+    print("PASS  the script nulls against the plugin below -80 dB")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

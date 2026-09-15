@@ -1,0 +1,332 @@
+// @noindex
+// AutoTilt -- the EEL kernel.
+//
+// Two jobs, sharing one FFT and one memory map:
+//
+//   task 1  analyse   consume a block, accumulate the level-bucketed cube
+//   task 3  render    consume a block, apply the shelf pair, emit the block
+//
+// The cube is the whole architectural point. It is
+//
+//     cube[lev][bin] += |X(bin)|^2      lev = the frame's broadband level, dB
+//     cubeN[lev]     += 1
+//
+// summed over channels, so one pass over the audio answers every question the
+// panel can ask afterwards: the gate is a choice of which rows to sum, and the
+// band limits and the pivot are choices made over the summed row. Dragging the
+// pivot therefore costs a few thousand multiplies in Lua and never touches the
+// accessor.
+//
+// Bucketing is by BROADBAND level, not by the measured band. The band limits
+// have to stay free to change after analysis, and they could not if they
+// decided which row a frame landed in. The cost is that a thump during a
+// silence buckets as a loud frame -- harmless, because the band limits then
+// exclude nearly all of its energy from the sums.
+//
+// Variables Lua sets:
+//   _TASK                          which job
+//   _IN _OUT                       interleaved I/O, at the bottom of the heap
+//   _NSAMP                         frames in this block
+//   _HEAP _FFT _NCH _HOP           the memory map and the transform
+//   _LS* _HS* _MAKEUP              shelf-pair biquad coefficients, task 3
+//   _RD                            scratch address for a GetValue_Array read
+//
+// Variables Lua reads back:
+//   half nbins memtop heap_ok      geometry and the allocation check
+//   cube cubeN ana_frames          the analysis result
+//   out_peak                       the render's peak, for reporting
+
+MAXFFT  = 16384;
+NLEVMAX = 127;                  // 1 dB level buckets
+LEV0    = -120;                 // dB of bucket 0; digital silence lands here
+
+HANN_MS = 0.375;                // mean of hann^2, undoes the analysis window
+                                // when a frame's power is read as a level
+
+// ---------------------------------------------------------------- allocation
+// Bump allocator over the heap above the Lua-owned I/O region. Every buffer is
+// addressed through the globals set here, so nothing depends on a
+// hand-maintained address map.
+
+function halloc(n) (
+  _ha = memptr;
+  memptr += n;
+  memset(_ha, 0, n);
+  _ha;
+);
+
+// ----------------------------------------------------------------------- fft
+// Iterative radix-2 decimation-in-time, in place on interleaved complex data.
+// brev holds the bit-reversal permutation and twr/twi the twiddles for the
+// current fft_size; fft_tables() rebuilds both. Lifted from DeNoise, where it
+// is checked against a naive DFT headlessly -- the EEL sandbox has no fft().
+
+function fft_tables() local(i, j, b, k, lg, n) (
+  n = fft_size;
+  lg = 0;
+  i = 1;
+  while (i < n) ( lg += 1; i *= 2; );
+  i = 0;
+  while (i < n) (
+    j = 0;
+    b = i;
+    k = 0;
+    while (k < lg) (
+      j = j * 2 + (b - floor(b * 0.5) * 2);
+      b = floor(b * 0.5);
+      k += 1;
+    );
+    brev[i] = j;
+    i += 1;
+  );
+  i = 0;
+  while (i < n * 0.5) (
+    twr[i] = cos(2 * $pi * i / n);
+    twi[i] = -sin(2 * $pi * i / n);
+    i += 1;
+  );
+);
+
+function fft_fwd(buf) local(i, j, len, hf, step, k, tr, ti, ur, ui, vr, vi, i0, i1, n, ar, ai) (
+  n = fft_size;
+  i = 0;
+  while (i < n) (
+    j = brev[i];
+    j > i ? (
+      tr = buf[2 * i];     ti = buf[2 * i + 1];
+      buf[2 * i] = buf[2 * j];     buf[2 * i + 1] = buf[2 * j + 1];
+      buf[2 * j] = tr;             buf[2 * j + 1] = ti;
+    );
+    i += 1;
+  );
+  len = 2;
+  while (len <= n) (
+    hf = len * 0.5;
+    step = n / len;
+    i = 0;
+    while (i < n) (
+      k = 0;
+      j = 0;
+      while (j < hf) (
+        tr = twr[k]; ti = twi[k];
+        i0 = i + j; i1 = i0 + hf;
+        ar = buf[2 * i1]; ai = buf[2 * i1 + 1];
+        vr = ar * tr - ai * ti;
+        vi = ar * ti + ai * tr;
+        ur = buf[2 * i0]; ui = buf[2 * i0 + 1];
+        buf[2 * i0] = ur + vr; buf[2 * i0 + 1] = ui + vi;
+        buf[2 * i1] = ur - vr; buf[2 * i1 + 1] = ui - vi;
+        k += step;
+        j += 1;
+      );
+      i += len;
+    );
+    len *= 2;
+  );
+);
+
+// --------------------------------------------------------------------- setup
+
+function ksetup() local(wk, top) (
+  fft_size = _FFT;
+  nch = max(_NCH, 1);
+  half = fft_size * 0.5;
+  nbins = half + 1;
+  nlev = NLEVMAX;
+  lev0 = LEV0;
+
+  memptr = _HEAP;
+  fftbuf = halloc(2 * fft_size);
+  window = halloc(fft_size);
+  twr    = halloc(fft_size * 0.5);
+  twi    = halloc(fft_size * 0.5);
+  brev   = halloc(fft_size);
+  spec   = halloc(nbins);       // one frame, summed over channels
+  cubeN  = halloc(NLEVMAX);
+  b_ring = halloc(nch * fft_size);
+  bq_st  = halloc(nch * 4);     // two transposed-DF2 biquads per channel
+  cube   = halloc(NLEVMAX * nbins);
+  memtop = memptr;
+
+  // EEL does not fail loudly when it runs out of heap: every access past the
+  // limit is redirected to one shared scratch slot. Probing the two ends of
+  // the cube does not catch that -- if only the far end is missing, the near
+  // end reads back its own value and the far end reads back the scratch slot,
+  // which is the value just written to it, and both comparisons pass. Two
+  // *adjacent* slots at the very top do catch it: if that end is unallocated
+  // both writes land in the one scratch slot, so the first reads back the
+  // second's value.
+  cube[0] = 1;
+  top = memtop - 2;
+  top[0] = 2;
+  top[1] = 3;
+  heap_ok = cube[0] == 1 && top[0] == 2 && top[1] == 3;
+  cube[0] = 0;
+  top[0] = 0;
+  top[1] = 0;
+
+  wk = 0;
+  loop(fft_size,
+    window[wk] = 0.5 - 0.5 * cos(2 * $pi * wk / fft_size);
+    wk += 1;
+  );
+  fft_tables();
+
+  wpos = 0;
+  filled = 0;
+  since = 0;
+  ana_frames = 0;
+);
+
+// Clears the cube and the ring, so a second Analyse over the same kernel does
+// not accumulate on top of the first.
+function kreset_analysis() (
+  memset(cube, 0, NLEVMAX * nbins);
+  memset(cubeN, 0, NLEVMAX);
+  memset(b_ring, 0, nch * fft_size);
+  wpos = 0;
+  filled = 0;
+  since = 0;
+  ana_frames = 0;
+);
+
+function kreset_stream() (
+  memset(bq_st, 0, nch * 4);
+  out_peak = 0;
+);
+
+// ------------------------------------------------------------------ analysis
+
+// One STFT frame: window each channel out of its ring, transform, and sum the
+// power spectra across channels into `spec`. Channels are summed rather than
+// kept apart because the question is the take's overall tone, and a per-channel
+// answer would have to be recombined into exactly this before being useful.
+function frame_spec() local(ch, fk, rp, ring, bk, re, im) (
+  memset(spec, 0, nbins);
+  ch = 0;
+  while (ch < nch) (
+    ring = b_ring + ch * fft_size;
+    rp = wpos;                  // oldest sample in the ring
+    fk = 0;
+    loop(fft_size,
+      fftbuf[2 * fk] = ring[rp] * window[fk];
+      fftbuf[2 * fk + 1] = 0;
+      rp += 1;
+      rp >= fft_size ? rp = 0;
+      fk += 1;
+    );
+    fft_fwd(fftbuf);
+    bk = 0;
+    loop(nbins,
+      re = fftbuf[2 * bk];
+      im = fftbuf[2 * bk + 1];
+      spec[bk] += re * re + im * im;
+      bk += 1;
+    );
+    ch += 1;
+  );
+);
+
+// Reduce the frame to one broadband level, bucket it, and add its spectrum to
+// that bucket's row.
+function ana_frame() local(k, tot, ldb, lb, dst) (
+  frame_spec();
+
+  // Parseval: mean windowed sample power = sum|X|^2 / N^2, with the interior
+  // bins counted twice for the half spectrum; divide by the mean of hann^2 to
+  // read it back as the frame's un-windowed RMS level.
+  tot = spec[0] + spec[half];
+  k = 1;
+  while (k < half) ( tot += 2 * spec[k]; k += 1; );
+  tot = tot / (nch * fft_size * fft_size * HANN_MS);
+
+  ldb = tot > 0 ? 10 * log10(tot) : lev0 - 1000;
+  lb = floor(ldb - lev0 + 0.5);
+  lb < 0 ? lb = 0;
+  lb > nlev - 1 ? lb = nlev - 1;
+
+  cubeN[lb] += 1;
+  dst = cube + lb * nbins;
+  k = 0;
+  loop(nbins,
+    dst[k] += spec[k];
+    k += 1;
+  );
+  ana_frames += 1;
+);
+
+// Consume one interleaved block into the ring, firing a frame every _HOP
+// samples once the ring has been filled once.
+function kanalyze() local(s, ch, base, ring) (
+  hop = max(_HOP, 1);
+  s = 0;
+  loop(_NSAMP,
+    base = s * nch;
+    ch = 0;
+    while (ch < nch) (
+      ring = b_ring + ch * fft_size;
+      ring[wpos] = _IN[base + ch];
+      ch += 1;
+    );
+    wpos += 1;
+    wpos >= fft_size ? wpos = 0;
+    filled < fft_size ? filled += 1;
+
+    filled >= fft_size ? (
+      since += 1;
+      since >= hop ? ( since = 0; ana_frame(); );
+    );
+    s += 1;
+  );
+  ana_frames;
+);
+
+// -------------------------------------------------------------------- render
+//
+// The tilt: an RBJ low shelf at -G/2 and high shelf at +G/2, both cornered at
+// the pivot. Each RBJ shelf reaches half its dB gain at its own corner, so the
+// pair is exactly unity at the pivot, asymptotes to -G/2 and +G/2, and spans G
+// dB overall. Coefficients come from Lua, which owns the one copy of that
+// formula -- solve.lua evaluates the same coefficients analytically to predict
+// what this will do, and the selftest asserts the two agree.
+//
+// Transposed direct form II, two biquads in series per channel. No bulk delay:
+// the output lines up with the input sample for sample, which is what makes a
+// zero-gain render a bit-exact null rather than a search for an offset.
+
+function krender() local(s, ch, base, st, x, y1, y2, av) (
+  s = 0;
+  loop(_NSAMP,
+    base = s * nch;
+    ch = 0;
+    while (ch < nch) (
+      st = bq_st + ch * 4;
+      x = _IN[base + ch];
+
+      y1 = _LSB0 * x + st[0];
+      st[0] = _LSB1 * x - _LSA1 * y1 + st[1];
+      st[1] = _LSB2 * x - _LSA2 * y1;
+
+      y2 = _HSB0 * y1 + st[2];
+      st[2] = _HSB1 * y1 - _HSA1 * y2 + st[3];
+      st[3] = _HSB2 * y1 - _HSA2 * y2;
+
+      y2 *= _MAKEUP;
+      _OUT[base + ch] = y2;
+
+      av = abs(y2);
+      av > out_peak ? out_peak = av;
+      ch += 1;
+    );
+    s += 1;
+  );
+  out_peak;
+);
+
+// ---------------------------------------------------------------- dispatcher
+
+_TASK == 0 ? ( ksetup(); ) :
+_TASK == 1 ? ( kanalyze(); ) :
+_TASK == 2 ? ( kreset_analysis(); ) :
+_TASK == 3 ? ( krender(); ) :
+_TASK == 4 ? ( kreset_stream(); ) : 0;

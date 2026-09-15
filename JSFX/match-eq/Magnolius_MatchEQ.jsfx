@@ -1,0 +1,505 @@
+desc:Match EQ (pink noise spectral matcher)
+// @description Match EQ
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   Real-time spectral matcher. It continuously measures the input spectrum
+//   and applies an FFT-domain EQ curve pulling it toward a pink noise profile
+//   (power ~ 1/f, i.e. -3 dB/octave).
+//
+//   Pink noise is a reasonable first approximation of a balanced mix, so this
+//   is a way of seeing - and correcting - where a source departs from that
+//   reference without dialling bands by hand.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - EQ spectral matching analysis
+// Real-time spectral matcher: continuously measures the input spectrum and
+// applies an FFT-domain EQ curve pulling it toward a pink noise profile
+// (power ~ 1/f, i.e. -3 dB/octave).
+//
+// Engine: STFT overlap-add, FFT 4096, hop 1024, sqrt-Hann analysis+synthesis
+// windows. Latency of 4096 samples is reported to Reaper via PDC.
+// The correction curve is normalized to zero mean dB so it only changes
+// spectral shape, never overall level; use Compensation Gain as output trim.
+
+slider1:amount=100<0,100,1>Amount (%)
+slider2:nbands_sl=24<8,64,1>EQ Bands
+slider3:speed=1<0.1,10,0.01:log>Speed (s)
+slider4:comp_db=0<-24,24,0.1>Compensation Gain (dB)
+slider5:tilt=0<-6,6,0.1>Target Tilt (dB/oct)
+slider6:tiltfc=1000<100,8000,1:log>Tilt Center (Hz)
+slider7:minf=30<20,1000,1:log>Min Frequency (Hz)
+slider8:maxf=20000<1000,22000,10:log>Max Frequency (Hz)
+slider9:agc_on=0<0,1,1{Off,On}>Auto Gain Compensation
+slider10:sc_mode=0<0,3,1{No side chain,Only side chain,Combined,Reference}>Side Chain
+slider11:sc_gain_db=0<-60,24,0.1>Side Chain Gain (dB)
+slider12:sc_amount=100<0,100,1>Side Chain Amount (%)
+slider13:eq_dir=0<0,1,1{Counteract (balance),Mimic (invert)}>EQ Direction
+slider14:sc_speed=1<0.1,10,0.01:log>Side Chain Speed (s)
+
+in_pin:left input
+in_pin:right input
+in_pin:sidechain left
+in_pin:sidechain right
+out_pin:left output
+out_pin:right output
+
+@init
+FFTSIZE = 4096;
+HOP = FFTSIZE/4;          // 75% overlap
+MASK = FFTSIZE-1;
+HALF = FFTSIZE/2;
+MAXBANDS = 64;
+MAX_CORR_DB = 18;         // per-band boost/cut clamp (dB) - tweak here
+GATE_RMS = 10^(-70/20);   // freeze analysis below this input RMS
+GAIN_SMOOTH = 0.25;       // per-frame smoothing of applied bin gains
+FADE_OCT = 0.5;           // gain fade-out width outside min/max freq (octaves)
+
+// ---- memory layout ----
+fftbuf  = 0;                       // 2*FFTSIZE, complex interleaved
+wind    = fftbuf  + 2*FFTSIZE;     // FFTSIZE
+inbufL  = wind    + FFTSIZE;       // FFTSIZE input ring
+inbufR  = inbufL  + FFTSIZE;
+olaL    = inbufR  + FFTSIZE;       // FFTSIZE overlap-add ring
+olaR    = olaL    + FFTSIZE;
+bandE   = olaR    + FFTSIZE;       // smoothed band power (sum of bin powers)
+bandDB  = bandE   + MAXBANDS;      // measured avg-bin-power dB
+bandTDB = bandDB  + MAXBANDS;      // pink target dB (density domain)
+bandTL  = bandTDB + MAXBANDS;      // tilt component of target, pivots at tiltfc
+bandC   = bandTL  + MAXBANDS;      // correction dB per band
+bandP   = bandC   + MAXBANDS;      // per-frame band power accumulator
+bandW   = bandP   + MAXBANDS;      // bins per band (static per mapping)
+bandFC  = bandW   + MAXBANDS;      // band center frequency
+gfxD    = bandFC  + MAXBANDS;      // display scratch
+binpos  = gfxD    + MAXBANDS;      // HALF+1 fractional band position per bin
+binband = binpos  + (HALF+1);      // HALF+1 hard band index per bin (-1 = excluded)
+bingain = binband + (HALF+1);      // HALF+1 smoothed linear gain per bin
+binfade = bingain + (HALF+1);      // HALF+1 correction weight (0 outside min/max)
+scbufL  = binfade + (HALF+1);      // FFTSIZE side-chain L ring (parallel to inbufL)
+scbufR  = scbufL  + FFTSIZE;       // FFTSIZE side-chain R ring
+bandE_sc= scbufR  + FFTSIZE;       // MAXBANDS smoothed SC band power (Reference mode)
+bandDB_sc=bandE_sc+ MAXBANDS;      // MAXBANDS SC reference dB per band
+
+// periodic sqrt-Hann window
+i = 0;
+loop(FFTSIZE,
+  wind[i] = sqrt(0.5 - 0.5*cos(2*$pi*i/FFTSIZE));
+  i += 1;
+);
+// overlap-add normalization: sum of wind^2 across frame offsets (constant for Hann)
+olasum = 0; i = 0;
+while (i < FFTSIZE) ( olasum += sqr(wind[i]); i += HOP; );
+norm = 1/(FFTSIZE*olasum);         // includes the missing 1/N of JSFX ifft
+
+i = 0; loop(HALF+1, bingain[i] = 1; i += 1;);
+
+// ---- helpers: shared by the main-input and side-chain analysis passes ----
+// fill fftbuf from wmain*mainInput + wsc*sideChain, FFT it, return frame RMS
+function fill_fft(wmain, wsc) local(e, i, j, aL, aR) (
+  e = 0; i = 0;
+  loop(FFTSIZE,
+    j = (pos+i)&MASK;
+    aL = wmain*inbufL[j] + wsc*scbufL[j];
+    aR = wmain*inbufR[j] + wsc*scbufR[j];
+    e += sqr(aL) + sqr(aR);
+    fftbuf[i*2]   = aL*wind[i];
+    fftbuf[i*2+1] = aR*wind[i];
+    i += 1;
+  );
+  fft(fftbuf, FFTSIZE);
+  fft_permute(fftbuf, FFTSIZE);
+  sqrt(e/(FFTSIZE*2));                    // return frame RMS
+);
+
+// accumulate current fftbuf bin powers into log-spaced bands -> destE
+// (smoothed with coefficient a when have!=0, snapped on the first frame)
+function measure_bands(destE, have, a) local(b, k, bi) (
+  b = 0; loop(nbands, bandP[b] = 0; b += 1;);
+  k = 1;
+  loop(HALF-1,
+    bi = binband[k];
+    bi >= 0 ? (
+      bandP[bi] += sqr(fftbuf[2*k]) + sqr(fftbuf[2*k+1])
+                 + sqr(fftbuf[2*(FFTSIZE-k)]) + sqr(fftbuf[2*(FFTSIZE-k)+1]);
+    );
+    k += 1;
+  );
+  b = 0;
+  loop(nbands,
+    bandW[b] > 0 ? (
+      have ? destE[b] += a*(bandP[b] - destE[b])
+           : destE[b] = bandP[b];         // snap on first frame
+    );
+    b += 1;
+  );
+);
+
+// band power (destE domain) -> per-band dB, interpolating bands owning no bins
+function bands_to_db(srcE, destDB) local(lv, b, bb, fr) (
+  lv = -1; b = 0;
+  loop(nbands,
+    bandW[b] > 0 ? (
+      destDB[b] = 10*log10(srcE[b]/bandW[b] + 0.000000000000001);
+      lv >= 0 && lv < b-1 ? (
+        bb = lv+1;
+        while (bb < b) (
+          fr = (bb-lv)/(b-lv);
+          destDB[bb] = destDB[lv]*(1-fr) + destDB[b]*fr;
+          bb += 1;
+        );
+      ) : (
+        (lv < 0 && b > 0) ? (
+          bb = 0; while (bb < b) ( destDB[bb] = destDB[b]; bb += 1; );
+        );
+      );
+      lv = b;
+    );
+    b += 1;
+  );
+  (lv >= 0 && lv < nbands-1) ? (
+    bb = lv+1; while (bb < nbands) ( destDB[bb] = destDB[lv]; bb += 1; );
+  );
+);
+
+pos = 0; hopcount = 0; have_data = 0;
+have_ref = 0; sc_mode_prev = -1;
+compgain = 1;
+nbands_prev = 0; srate_prev = 0;
+
+// automatic gain compensation
+AGC_GATE = 2*sqr(GATE_RMS);          // energy gate (L+R, matches analysis gate)
+AGC_MIN = 10^(-24/20);               // makeup clamp +/-24 dB
+AGC_MAX = 10^(24/20);
+agc_ealpha = 1 - exp(-1/(srate*1.5));   // loudness averaging ~1.5 s
+agc_galpha = 1 - exp(-1/(srate*0.05));  // applied gain smoothing ~50 ms
+agc = 1; agc_t = 1; in_e = 0; out_e = 0;
+
+pdc_delay = FFTSIZE;
+pdc_bot_ch = 0; pdc_top_ch = 2;
+
+@slider
+nbands = max(8, min(MAXBANDS, nbands_sl|0));
+alpha = 1 - exp(-HOP/(srate*speed));
+alpha_sc = 1 - exp(-HOP/(srate*sc_speed));
+amt = amount*0.01;
+compgain_t = 10^(comp_db/20);
+scgain = 10^(sc_gain_db/20);            // linear side-chain gain
+scamt  = sc_amount*0.01;                // 0..1 analysis weight (Only SC / Combined)
+scw    = scgain*scamt;                  // side-chain weight in the analysis mix
+eqsign = eq_dir ? -1 : 1;               // Counteract=+1 (default), Mimic=-1 (invert)
+
+// analysis source changed -> re-adapt the smoothed spectra
+sc_mode != sc_mode_prev ? ( have_data = 0; have_ref = 0; sc_mode_prev = sc_mode; );
+
+// effective processing range (sanitized so the log mapping stays valid)
+fminp = max(20, min(minf, srate*0.25));
+fmaxp = min(min(22000, srate*0.5), max(maxf, fminp*2));
+
+// rebuild band mapping when band count, range or sample rate changes
+(nbands != nbands_prev || srate != srate_prev || fminp != fmin_prev || fmaxp != fmax_prev) ? (
+  nbands_prev = nbands; srate_prev = srate; fmin_prev = fminp; fmax_prev = fmaxp;
+  logr = log(fmaxp/fminp);
+
+  b = 0;
+  loop(nbands,
+    bandFC[b] = fminp*exp(logr*(b+0.5)/nbands);
+    bandTDB[b] = -10*log10(bandFC[b]);   // pink density: power/bin ~ 1/f
+    bandE[b] = 0; bandC[b] = 0; bandW[b] = 0;
+    b += 1;
+  );
+
+  k = 0;
+  loop(HALF+1,
+    f = k*srate/FFTSIZE;
+    binpos[k] = f <= 0 ? -1 : nbands*log(f/fminp)/logr - 0.5;
+    (f >= fminp && f <= fmaxp) ? (
+      bi = min(floor(nbands*log(f/fminp)/logr), nbands-1);
+      binband[k] = bi;
+      bandW[bi] += 1;
+      binfade[k] = 1;
+    ) : (
+      binband[k] = -1;
+      // fade correction to 0 dB over FADE_OCT octaves outside the range
+      oct = f <= 0 ? 100 : ( f < fminp ? log(fminp/f)/log(2) : log(f/fmaxp)/log(2) );
+      binfade[k] = max(0, 1 - oct/FADE_OCT);
+    );
+    k += 1;
+  );
+
+  have_data = 0;  // spectrum state no longer matches mapping: re-adapt
+);
+
+// tilt component of the target: 0 dB at tiltfc, +/- tilt dB per octave
+b = 0;
+loop(nbands,
+  bandTL[b] = tilt*log(bandFC[b]/tiltfc)/log(2);
+  b += 1;
+);
+
+@sample
+alnL = inbufL[pos];   // input from exactly FFTSIZE samples ago: aligns with output
+alnR = inbufR[pos];
+inbufL[pos] = spl0;
+inbufR[pos] = spl1;
+scbufL[pos] = spl2;
+scbufR[pos] = spl3;
+spl2 = 0; spl3 = 0;                   // consume side-chain channels (analysis only)
+outL = olaL[pos];
+outR = olaR[pos];
+olaL[pos] = 0;
+olaR[pos] = 0;
+pos = (pos+1)&MASK;
+
+// automatic gain compensation: match output loudness to the aligned input.
+// Measured pre-gain (no feedback); target held during silence.
+in_e  += agc_ealpha*(sqr(alnL) + sqr(alnR) - in_e);
+out_e += agc_ealpha*(sqr(outL) + sqr(outR) - out_e);
+(in_e > AGC_GATE && out_e > AGC_GATE) ? (
+  agc_t = min(AGC_MAX, max(AGC_MIN, sqrt(in_e/out_e)));
+);
+agc += agc_galpha*((agc_on ? agc_t : 1) - agc);
+
+compgain += 0.001*(compgain_t - compgain);
+spl0 = outL*compgain*agc;
+spl1 = outR*compgain*agc;
+
+hopcount += 1;
+hopcount >= HOP ? (
+  hopcount = 0;
+
+  // ---- analysis passes: measure the trigger spectrum into bandE ----
+  // The signal driving the EQ profile depends on the side-chain mode; the
+  // correction is always applied to the main input (processing pass below).
+  // |L_k|^2 + |R_k|^2 == 0.5*(|X_k|^2 + |X_{N-k}|^2); the constant factor is
+  // irrelevant since the correction is zero-mean normalized.
+  sc_mode == 1 ? (                                   // Only side chain
+    rms = fill_fft(0, scw);
+    rms > GATE_RMS ? ( measure_bands(bandE, have_data, alpha_sc); have_data = 1; );
+  ) : sc_mode == 2 ? (                               // Combined (main + SC)
+    rms = fill_fft(1, scw);
+    rms > GATE_RMS ? ( measure_bands(bandE, have_data, alpha); have_data = 1; );
+  );
+
+  // ---- reference pass (Reference mode): SC spectrum replaces the pink target ----
+  sc_mode == 3 ? (
+    rms_sc = fill_fft(0, scgain);
+    rms_sc > GATE_RMS ? ( measure_bands(bandE_sc, have_ref, alpha_sc); have_ref = 1; );
+    have_ref ? bands_to_db(bandE_sc, bandDB_sc);
+  );
+
+  // ---- processing pass: FFT the main input (also measures it in modes 0 & 3) ----
+  rms = fill_fft(1, 0);
+  (sc_mode == 0 || sc_mode == 3) ? (
+    rms > GATE_RMS ? ( measure_bands(bandE, have_data, alpha); have_data = 1; );
+  );
+
+  // ---- correction curve (also recomputed on gated frames so slider
+  //      changes take effect while the analysis is frozen) ----
+  have_data ? (
+    bands_to_db(bandE, bandDB);           // measured dB (interpolates empty bands)
+
+    // target: pink density (bandTDB) normally, or the SC reference spectrum in
+    // Reference mode when available. Zero-mean normalized (shape-only); the tilt
+    // component is added unnormalized so it pivots at tiltfc. eqsign flips the
+    // whole curve for Mimic (invert) vs Counteract (balance).
+    usesc_ref = (sc_mode == 3 && have_ref);
+    off = 0; b = 0;
+    loop(nbands,
+      tg = usesc_ref ? bandDB_sc[b] : bandTDB[b];
+      off += tg - bandDB[b];
+      b += 1;
+    );
+    off /= nbands;
+    b = 0;
+    loop(nbands,
+      tg = usesc_ref ? bandDB_sc[b] : bandTDB[b];
+      bandC[b] = max(-MAX_CORR_DB, min(MAX_CORR_DB,
+                 eqsign*amt*((tg + bandTL[b] - bandDB[b]) - off)));
+      b += 1;
+    );
+  ) : (
+    b = 0; loop(nbands, bandC[b] = 0; b += 1;);
+  );
+
+  // ---- band corrections -> smooth per-bin gains ----
+  k = 0;
+  loop(HALF+1,
+    t = binpos[k];
+    t <= 0 ? (
+      gdb = bandC[0];
+    ) : t >= nbands-1 ? (
+      gdb = bandC[nbands-1];
+    ) : (
+      b0 = floor(t); fr = t-b0;
+      gdb = bandC[b0]*(1-fr) + bandC[b0+1]*fr;
+    );
+    bingain[k] += GAIN_SMOOTH*(10^(gdb*binfade[k]/20) - bingain[k]);
+    k += 1;
+  );
+
+  // ---- apply gains (real, conjugate-symmetric -> both packed channels) ----
+  fftbuf[0] *= bingain[0];  fftbuf[1] *= bingain[0];                 // DC
+  fftbuf[FFTSIZE] *= bingain[HALF]; fftbuf[FFTSIZE+1] *= bingain[HALF]; // Nyquist
+  k = 1;
+  loop(HALF-1,
+    g = bingain[k];
+    fftbuf[2*k] *= g;             fftbuf[2*k+1] *= g;
+    fftbuf[2*(FFTSIZE-k)] *= g;   fftbuf[2*(FFTSIZE-k)+1] *= g;
+    k += 1;
+  );
+
+  fft_ipermute(fftbuf, FFTSIZE);
+  ifft(fftbuf, FFTSIZE);
+
+  // ---- windowed overlap-add ----
+  i = 0;
+  loop(FFTSIZE,
+    j = (pos+i)&MASK;
+    olaL[j] += fftbuf[2*i]  *wind[i]*norm;
+    olaR[j] += fftbuf[2*i+1]*wind[i]*norm;
+    i += 1;
+  );
+);
+
+@gfx 720 400
+gfx_clear = 18 + 20*256 + 24*65536;
+
+LM = 46; RM = 14; TM = 14; BM = 30;
+gw = gfx_w-LM-RM; gh = gfx_h-TM-BM;
+flo = 20; fhi = min(20000, srate*0.5);
+lgr = log(fhi/flo);
+DBR = 24;   // display range +/- dB
+
+gfx_setfont(1, "Arial", 13);
+
+// ---- grid: frequency lines ----
+dec = 10;
+while (dec < fhi) (
+  m = 1;
+  while (m < 10) (
+    f = m*dec;
+    (f >= flo && f <= fhi) ? (
+      x = LM + gw*log(f/flo)/lgr;
+      major = (m == 1 || m == 2 || m == 5);
+      gfx_r = gfx_g = gfx_b = major ? 0.28 : 0.17; gfx_a = 1;
+      gfx_line(x, TM, x, TM+gh);
+      major ? (
+        gfx_r = gfx_g = gfx_b = 0.55;
+        f >= 1000 ? sprintf(#fl, "%dk", f/1000) : sprintf(#fl, "%d", f);
+        gfx_measurestr(#fl, tw, th);
+        gfx_x = x-tw*0.5; gfx_y = TM+gh+4;
+        gfx_drawstr(#fl);
+      );
+    );
+    m += 1;
+  );
+  dec *= 10;
+);
+
+// ---- grid: dB lines ----
+db = -DBR;
+while (db <= DBR) (
+  y = TM + gh*(0.5 - db/(2*DBR));
+  gfx_r = gfx_g = gfx_b = db == 0 ? 0.38 : 0.20; gfx_a = 1;
+  gfx_line(LM, y, LM+gw, y);
+  gfx_r = gfx_g = gfx_b = 0.55;
+  sprintf(#dl, "%+d", db);
+  gfx_measurestr(#dl, tw, th);
+  gfx_x = LM-tw-5; gfx_y = y-th*0.5;
+  gfx_drawstr(#dl);
+  db += 6;
+);
+
+// ---- processing range markers ----
+gfx_r = 0.8; gfx_g = 0.42; gfx_b = 0.42; gfx_a = 0.9;
+(fminp >= flo && fminp <= fhi) ? (
+  x = LM + gw*log(fminp/flo)/lgr;
+  gfx_line(x, TM, x, TM+gh);
+);
+(fmaxp >= flo && fmaxp <= fhi) ? (
+  x = LM + gw*log(fmaxp/flo)/lgr;
+  gfx_line(x, TM, x, TM+gh);
+);
+
+// ---- target reference: pink + tilt (display is pink-compensated, so the
+//      pure pink target is 0 dB and the tilt pivots at tiltfc) ----
+gfx_r = 0.55; gfx_g = 0.5; gfx_b = 0.5; gfx_a = 0.9;
+x = 0;
+while (x <= gw) (
+  f = flo*exp(lgr*x/gw);
+  v = tilt*log(f/tiltfc)/log(2);
+  y = TM + gh*(0.5 - max(-DBR, min(DBR, v))/(2*DBR));
+  x == 0 ? ( gfx_x = LM; gfx_y = y; ) : gfx_lineto(LM+x, y);
+  x += 2;
+);
+
+have_data ? (
+  // deviation of measured spectrum from the target (pink, or SC ref), centered at 0
+  usesc_disp = (sc_mode == 3 && have_ref);
+  ref = 0; b = 0;
+  loop(nbands, ref += bandDB[b] - (usesc_disp ? bandDB_sc[b] : bandTDB[b]); b += 1;);
+  ref /= nbands;
+  b = 0;
+  loop(nbands, gfxD[b] = bandDB[b] - (usesc_disp ? bandDB_sc[b] : bandTDB[b]) - ref; b += 1;);
+
+  // input spectrum (relative to pink)
+  gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.95; gfx_a = 1;
+  x = 0;
+  while (x <= gw) (
+    f = flo*exp(lgr*x/gw);
+    t = nbands*log(f/fminp)/logr - 0.5;
+    t = max(0, min(nbands-1, t));
+    b0 = min(floor(t), nbands-2); fr = t-b0;
+    v = gfxD[b0]*(1-fr) + gfxD[b0+1]*fr;
+    y = TM + gh*(0.5 - max(-DBR, min(DBR, v))/(2*DBR));
+    x == 0 ? ( gfx_x = LM; gfx_y = y; ) : gfx_lineto(LM+x, y);
+    x += 2;
+  );
+);
+
+// ---- applied correction curve (from the smoothed per-bin gains) ----
+gfx_r = 0.98; gfx_g = 0.62; gfx_b = 0.2; gfx_a = 1;
+x = 0;
+while (x <= gw) (
+  f = flo*exp(lgr*x/gw);
+  kk = f*FFTSIZE/srate;
+  k0 = min(floor(kk), HALF-1); fr = kk-k0;
+  g = bingain[k0]*(1-fr) + bingain[k0+1]*fr;
+  v = 20*log10(max(g, 0.000001));
+  y = TM + gh*(0.5 - max(-DBR, min(DBR, v))/(2*DBR));
+  x == 0 ? ( gfx_x = LM; gfx_y = y; ) : gfx_lineto(LM+x, y);
+  x += 2;
+);
+
+// ---- legend + readout ----
+gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.95;
+gfx_x = LM+gw-190; gfx_y = TM+6;
+gfx_drawstr((sc_mode == 3 && have_ref) ? "input vs SC ref" : "input vs pink");
+gfx_r = 0.98; gfx_g = 0.62; gfx_b = 0.2;
+gfx_x = LM+gw-90; gfx_y = TM+6; gfx_drawstr("correction");
+
+gfx_r = gfx_g = gfx_b = 0.75;
+sprintf(#rd, "Amount %d%%   Bands %d   Speed %.2f s   Tilt %+.1f dB/oct @ %d Hz   Comp %+.1f dB",
+        amount, nbands, speed, tilt, tiltfc, comp_db);
+agc_on ? (
+  sprintf(#agcs, "   AGC %+.1f dB", 20*log10(agc));
+  strcat(#rd, #agcs);
+);
+sc_mode > 0 ? (
+  sc_mode == 1 ? (#scm = "Only SC";) : sc_mode == 2 ? (#scm = "Combined";) : (#scm = "Reference";);
+  sprintf(#scs, "   SC[%s] %+.1f dB %d%% %.2f s", #scm, sc_gain_db, sc_amount, sc_speed);
+  strcat(#rd, #scs);
+);
+strcat(#rd, eq_dir ? "   Mimic" : "   Counteract");
+gfx_x = LM; gfx_y = TM+6;
+gfx_drawstr(#rd);
+
+!have_data ? (
+  gfx_r = gfx_g = gfx_b = 0.6;
+  gfx_x = LM + gw*0.5 - 60; gfx_y = TM + gh*0.5 - 20;
+  gfx_drawstr("waiting for signal...");
+);

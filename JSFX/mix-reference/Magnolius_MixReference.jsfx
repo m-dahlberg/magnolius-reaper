@@ -1,0 +1,781 @@
+desc:Mix Reference (6 slots, tonal + per-band dynamics)
+// @description Mix Reference
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   SETUP FIRST: create the folder REAPER/Data/mixref and put your reference
+//   WAVs in it (on Linux that is usually ~/.config/REAPER/Data/mixref). The
+//   six Ref N file dropdowns scan that folder for .wav, .ogg and .raw. With it
+//   empty there is nothing to compare against.
+//
+//   Six reference slots with tonal and per-band dynamics comparison against
+//   your mix, so you can see where a reference is wider, denser or brighter
+//   rather than only hearing it.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// SETUP: create a folder  REAPER/Data/mixref/  and put your reference WAVs in it.
+// On Linux that is usually  ~/.config/REAPER/Data/mixref/
+// The six "Ref N file" dropdowns scan that folder (.wav / .ogg / .raw).
+//
+// Routing:
+//   ch 1/2 = main in/out (plugin sits in the chain, usually on the master)
+//   ch 3/4 = sidechain in = an alternative source for the mix under test
+// "Analyse mix from" defaults to Main 1/2, which needs no extra routing.
+//
+// RAM: the plugin measures how much memory it actually got and splits it six
+// ways, so reference length depends on your REAPER build. The header line shows
+// the real loop length of the selected slot in seconds.
+//
+// THREADING NOTE (do not undo): @gfx runs on the UI thread while @sample /
+// @block / @slider / @init run on the audio thread, and ALL globals are shared.
+// Audio-side loop counters are named ai/aj, UI-side ones gi/gj, and no name is
+// ever used by both sides. Mixing them corrupts r_rate/r_pos mid-loop, which
+// comes out as loud noise on the reference bus.
+
+options:maxmem=16000000 gfx_hz=30
+
+in_pin:Main L
+in_pin:Main R
+in_pin:Sidechain L
+in_pin:Sidechain R
+out_pin:Out L
+out_pin:Out R
+
+slider1:/mixref:none:Ref 1 file
+slider2:/mixref:none:Ref 2 file
+slider3:/mixref:none:Ref 3 file
+slider4:/mixref:none:Ref 4 file
+slider5:/mixref:none:Ref 5 file
+slider6:/mixref:none:Ref 6 file
+slider7:sel=0<0,6,1{Off (pass mix),Ref 1,Ref 2,Ref 3,Ref 4,Ref 5,Ref 6}>Reference slot
+slider8:trim1=0<-24,24,0.1>Trim 1 (dB)
+slider9:trim2=0<-24,24,0.1>Trim 2 (dB)
+slider10:trim3=0<-24,24,0.1>Trim 3 (dB)
+slider11:trim4=0<-24,24,0.1>Trim 4 (dB)
+slider12:trim5=0<-24,24,0.1>Trim 5 (dB)
+slider13:trim6=0<-24,24,0.1>Trim 6 (dB)
+slider14:anasrc=0<0,1,1{Main 1/2,Sidechain 3/4}>Analyse mix from
+slider15:gmatch=1<0,1,1{Off,On}>Auto gain match
+slider16:avgsec=10<1,60,1>Tonal average (s)
+slider17:tscale=18<6,36,1>Tonal scale (+/- dB)
+slider18:dscale=12<3,30,1>Dynamics scale (+/- dB)
+slider19:frz=0<0,1,1{Run,Freeze}>Analyser
+slider20:inv=0<0,1,1{Ref minus Mix,Mix minus Ref}>Curve polarity
+
+@init
+
+FFTSZ  = 8192;          // 171 ms @ 48k - good LF resolution
+FFTH   = FFTSZ/2;
+HOPSZ  = 2048;          // 75% overlap, ~23 frames/sec
+NB     = 31;            // 1/3-octave bands for the tonal curve
+NDR    = 9;             // wider bands for dynamics
+HB     = 100;           // histogram bins, 1 dB each
+HMIN   = -100;          // lowest dB the histogram represents
+
+// ---- memory map ----
+fftA   = 0;         // 16384
+fftB   = 16384;     // 16384
+winb   = 32768;     // 8192
+cbML   = 40960;     // 8192  circular input buffers
+cbMR   = 49152;
+cbRL   = 57344;
+cbRR   = 65536;
+pM     = 73728;     // 64  running band power, mix
+pR     = 73792;     // 64  running band power, reference
+tb     = 73856;     // 64  scratch band powers
+drt    = 73920;     // 16  scratch DR-band powers
+blo    = 73936;     // 64
+bhi    = 74000;     // 64
+dlo    = 74064;     // 16
+dhi    = 74080;     // 16
+hM     = 74096;     // 1000  histograms
+hR     = 75096;     // 1000
+dispT  = 76096;     // 64
+dispD  = 76160;     // 16
+r_len  = 76176;     // 8   frames per slot
+r_ptr  = 76184;     // 8
+r_sr   = 76192;     // 8
+r_nch  = 76200;     // 8
+r_pos  = 76208;     // 8
+r_rate = 76216;     // 8
+dedge  = 76224;     // 16  DR band edge frequencies
+trimg  = 76240;     // 8
+lastf  = 76248;     // 8   last seen file-slider values
+d_h    = 76256;     // 8   diag: file_open handle
+d_nch  = 76264;     // 8   diag: channels from file_riff
+d_sr   = 76272;     // 8   diag: samplerate from file_riff
+d_av   = 76280;     // 8   diag: items from file_avail
+tvalid = 76288;     // 64  display-smoothing initialised flags
+dvalid = 76352;     // 16
+ffail  = 76368;     // 8   consecutive failed load attempts per slot
+l_h    = 76376;     // 8   in-flight load: open handle (0 = idle)
+l_got  = 76384;     // 8   in-flight load: items read so far
+l_want = 76392;     // 8   in-flight load: items to read in total
+l_nch  = 76400;     // 8
+l_sr   = 76408;     // 8
+hcM    = 76416;     // 1   frames folded into hM since the last halving
+hcR    = 76417;     // 1   ditto for hR
+// Chunk size for the load reads that run on the audio thread. Big enough that
+// a long reference loads in well under a second, small enough that one read
+// cannot overrun a short audio block (that showed up as a burst of dropouts
+// right after picking a file).
+LCHUNK = 32768;
+AUDB   = 131072;    // slot N arena starts at AUDB + N*SLOTSZ
+
+// Probe how much RAM REAPER actually handed us. options:maxmem is not reliably
+// honoured, and writes past the real ceiling are dropped silently - which leaves
+// a slot holding a few hundred samples that then loop as a short buzz. Two
+// sentinels at different addresses, so a shared out-of-range dummy slot can't
+// give a false pass.
+//
+// Probe ONLY when the arena is not already established: the sentinels land
+// inside slot 6's audio and @init also runs on transport start, so re-probing
+// would punch two clicks into a loaded reference every time playback starts.
+memcap < AUDB + 600000 ? (
+  memcap = 0;
+  ai = 0;
+  loop(7,
+    cand = floor(16000000 / pow(2, ai));
+    (memcap == 0 && cand > AUDB + 600000) ? (
+      pa = cand - 1; pb = cand - 2;
+      pa[0] = 11111; pb[0] = 22222;
+      (pa[0] == 11111 && pb[0] == 22222) ? (
+        memcap = cand;
+        pa[0] = 0; pb[0] = 0;      // don't leave the sentinels in slot 6
+      );
+    );
+    ai += 1;
+  );
+  memcap < AUDB + 600000 ? memcap = AUDB + 600000;
+);
+SLOTSZ = floor((memcap - AUDB) / 6);
+
+// EEL2 has no scientific-notation literals - build small constants here
+EPSLOG = pow(10,-30);
+GATEDR = pow(10,-13);
+GATEBD = pow(10,-16);
+
+// ---- Hann window ----
+ai = 0; wsum2 = 0;
+loop(FFTSZ,
+  winb[ai] = 0.5 - 0.5*cos(2*$pi*ai/FFTSZ);
+  wsum2 += winb[ai]*winb[ai];
+  ai += 1;
+);
+// Power normalisation for a summed-over-bins estimate: mean-square of the
+// signal = nrm2 * sum(|X[k]|^2) over the FFTSZ/2 positive-frequency bins.
+// It must use the window's *power* sum, not its coherent gain, and fft_real
+// returns single-sided bins (twice the two-sided DFT value), hence the extra
+// factor of 4 in the denominator. The old (4/FFTSZ)^2 constant read 10.8 dB
+// hot; that cancelled in the plotted ratios, so the only visible symptom was
+// the -70 dB analyser gate and the histogram range sitting in the wrong
+// place. tools/render_test.py `analysis` pins this against a known sine:
+// a band holding a sine of amplitude A must read 10*log10(A^2/2).
+nrm2 = 1 / (2 * FFTSZ * wsum2);
+
+// ---- 1/3-octave band edges from 20 Hz up ----
+ai = 0;
+loop(NB,
+  afc = 20 * pow(2, ai/3);
+  b0 = floor((afc/pow(2,1/6)) * FFTSZ/srate + 0.5);
+  b1 = floor((afc*pow(2,1/6)) * FFTSZ/srate + 0.5);
+  b0 = max(1, b0);
+  b1 = min(FFTH-1, b1);
+  b1 < b0 ? b1 = b0;
+  blo[ai] = b0; bhi[ai] = b1;
+  ai += 1;
+);
+
+// ---- dynamics band edges ----
+dedge[0]=20; dedge[1]=60; dedge[2]=120; dedge[3]=250; dedge[4]=500;
+dedge[5]=1000; dedge[6]=2000; dedge[7]=4000; dedge[8]=8000; dedge[9]=20000;
+ai = 0;
+loop(NDR,
+  b0 = max(1, floor(dedge[ai]*FFTSZ/srate + 0.5));
+  b1 = min(FFTH-1, floor(dedge[ai+1]*FFTSZ/srate + 0.5));
+  b1 < b0 ? b1 = b0;
+  dlo[ai] = b0; dhi[ai] = b1;
+  ai += 1;
+);
+
+// ================= functions =================
+
+// windowed FFT of one stereo pair, power summed per band
+function spec(cbufL, cbufR, wpos, outband, drout)
+  local(i, n, b, lo, hi, sL, sR, re, im)
+(
+  n = FFTSZ - wpos;
+  memcpy(fftA, cbufL + wpos, n);
+  memcpy(fftA + n, cbufL, wpos);
+  memcpy(fftB, cbufR + wpos, n);
+  memcpy(fftB + n, cbufR, wpos);
+  i = 0;
+  loop(FFTSZ, fftA[i] *= winb[i]; fftB[i] *= winb[i]; i += 1);
+  fft_real(fftA, FFTSZ); fft_permute(fftA, FFTH);
+  fft_real(fftB, FFTSZ); fft_permute(fftB, FFTH);
+
+  b = 0;
+  loop(NB,
+    lo = blo[b]; hi = bhi[b]; sL = 0; sR = 0; i = lo;
+    loop(hi - lo + 1,
+      re = fftA[2*i]; im = fftA[2*i+1]; sL += re*re + im*im;
+      re = fftB[2*i]; im = fftB[2*i+1]; sR += re*re + im*im;
+      i += 1;
+    );
+    outband[b] = (sL + sR) * 0.5 * nrm2;
+    b += 1;
+  );
+
+  b = 0;
+  loop(NDR,
+    lo = dlo[b]; hi = dhi[b]; sL = 0; sR = 0; i = lo;
+    loop(hi - lo + 1,
+      re = fftA[2*i]; im = fftA[2*i+1]; sL += re*re + im*im;
+      re = fftB[2*i]; im = fftB[2*i+1]; sR += re*re + im*im;
+      i += 1;
+    );
+    drout[b] = (sL + sR) * 0.5 * nrm2;
+    b += 1;
+  );
+);
+
+// Fold one frame into a running average + per-band histogram.
+// The histogram is halved every `hdecay` frames so the dynamics readout keeps
+// tracking the music instead of freezing on whatever played first. Halving is
+// uniform, so it changes none of the percentiles - it only bounds the counts
+// and lets new frames outweigh old ones.
+function ingest(bandarr, histbase, cntad, coef)
+  local(i, tot, v, d, bn)
+(
+  tot = 0; i = 0;
+  loop(NB, tot += tb[i]; i += 1);
+  10*log10(tot + EPSLOG) > -70 ? (
+    i = 0;
+    loop(NB, bandarr[i] += (tb[i] - bandarr[i]) * coef; i += 1);
+    i = 0;
+    loop(NDR,
+      v = drt[i];
+      v > GATEDR ? (
+        d = 10*log10(v);
+        bn = floor(d - HMIN);
+        bn = max(0, min(HB-1, bn));
+        histbase[i*HB + bn] += 1;
+      );
+      i += 1;
+    );
+    cntad[0] += 1;
+    cntad[0] >= hdecay ? (
+      cntad[0] = 0;
+      i = 0;
+      loop(NDR*HB, histbase[i] *= 0.5; i += 1);
+    );
+  );
+);
+
+// gated 95th - 10th percentile of a band's level distribution, in dB
+// returns -1000 if there isn't enough data yet
+function drval(histbase, bidx)
+  local(base, i, c, tot, sum, mean, gate, tot2, t, p10, p95)
+(
+  base = histbase + bidx*HB;
+  tot = 0; sum = 0; i = 0;
+  loop(HB, c = base[i]; tot += c; sum += c*(HMIN + i + 0.5); i += 1);
+  tot < 60 ? -1000 : (
+    mean = sum / tot;
+    gate = max(0, ceil(mean - 20 - HMIN));
+    tot2 = 0; i = gate;
+    loop(HB - gate, tot2 += base[i]; i += 1);
+    tot2 < 25 ? -1000 : (
+      t = tot2 * 0.10; c = 0; i = gate;
+      while( i < HB && c < t ? ( c += base[i]; i += 1; 1; ) : 0 );
+      p10 = HMIN + i - 0.5;
+      t = tot2 * 0.95; c = 0; i = gate;
+      while( i < HB && c < t ? ( c += base[i]; i += 1; 1; ) : 0 );
+      p95 = HMIN + i - 0.5;
+      p95 - p10;
+    );
+  );
+);
+
+// Reads slot `ti` (1-based, 0 = none) into rdL/rdR, trimmed, with a short
+// fade at both loop edges so wrapping doesn't click.
+function readref(ti) local(p, ip, fr, nch, bp, i2, a0, a1, rln, fade, g)
+(
+  rdL = 0; rdR = 0;
+  ti > 0 ? (
+    rln = r_len[ti-1];
+    rln > 0 ? (
+      p = r_pos[ti-1]; ip = p|0; fr = p - ip;
+      nch = r_nch[ti-1]; bp = r_ptr[ti-1];
+      i2 = ip + 1; i2 >= rln ? i2 = 0;
+      a0 = bp + ip*nch; a1 = bp + i2*nch;
+      rdL = a0[0]*(1-fr) + a1[0]*fr;
+      rdR = nch > 1 ? (a0[1]*(1-fr) + a1[1]*fr) : rdL;
+      fade = min(1, min(p, rln - p) * 0.015625);   // 64-sample edge fade
+      fade < 0 ? fade = 0;
+      g = trimg[ti-1] * fade;
+      rdL *= g; rdR *= g;
+    );
+  );
+);
+
+// memset for both arrays: this is the one function called from BOTH threads
+// (@gfx's reset button and the audio thread's ref switch), and EEL2 function
+// locals are static, so a loop counter here would be corruptible.
+function clearstats(histbase, bandarr, cntad)
+(
+  memset(histbase, 0, NDR*HB);
+  memset(bandarr, 0, NB);
+  cntad[0] = 0;
+);
+
+// Opens and validates a file but reads NO audio. Reading the whole file here
+// would mean a multi-megabyte disk read on the audio thread, which starves the
+// output buffer and comes out as a short repeating glitch. pumpload() does the
+// actual reading, a chunk per block.
+// file_open() must be written with the slider variable literally at the call
+// site - passing the value through a variable makes JSFX treat it as an index
+// into the (empty) filename: list and it returns -1. See pollfiles().
+function startload(si, h) local(fnch, fsr, av, mx)
+(
+  r_len[si] = 0; r_nch[si] = 0; r_sr[si] = srate;
+  r_rate[si] = 1; r_pos[si] = 0; r_ptr[si] = AUDB + si*SLOTSZ;
+  l_h[si] = 0; l_got[si] = 0; l_want[si] = 0;
+  d_h[si] = h; d_nch[si] = 0; d_sr[si] = 0; d_av[si] = 0;
+  h > 0 ? (
+    fnch = 0; fsr = 0;
+    file_riff(h, fnch, fsr);
+    d_nch[si] = fnch; d_sr[si] = fsr;
+    (fnch > 0 && fnch < 64) ? (
+      fsr <= 0 ? fsr = srate;
+      av = file_avail(h);
+      d_av[si] = av;
+      av < 0 ? av = 0;
+      mx = floor(SLOTSZ / fnch) * fnch;
+      av > mx ? av = mx;
+      av = floor(av / fnch) * fnch;
+      av > 0 ? (
+        l_h[si] = h; l_want[si] = av; l_nch[si] = fnch; l_sr[si] = fsr;
+      ) : file_close(h);
+    ) : file_close(h);
+  );
+);
+
+// Reads one chunk of a pending load. Returns 1 if it did any work.
+function pumpload(si) local(h, n, got, fr)
+(
+  h = l_h[si];
+  h > 0 ? (
+    n = min(LCHUNK, l_want[si] - l_got[si]);
+    n > 0 ? (
+      got = file_mem(h, r_ptr[si] + l_got[si], n);
+      got > 0 ? l_got[si] += got : n = 0;
+    );
+    (n <= 0 || l_got[si] >= l_want[si]) ? (
+      file_close(h);
+      l_h[si] = 0;
+      fr = floor(l_got[si] / max(1, l_nch[si]));
+      // A slot holding a handful of frames would loop at audio rate as a buzz.
+      // Anything under 50 ms is treated as a failed load, not as audio.
+      fr > srate*0.05 ? (
+        r_nch[si]  = l_nch[si];
+        r_sr[si]   = l_sr[si];
+        r_rate[si] = l_sr[si] / srate;
+        r_pos[si]  = 0;
+        r_len[si]  = fr;     // set LAST: readref() keys off it
+      );
+    );
+    1;
+  ) : 0;
+);
+
+// Called from @slider, which is where file_open on a file slider belongs.
+// @slider also runs immediately after every @init, so this is the load path.
+// Unrolled on purpose: file_open() needs slider1..slider6 written out literally.
+// Also reloads any slot that is empty - state does not always survive an @init,
+// and without this you have to reselect the file by hand to get it back.
+function pollfiles()
+(
+  ((slider1|0) != lastf[0] || (r_len[0] < 1 && l_h[0] <= 0 && ffail[0] < 5)) ? (
+    (slider1|0) != lastf[0] ? ( lastf[0] = slider1|0; ffail[0] = 0; );
+    ffail[0] += 1;
+    l_h[0] > 0 ? ( file_close(l_h[0]); l_h[0] = 0; );
+    startload(0, file_open(slider1));
+    l_h[0] > 0 ? ffail[0] = 0;
+    anaref == 1 ? clearstats(hR, pR, hcR);
+  );
+  ((slider2|0) != lastf[1] || (r_len[1] < 1 && l_h[1] <= 0 && ffail[1] < 5)) ? (
+    (slider2|0) != lastf[1] ? ( lastf[1] = slider2|0; ffail[1] = 0; );
+    ffail[1] += 1;
+    l_h[1] > 0 ? ( file_close(l_h[1]); l_h[1] = 0; );
+    startload(1, file_open(slider2));
+    l_h[1] > 0 ? ffail[1] = 0;
+    anaref == 2 ? clearstats(hR, pR, hcR);
+  );
+  ((slider3|0) != lastf[2] || (r_len[2] < 1 && l_h[2] <= 0 && ffail[2] < 5)) ? (
+    (slider3|0) != lastf[2] ? ( lastf[2] = slider3|0; ffail[2] = 0; );
+    ffail[2] += 1;
+    l_h[2] > 0 ? ( file_close(l_h[2]); l_h[2] = 0; );
+    startload(2, file_open(slider3));
+    l_h[2] > 0 ? ffail[2] = 0;
+    anaref == 3 ? clearstats(hR, pR, hcR);
+  );
+  ((slider4|0) != lastf[3] || (r_len[3] < 1 && l_h[3] <= 0 && ffail[3] < 5)) ? (
+    (slider4|0) != lastf[3] ? ( lastf[3] = slider4|0; ffail[3] = 0; );
+    ffail[3] += 1;
+    l_h[3] > 0 ? ( file_close(l_h[3]); l_h[3] = 0; );
+    startload(3, file_open(slider4));
+    l_h[3] > 0 ? ffail[3] = 0;
+    anaref == 4 ? clearstats(hR, pR, hcR);
+  );
+  ((slider5|0) != lastf[4] || (r_len[4] < 1 && l_h[4] <= 0 && ffail[4] < 5)) ? (
+    (slider5|0) != lastf[4] ? ( lastf[4] = slider5|0; ffail[4] = 0; );
+    ffail[4] += 1;
+    l_h[4] > 0 ? ( file_close(l_h[4]); l_h[4] = 0; );
+    startload(4, file_open(slider5));
+    l_h[4] > 0 ? ffail[4] = 0;
+    anaref == 5 ? clearstats(hR, pR, hcR);
+  );
+  ((slider6|0) != lastf[5] || (r_len[5] < 1 && l_h[5] <= 0 && ffail[5] < 5)) ? (
+    (slider6|0) != lastf[5] ? ( lastf[5] = slider6|0; ffail[5] = 0; );
+    ffail[5] += 1;
+    l_h[5] > 0 ? ( file_close(l_h[5]); l_h[5] = 0; );
+    startload(5, file_open(slider6));
+    l_h[5] > 0 ? ffail[5] = 0;
+    anaref == 6 ? clearstats(hR, pR, hcR);
+  );
+);
+
+// any handle left open by an interrupted load is stale now
+ai = 0; loop(6, l_h[ai] > 0 ? ( file_close(l_h[ai]); l_h[ai] = 0; ); ai += 1);
+
+freembuf(AUDB + 6*SLOTSZ);   // SLOTSZ is now measured, not assumed
+
+xinc  = 1 / max(1, 0.020*srate);   // 20 ms fades
+acoef = 1 - exp(-HOPSZ / (max(1, avgsec) * srate));
+// Halve the histograms roughly every 4 tonal-average windows: long enough for
+// the percentile estimates to be well fed, short enough that the bars follow
+// the music.
+hdecay = max(200, floor(4 * max(1, avgsec) * srate / HOPSZ));
+wp = 0; hopcnt = 0;
+
+// @init also fires on transport start. The non-empty @serialize section at the
+// bottom stops REAPER zeroing RAM each time, so loaded audio survives - which
+// means the one-time setup below must not repeat, hence the sentinel.
+initdone != 12345 ? (
+  initdone = 12345;
+  ai = 0; loop(6, lastf[ai] = -12345; ai += 1);
+  ai = 0; loop(8, trimg[ai] = 1; ai += 1);
+  clearstats(hM, pM, hcM);
+  clearstats(hR, pR, hcR);
+  memset(tvalid, 0, 64); memset(dvalid, 0, 16); memset(ffail, 0, 8);
+  memset(l_h, 0, 8); memset(l_got, 0, 8); memset(l_want, 0, 8);
+  cur = 0; prv = 0; cx = 1; mg = 1; refsettle = 0; anaref = 0;
+) : (
+  // samplerate may have changed - refresh playback ratios for loaded slots
+  ai = 0; loop(6, r_len[ai] > 0 ? ( r_rate[ai] = r_sr[ai] / srate; ); ai += 1);
+);
+
+@slider
+
+trimg[0] = pow(10, trim1/20);
+trimg[1] = pow(10, trim2/20);
+trimg[2] = pow(10, trim3/20);
+trimg[3] = pow(10, trim4/20);
+trimg[4] = pow(10, trim5/20);
+trimg[5] = pow(10, trim6/20);
+acoef  = 1 - exp(-HOPSZ / (max(1, avgsec) * srate));
+hdecay = max(200, floor(4 * max(1, avgsec) * srate / HOPSZ));
+
+pollfiles();
+
+@block
+
+// One chunk, one slot, per block. Keeps disk reads off the critical path.
+ai = 0; pumped = 0;
+loop(6,
+  (pumped == 0 && l_h[ai] > 0) ? ( pumped = pumpload(ai); );
+  ai += 1;
+);
+
+// Nothing chosen yet: adopt the lowest loaded slot so the comparison is live
+// from the moment a file finishes loading.
+anaref < 1 ? (
+  ai = 0;
+  loop(6,
+    (anaref < 1 && r_len[ai] > 0) ? ( anaref = ai+1; refsettle = FFTSZ; );
+    ai += 1;
+  );
+);
+
+@sample
+
+// ---- slot switch: hand the outgoing slot to the second voice ----
+sel != cur ? ( prv = cur; cur = sel; cx = 0; );
+
+// The graph compares against `anaref`, which is NOT the same as what you are
+// listening to. Selecting a reference adopts it; going back to Off leaves it
+// in place, so the comparison stays live while you monitor your own mix.
+// Only a genuine change of reference invalidates the collected profile.
+(sel > 0 && sel != anaref) ? (
+  anaref = sel;
+  refsettle = FFTSZ;          // don't analyse until the window is clean
+  clearstats(hR, pR, hcR);
+);
+cx < 1 ? cx = min(1, cx + xinc);
+refsettle > 0 ? refsettle -= 1;
+
+// ---- reference playback: equal-power crossfade between the two voices, so
+// ---- switching ref A -> ref B never routes through the mix bus ----
+readref(cur);
+ga = sqrt(cx);
+rl = rdL*ga; rr = rdR*ga;
+(cx < 1 && prv != cur) ? (
+  readref(prv);
+  gb = sqrt(1 - cx);
+  rl += rdL*gb; rr += rdR*gb;
+);
+
+// ---- analysis voice: the reference keeps playing silently into the analyser
+// ---- even when the mix is what reaches the speakers ----
+anaL = 0; anaR = 0;
+anaref > 0 ? ( readref(anaref); anaL = rdL; anaR = rdR; );
+
+// ---- mix bus ramps on its own, independent of which slot is playing ----
+mgt = (cur > 0 && r_len[cur-1] > 0) ? 0 : 1;
+mg < mgt ? ( mg = min(mgt, mg + xinc); ) : ( mg = max(mgt, mg - xinc); );
+ai = 0;
+loop(6,
+  r_len[ai] > 0 ? (
+    r_pos[ai] += r_rate[ai];
+    r_pos[ai] >= r_len[ai] ? r_pos[ai] -= r_len[ai];
+  );
+  ai += 1;
+);
+
+// ---- pick the signal under test ----
+mL = anasrc ? spl2 : spl0;
+mR = anasrc ? spl3 : spl1;
+
+// ---- output ----
+spl0 = spl0*mg + rl;
+spl1 = spl1*mg + rr;
+
+// ---- feed analysis buffers ----
+cbML[wp] = mL; cbMR[wp] = mR;
+cbRL[wp] = anaL; cbRR[wp] = anaR;
+wp += 1; wp >= FFTSZ ? wp = 0;
+
+hopcnt += 1;
+hopcnt >= HOPSZ ? (
+  hopcnt = 0;
+  frz ? 0 : (
+    spec(cbML, cbMR, wp, tb, drt);
+    ingest(pM, hM, hcM, acoef);
+    anaref > 0 && refsettle <= 0 ? (
+      spec(cbRL, cbRR, wp, tb, drt);
+      ingest(pR, hR, hcR, acoef);
+    );
+  );
+);
+
+@gfx 760 480
+
+// Every name below is UI-thread private (gi/gj counters). Do not reuse an
+// audio-side name here - see the threading note at the top of the file.
+
+gfx_set(0.08,0.08,0.10,1); gfx_rect(0,0,gfx_w,gfx_h);
+
+px = 48; py = 30; pw = max(1, gfx_w - px - 16); ph = max(1, gfx_h - py - 54);
+cy = py + ph*0.5;
+
+// Switching the analysed reference invalidates the smoothed display, but the
+// audio thread must not write tvalid/dvalid while @gfx reads them - so @gfx
+// notices the change itself.
+anaref != g_lastana ? (
+  g_lastana = anaref;
+  memset(tvalid, 0, 64); memset(dvalid, 0, 16);
+  ofs = 0;
+);
+
+// ---------- grid ----------
+gfx_set(0.20,0.20,0.24,1);
+gi = 0;
+loop(28,
+  f = gi < 9 ? (20 + gi*10) :
+      gi < 18 ? (100 + (gi-9)*100) :
+      gi < 27 ? (1000 + (gi-18)*1000) : 20000;
+  f <= 20000 ? (
+    gx = px + pw * log10(f/20)/3;
+    gfx_line(gx, py, gx, py+ph);
+  );
+  gi += 1;
+);
+gi = 0;
+loop(9,
+  f = gi==0?20 : gi==1?50 : gi==2?100 : gi==3?200 : gi==4?500 :
+      gi==5?1000 : gi==6?2000 : gi==7?5000 : 10000;
+  gx = px + pw * log10(f/20)/3;
+  gfx_set(0.32,0.32,0.38,1);
+  gfx_line(gx, py, gx, py+ph);
+  gfx_set(0.55,0.55,0.60,1);
+  gfx_x = gx - 10; gfx_y = py + ph + 4;
+  f >= 1000 ? ( gfx_drawnumber(f/1000, 0); gfx_drawstr("k"); ) : gfx_drawnumber(f, 0);
+  gi += 1;
+);
+
+// dB gridlines
+step = tscale/3;
+gi = -3;
+loop(7,
+  gy = cy - gi*step/tscale * ph*0.5;
+  gi == 0 ? gfx_set(0.55,0.55,0.62,1) : gfx_set(0.20,0.20,0.24,1);
+  gfx_line(px, gy, px+pw, gy);
+  gfx_set(0.55,0.55,0.60,1);
+  gfx_x = 6; gfx_y = gy - 7;
+  gfx_drawnumber(gi*step, 0);
+  gi += 1;
+);
+
+// ---------- gain match offset ----------
+sumM = 0; sumR = 0; gj = 0;
+loop(NB, sumM += pM[gj]; sumR += pR[gj]; gj += 1);
+ofst = (gmatch && sumM > GATEBD && sumR > GATEBD) ? 10*log10(sumR/sumM) : 0;
+ofs += (ofst - ofs) * 0.12;
+pol = inv ? -1 : 1;
+
+// ---------- dynamics difference bars ----------
+gj = 0;
+loop(NDR,
+  dR = drval(hR, gj);
+  dM = drval(hM, gj);
+  (dR > -999 && dM > -999) ? (
+    v = (dR - dM) * pol;
+    dvalid[gj] ? ( dispD[gj] += (v - dispD[gj]) * 0.10; ) : ( dispD[gj] = v; dvalid[gj] = 1; );
+  );
+  dvalid[gj] ? (
+    v = dispD[gj];
+    x0 = px + pw * log10(max(20,dedge[gj])/20)/3;
+    x1 = px + pw * log10(min(20000,dedge[gj+1])/20)/3;
+    vv = max(-dscale, min(dscale, v));
+    yv = cy - vv/dscale * ph*0.5;
+    v > 0 ? gfx_set(0.30,0.62,0.95,0.30) : gfx_set(0.95,0.48,0.30,0.30);
+    gfx_rect(x0+1, min(cy,yv), max(2,x1-x0-2), abs(yv-cy));
+    v > 0 ? gfx_set(0.40,0.72,1.0,0.75) : gfx_set(1.0,0.58,0.40,0.75);
+    gfx_line(x0+1, yv, x1-1, yv);
+    gfx_set(0.7,0.7,0.75,0.8);
+    gfx_x = (x0+x1)*0.5 - 12; gfx_y = yv + (v > 0 ? -15 : 3);
+    gfx_drawnumber(v, 1);
+  );
+  gj += 1;
+);
+
+// ---------- tonal difference curve ----------
+gfx_set(0.55,0.95,0.62,1);
+have = 0; gj = 0;
+loop(NB,
+  (pM[gj] > GATEBD && pR[gj] > GATEBD) ? (
+    d = (10*log10(pR[gj]/pM[gj]) - ofs) * pol;
+    tvalid[gj] ? ( dispT[gj] += (d - dispT[gj]) * 0.12; ) : ( dispT[gj] = d; tvalid[gj] = 1; );
+  );
+  tvalid[gj] ? (
+    gfc = 20 * pow(2, gj/3);
+    gx = px + pw * log10(min(20000,max(20,gfc))/20)/3;
+    gy = cy - max(-tscale, min(tscale, dispT[gj]))/tscale * ph*0.5;
+    have == 0 ? ( gfx_x = gx; gfx_y = gy; have = 1; ) : gfx_lineto(gx, gy, 1);
+  );
+  gj += 1;
+);
+
+// ---------- header ----------
+gfx_set(0.85,0.85,0.90,1);
+gfx_x = 6; gfx_y = 6;
+gfx_drawstr("Ref ");
+anaref > 0 ? gfx_drawnumber(anaref,0) : gfx_drawstr("-");
+gfx_drawstr(sel > 0 ? " listening   " : " vs mix   ");
+anaref > 0 && r_len[anaref-1] > 0 ? (
+  gfx_drawnumber(r_len[anaref-1]/max(1,r_sr[anaref-1]), 1); gfx_drawstr("s loop");
+) : gfx_drawstr("(no reference loaded)");
+gfx_drawstr(gmatch ? "   matched " : "   raw ");
+gmatch ? ( gfx_drawnumber(-ofs,1); gfx_drawstr(" dB"); );
+frz ? ( gfx_set(1,0.7,0.2,1); gfx_drawstr("   FROZEN"); );
+
+// ---------- slot status: grey = empty, amber = loading, green = loaded ----------
+// This is the fastest way to see that the mixref folder / file pick worked;
+// without it an empty graph looks the same as a broken one.
+sx = gfx_w - 96 - 8 - 6*20;
+gj = 0;
+loop(6,
+  bxx = sx + gj*20;
+  r_len[gj] > 0 ? gfx_set(0.20,0.45,0.25,1) :
+    (l_h[gj] > 0 ? gfx_set(0.45,0.35,0.12,1) : gfx_set(0.18,0.18,0.22,1));
+  gfx_rect(bxx, 5, 17, 17);
+  anaref == gj+1 ? (
+    gfx_set(0.55,0.95,0.62,1);
+    gfx_rect(bxx, 5, 17, 1); gfx_rect(bxx, 21, 17, 1);
+    gfx_rect(bxx, 5, 1, 17); gfx_rect(bxx+16, 5, 1, 17);
+  );
+  sel == gj+1 ? gfx_set(1,1,1,1) : gfx_set(0.62,0.62,0.68,1);
+  gfx_x = bxx + 6; gfx_y = 8;
+  gfx_drawnumber(gj+1, 0);
+  gj += 1;
+);
+
+// reset button
+bx = gfx_w - 96; by = 4; bw = 88; bh = 19;
+gfx_set(0.22,0.22,0.27,1); gfx_rect(bx,by,bw,bh);
+gfx_set(0.75,0.75,0.80,1); gfx_x = bx+10; gfx_y = by+3;
+gfx_drawstr("reset stats");
+(mouse_cap & 1) && !lastclick && mouse_x >= bx && mouse_x <= bx+bw
+  && mouse_y >= by && mouse_y <= by+bh ? (
+  clearstats(hM, pM, hcM); clearstats(hR, pR, hcR);
+  memset(tvalid, 0, 64); memset(dvalid, 0, 16);
+  ofs = 0;
+);
+lastclick = mouse_cap & 1;
+
+// ---------- footer / legend ----------
+gfx_set(0.60,0.60,0.66,1);
+gfx_x = 6; gfx_y = gfx_h - 30;
+gfx_set(0.55,0.95,0.62,1); gfx_drawstr("line");
+gfx_set(0.60,0.60,0.66,1);
+gfx_drawstr(inv ? " = mix minus ref tonal   " : " = ref minus mix tonal (EQ move)   ");
+gfx_set(0.40,0.72,1.0,1); gfx_drawstr("bars");
+gfx_set(0.60,0.60,0.66,1); gfx_drawstr(" = dynamics diff +/- ");
+gfx_drawnumber(dscale,0); gfx_drawstr(" dB (up = ");
+gfx_drawstr(inv ? "mix" : "ref"); gfx_drawstr(" more dynamic)");
+
+gfx_set(0.35,0.35,0.40,1);
+gfx_x = gfx_w - 34; gfx_y = gfx_h - 30;
+gfx_drawstr("v1.1");   // bump on every change: REAPER caches
+                       // compiled JSFX per open FX instance
+
+// loop progress
+anaref > 0 && r_len[anaref-1] > 0 ? (
+  gfx_set(0.30,0.30,0.36,1); gfx_rect(6, gfx_h-13, gfx_w-12, 3);
+  sel > 0 ? gfx_set(0.55,0.95,0.62,1) : gfx_set(0.40,0.55,0.45,1);
+  gfx_rect(6, gfx_h-13, (gfx_w-12) * r_pos[anaref-1]/r_len[anaref-1], 3);
+);
+
+// ---------- cursor readout ----------
+mouse_x > px && mouse_x < px+pw && mouse_y > py && mouse_y < py+ph ? (
+  gfx_set(0.45,0.45,0.52,1);
+  gfx_line(mouse_x, py, mouse_x, py+ph);
+  cf = 20 * pow(10, (mouse_x-px)/pw*3);
+  cd = (cy - mouse_y)/(ph*0.5) * tscale;
+  gfx_set(0.85,0.85,0.90,1);
+  gfx_x = min(mouse_x+6, gfx_w-90); gfx_y = py + ph - 18;
+  gfx_drawnumber(cf, 0); gfx_drawstr(" Hz  ");
+  gfx_drawnumber(cd, 1); gfx_drawstr(" dB");
+);
+
+@serialize
+
+// Deliberately non-empty: this is what stops REAPER clearing all RAM before
+// every @init (which also fires on transport start), which would drop the
+// loaded reference audio. Has no other purpose.
+serdummy = 0;

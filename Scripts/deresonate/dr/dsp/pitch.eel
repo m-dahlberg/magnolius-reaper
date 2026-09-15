@@ -1,0 +1,293 @@
+// @noindex
+// Note Leveling -- pitch and level kernel.
+//
+// Two independent reductions of a take onto the same frame grid:
+//
+//   task 1  per-frame sum of squares, at the source rate     -> level
+//           twice over: broadband, and through a fixed vocal band
+//   task 2  per-frame YIN fundamental and aperiodicity,      -> pitch
+//           on audio the accessor has already resampled to _RATE
+//
+// They are separate passes because they want different sample rates. YIN costs
+// O(win * taumax) per frame and both grow with the rate, so running it at 48 k
+// is roughly realtime -- minutes on a vocal take. At 8 kHz the same frame is
+// ~40x cheaper and still resolves a 600 Hz f0 to about +-10 cents, far finer
+// than the 50 cents semitone bucketing needs. The level pass must NOT be
+// decimated: a leveling tool that ignored everything above 4 kHz would
+// misjudge bright and breathy voices. So each pass reads at the rate it needs
+// and Lua lines the two up on a grid defined in time rather than in samples.
+//
+// Block boundaries are handled in Lua, not with carry-over state here: for the
+// pitch pass Lua reads `nframes * hop + win + taumax` samples starting at the
+// block's first frame and asks for exactly `nframes` frames back. The reads
+// overlap by a few hundred samples, which costs nothing and removes an entire
+// class of ring-buffer bugs. The level pass needs no lookahead at all, but it
+// does carry its DC blocker across blocks, so set _RESET on the first one.
+//
+// The pitch pass deliberately has no DC blocker. YIN's difference function is
+// built from x[j] - x[j+tau], and a constant offset cancels there exactly, so
+// DC cannot reach either output.
+//
+// The level pass emits TWO reductions of the same samples. The broadband one
+// is what the per-note leveling uses. The band-passed one is what the rider
+// uses, on both the vocal and the reference: broadband RMS of a backing track
+// is dominated by kick and bass, which a vocal does not compete with, so a
+// guitar entering a chorus can mask the voice completely while barely moving
+// the broadband number. Measuring both sides through the band the voice
+// actually occupies is what makes the ride track masking rather than energy.
+// The two biquads are cascaded off the RAW mono sum, not off the DC blocker's
+// output -- a 300 Hz high-pass removes DC far more thoroughly than the
+// blocker does, so running both would only add a pole for nothing.
+//
+// Frames sit on a grid defined in TIME: frame f begins at exactly f * hop_ms.
+// _HOPF is that hop in samples and is fractional -- 5 ms at 44100 is 220.5 --
+// so every frame rounds its own start rather than accumulating an integer hop,
+// which would drift half a sample per frame and slide a three minute take by
+// nearly half a second. _FOFF and _SOFF carry the block's origin so the
+// rounding is done on absolute frame numbers and cannot restart per block.
+//
+// Runs under ReaImGui's CreateFunctionFromEEL: standard EEL2 plus
+// memcpy/memset. Globals persist between Execute calls.
+//
+// Tasks (set _TASK, then Execute):
+//   0  setup    derive tau range and window from _RATE/_MINHZ/_MAXHZ, allocate
+//   1  level    consume a block at the source rate -> _OUT_SUMSQ, _OUT_BPSQ,
+//                                                      _OUT_N
+//   2  pitch    consume a block at _RATE           -> _OUT_F0,   _OUT_APER
+//
+// Lua sets these before Execute:
+//   _IN                  interleaved input buffer (address)
+//   _OUT_SUMSQ _OUT_N _OUT_F0 _OUT_APER   output arrays (addresses)
+//   _HEAP                first heap slot the kernel may use
+//   _NCHAN _NSAMP _NFRAMES
+//   _HOPF _FOFF _SOFF     fractional samples per frame, this block's first
+//                         frame index, and that frame's sample position
+//   _RATE _MINHZ _MAXHZ  pitch-pass rate and search range (setup only)
+//   _MAXSAMP             largest _NSAMP the kernel will ever be handed
+//   _YINTHRESH           CMNDF aperiodicity counted as voiced
+//   _RDC                 one-pole DC blocker pole, exp(-2*pi*20/source_rate)
+//   _HP_B0.._HP_A2       vocal-band high-pass biquad, at the SOURCE rate
+//   _LP_B0.._LP_A2       vocal-band low-pass biquad, at the source rate
+//   _RESET               1 on the first block of a level pass
+//
+// Lua reads these back with Function_GetValue:
+//   taumin taumax win need memtop heap_ok
+
+// ---------------------------------------------------------------- allocation
+// Bump allocator over the heap above the Lua-owned I/O region.
+
+function halloc(n) (
+  _ha = memptr;
+  memptr += n;
+  memset(_ha, 0, n);
+  _ha;
+);
+
+function ksetup() local(top) (
+  rate = _RATE;
+  nch  = max(_NCHAN, 1);
+
+  // tau is a period in samples, so the high frequency gives the small tau.
+  taumin = floor(rate / max(_MAXHZ, 1));
+  taumin < 2 ? taumin = 2;
+  taumax = ceil(rate / max(_MINHZ, 1));
+  taumax < taumin + 2 ? taumax = taumin + 2;
+
+  // Two periods of the lowest frequency we are willing to find. Shorter and
+  // the difference function has nothing to compare a low note against.
+  win  = 2 * taumax;
+  need = win + taumax;
+
+  memptr = _HEAP;
+  mono = halloc(_MAXSAMP + 2);
+  dbuf = halloc(taumax + 2);
+  cmnd = halloc(taumax + 2);
+  memtop = memptr;
+
+  // EEL does not fail loudly when it runs out of heap: every access past the
+  // limit is redirected to one shared scratch slot. Probing the two ends of a
+  // buffer does not catch that -- both the write and the read of the far end
+  // land in the scratch slot and agree with each other. Two *adjacent* slots
+  // at the very top do catch it: if that end is unallocated both writes hit
+  // the one slot, so the first reads back the second's value.
+  mono[0] = 1;
+  top = memtop - 2;
+  top[0] = 2;
+  top[1] = 3;
+  heap_ok = mono[0] == 1 && top[0] == 2 && top[1] == 3;
+  mono[0] = 0;
+  top[0] = 0;
+  top[1] = 0;
+
+  dc_x1 = 0;
+  dc_y1 = 0;
+  hp_z1 = 0; hp_z2 = 0;
+  lp_z1 = 0; lp_z2 = 0;
+  memptr;
+);
+
+// --------------------------------------------------------------------- level
+// Sum of squares per frame, at the source rate. DC is removed ahead of the
+// accumulator: a leveling decision made on a signal with an offset measures
+// the offset as well as the note.
+
+// Both biquads are transposed direct form II, which keeps its state in the
+// same units as the signal and so degrades gracefully on a long take.
+function klevel() local(f, i, n, s0, base, c, x, acc, bacc, inv, dcy, hy, by) (
+  _RESET ? (
+    dc_x1 = 0; dc_y1 = 0;
+    hp_z1 = 0; hp_z2 = 0;
+    lp_z1 = 0; lp_z2 = 0;
+  );
+  inv = 1 / nch;
+  f = 0;
+  while (f < _NFRAMES) (
+    s0 = floor((_FOFF + f) * _HOPF + 0.5) - _SOFF;
+    n  = floor((_FOFF + f + 1) * _HOPF + 0.5) - _SOFF - s0;
+    n > _NSAMP - s0 ? n = _NSAMP - s0;
+    n < 0 ? n = 0;
+    acc = 0;
+    bacc = 0;
+    i = 0;
+    while (i < n) (
+      base = (s0 + i) * nch;
+      x = 0;
+      c = 0;
+      while (c < nch) (
+        x += _IN[base + c];
+        c += 1;
+      );
+      x *= inv;
+
+      dcy = x - dc_x1 + _RDC * dc_y1;
+      dc_x1 = x;
+      dc_y1 = dcy;
+      acc += dcy * dcy;
+
+      hy = _HP_B0 * x + hp_z1;
+      hp_z1 = _HP_B1 * x - _HP_A1 * hy + hp_z2;
+      hp_z2 = _HP_B2 * x - _HP_A2 * hy;
+
+      by = _LP_B0 * hy + lp_z1;
+      lp_z1 = _LP_B1 * hy - _LP_A1 * by + lp_z2;
+      lp_z2 = _LP_B2 * hy - _LP_A2 * by;
+
+      bacc += by * by;
+      i += 1;
+    );
+    _OUT_SUMSQ[f] = acc;
+    _OUT_BPSQ[f] = bacc;
+    _OUT_N[f] = n;
+    f += 1;
+  );
+);
+
+// --------------------------------------------------------------------- pitch
+// Mono-sum the block once, so the difference function reads one flat array
+// rather than re-summing channels inside its inner loop.
+
+function mono_fill() local(i, c, base, x, inv) (
+  inv = 1 / nch;
+  i = 0;
+  while (i < _NSAMP) (
+    base = i * nch;
+    x = 0;
+    c = 0;
+    while (c < nch) (
+      x += _IN[base + c];
+      c += 1;
+    );
+    mono[i] = x * inv;
+    i += 1;
+  );
+);
+
+// YIN for one frame whose support starts at mono[base].
+// Leaves the answer in yin_tau (samples, interpolated) and yin_aper (0..1).
+function yin_frame(base)
+         local(tau, j, s, dv, running, best, bestv, x0, x1, x2, denom, shift) (
+  // Step 1: the difference function. d(0) is zero by definition and is never
+  // read, so the loop starts at 1.
+  tau = 1;
+  while (tau <= taumax) (
+    dv = 0;
+    j = 0;
+    while (j < win) (
+      s = mono[base + j] - mono[base + j + tau];
+      dv += s * s;
+      j += 1;
+    );
+    dbuf[tau] = dv;
+    tau += 1;
+  );
+
+  // Step 2: cumulative mean normalised difference. This is what removes YIN's
+  // dependence on absolute level and stops tau=0 from always winning.
+  running = 0;
+  tau = 1;
+  while (tau <= taumax) (
+    running += dbuf[tau];
+    cmnd[tau] = running > 0 ? dbuf[tau] * tau / running : 1;
+    tau += 1;
+  );
+
+  // Step 3: absolute threshold. Take the FIRST dip under the threshold rather
+  // than the global minimum -- that is the octave-error guard, since a true
+  // period's multiples dip just as deep.
+  best = -1;
+  tau = taumin;
+  while (tau <= taumax && best < 0) (
+    cmnd[tau] < _YINTHRESH ? (
+      while (tau < taumax && cmnd[tau + 1] < cmnd[tau]) ( tau += 1; );
+      best = tau;
+    ) : (
+      tau += 1;
+    );
+  );
+
+  // Nothing crossed the threshold: report the global minimum anyway, and let
+  // its aperiodicity tell Lua the frame is unvoiced.
+  best < 0 ? (
+    best = taumin;
+    bestv = cmnd[taumin];
+    tau = taumin + 1;
+    while (tau <= taumax) (
+      cmnd[tau] < bestv ? ( bestv = cmnd[tau]; best = tau; );
+      tau += 1;
+    );
+  );
+
+  // Step 4: parabolic interpolation through the three cmnd values around the
+  // minimum. Without it tau is an integer and a 600 Hz f0 at 8 kHz quantises
+  // to ~130 cent steps, which is coarser than the semitone grid it feeds.
+  shift = 0;
+  best > taumin && best < taumax ? (
+    x0 = cmnd[best - 1];
+    x1 = cmnd[best];
+    x2 = cmnd[best + 1];
+    denom = 2 * (x0 + x2 - 2 * x1);
+    denom != 0 ? shift = (x0 - x2) / denom;
+    abs(shift) > 1 ? shift = 0;
+  );
+
+  yin_tau  = best + shift;
+  yin_aper = cmnd[best];
+);
+
+function kpitch() local(f, base) (
+  mono_fill();
+  f = 0;
+  while (f < _NFRAMES) (
+    base = floor((_FOFF + f) * _HOPF + 0.5) - _SOFF;
+    yin_frame(base);
+    _OUT_F0[f]   = yin_tau > 0 ? rate / yin_tau : 0;
+    _OUT_APER[f] = yin_aper;
+    f += 1;
+  );
+);
+
+// ---------------------------------------------------------------- dispatcher
+
+_TASK == 0 ? ksetup() :
+_TASK == 1 ? klevel() :
+_TASK == 2 ? kpitch() : 0;

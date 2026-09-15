@@ -1,0 +1,375 @@
+desc:Upward Compressor (low-level lift)
+// @description Upward Compressor
+// @author Magnolius
+// @version 1.0
+// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @about
+//   A low-level lift: it raises what is below the threshold and leaves what is
+//   above it alone - the mirror image of an ordinary compressor.
+//
+//   The loud parts keep their level and their transients, and only the
+//   low-level detail moves: breaths, room, the tail of a reverb, the quiet
+//   half of a performance.
+//
+//   Zero latency, no lookahead, no PDC. Mix at 0% is an exact bypass.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   Initial ReaPack release
+
+// tags - dynamics upward compression vocal
+// An upward compressor: it raises what is BELOW the threshold and leaves
+// what is above it alone.  A downward compressor turns peaks down; this
+// turns the quiet parts up, so the loud parts keep their level and their
+// transients and only the low-level detail moves.
+//
+// The static curve is the mirror image of an ordinary soft-knee compressor.
+// Where a downward compressor asks "how far ABOVE the threshold am I", this
+// asks "how far BELOW", and the answer is multiplied by (1 - 1/ratio) to get
+// the lift in dB.  A quadratic knee straddles the threshold so the curve is
+// continuous in value and slope.
+//
+// Two clamps keep it usable on real material.  Range caps the lift, so a
+// silent bar cannot arrive at +40 dB.  The Noise Floor control fades the
+// lift out below a level of your choosing, so hiss, room tone and pauses
+// stay where they are instead of being pumped up into the mix.
+//
+// Zero latency, no lookahead, no PDC.
+//
+// ATTACK AND RELEASE ARE MIRRORED TOO, and this trips people up: Attack is
+// how fast the lift comes IN as the signal gets QUIETER, Release is how fast
+// it backs off as the signal gets louder again.  Fast attack on this plugin
+// means quiet detail jumps up quickly, which is the setting that sounds
+// pumpy - the opposite intuition from a downward compressor.
+//
+// THREADING - do not undo this.  Every @gfx variable is g_-prefixed and no
+// name is used on both sides.  @gfx never calls a function defined in @init:
+// EEL2 function locals AND parameters are static and shared between threads,
+// so drawing the transfer curve through lift_db() would stomp the audio
+// thread's copy of x/hk/g mid-sample.  The curve maths is inlined in @gfx
+// instead.  It looks like duplication; it is not.
+//
+// v0.2
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+slider1:thresh_db=-30<-80,0,0.1>Threshold (dB)
+slider2:ratio=2.0<1,20,0.01>Ratio (1:N)
+slider3:range_db=12<0,40,0.1>Range / Max Lift (dB)
+slider4:knee_db=6<0,24,0.1>Knee (dB)
+slider5:atk_ms=20<0.5,300,0.1>Attack - lift in (ms)
+slider6:rel_ms=200<5,2000,1>Release - lift out (ms)
+slider7:gate_db=-70<-100,-20,0.5>Noise Floor (dB)
+slider8:sc_hz=20<20,500,1>Sidechain HPF (Hz)
+slider9:det_mode=1<0,1,1{Peak,RMS}>Detector
+slider10:link_pct=100<0,100,1>Stereo Link (%)
+slider11:makeup_db=0<-24,24,0.1>Makeup (dB)
+slider12:mix_pct=100<0,100,1>Mix (%)
+slider13:hist_s=6<1,30,0.5>Display History (s)
+
+@init
+
+// @init re-runs on samplerate change and on recompile.  ext_noinit stops the
+// other trigger - transport start - so held detector state and the display
+// history survive hitting play.  There is nothing expensive or irreplaceable
+// built here, so no initdone guard and no @serialize is needed: on a real
+// samplerate change every coefficient below genuinely has to be rebuilt and
+// the detectors genuinely should reset.
+ext_noinit = 1;
+
+// No ext_tail_size.  Silence in gives silence out at every setting (the
+// output is always a gain applied to the input), so there is no tail to
+// render and no reason to keep the FX alive after the item ends.
+
+LOG2DB = 8.6858896380650366;
+DB2LOG = 0.11512925464970229;
+TINY   = 10^(-30);          // EEL2 has no scientific notation: 1e-30 is a
+                            // silent syntax error that kills the section
+DENORM = 10^(-20);          // sign-flipped each sample, so no DC survives
+GATE_WIDTH = 6;             // dB over which the noise floor fades the lift in
+FLOORDB    = -78;           // bottom of the waveform display scale
+CURVE_LO   = -80;           // transfer-curve inset, dB in
+CURVE_HI   = 10;            // transfer-curve inset, dB out headroom
+
+gdb0 = gdb1 = 0;
+det0 = det1 = 0;
+rms0 = rms1 = 0;
+hp0  = hp1  = 0;
+adn  = DENORM;
+meter = 0;
+
+// ---- scrolling history ---------------------------------------------------
+// Power of two so the ring index is a mask, not a modulo (EEL2's % on a
+// negative operand is not guaranteed, and hpos must never wrap wrong).
+HIST_N    = 1024;
+HMASK     = HIST_N - 1;
+HIST_IN   = 0;
+HIST_OUT  = HIST_N;
+HIST_LIFT = HIST_N*2;
+memset(HIST_IN, FLOORDB - 200, HIST_N*2);   // IN and OUT are contiguous
+memset(HIST_LIFT, 0, HIST_N);
+hpos = 0;
+acc_in = acc_out = acc_lift = acc_n = 0;
+
+function db2lin(d) ( exp(d*DB2LOG) );
+function lin2db(l) ( log(max(l,TINY))*LOG2DB );
+
+// Static curve: dB of lift for a given detector level.  x is how far BELOW
+// the threshold we are, so the knee and the slope are the mirror image of an
+// ordinary compressor's.  Audio thread only - see the threading note above.
+function lift_db(ldb) local(x, hk, g) (
+  x  = thresh_db - ldb;
+  hk = knee_half;
+  x <= -hk ? ( g = 0; ) :
+  x <   hk ? ( g = slope * sqr(x + hk) / (4*hk); ) :
+             ( g = slope * x; );
+  // taper the lift away under the noise floor so hiss and silence stay put
+  g * min(max((ldb - gate_db)/GATE_WIDTH, 0), 1);
+);
+
+// Everything samplerate-dependent lives here so @init and @slider cannot
+// disagree.  @init runs before the first @slider on a samplerate change, and
+// @slider also fires spuriously (transport, undo, automation touch); this is
+// idempotent, so it is safe from both.
+function recalc() (
+  slope     = 1 - 1/max(ratio,1);
+  knee_half = max(knee_db,0.01)*0.5;
+  atk_coef  = exp(-1/(max(atk_ms,0.01)*0.001*srate));
+  rel_coef  = exp(-1/(max(rel_ms,0.01)*0.001*srate));
+  det_rel   = exp(-1/(0.020*srate));   // peak rectifier release
+  rms_coef  = exp(-1/(0.030*srate));   // rms window
+  meter_coef= exp(-1/(0.150*srate));   // display ballistic
+  // clamp the sidechain corner under Nyquist: at 8 kHz srate a 500 Hz
+  // request is fine, but the clamp is free and the rule is absolute
+  hp_a      = 1 - exp(-2*$pi*min(sc_hz, srate*0.45)/srate);
+  link      = link_pct*0.01;
+  makeup    = db2lin(makeup_db);
+  wet       = mix_pct*0.01;
+  dry       = 1 - wet;
+  col_len   = max(1, floor(srate*hist_s/HIST_N));
+);
+
+recalc();
+
+@slider
+
+recalc();
+
+@sample
+
+in0 = spl0; in1 = spl1;
+
+// Anti-denormal: the three smoothers below all decay exponentially towards
+// zero, so a track that goes silent walks them into denormal range and the
+// CPU cost jumps.  Flipping the sign each sample means the injected offset
+// cancels over any two samples instead of leaving DC in the sidechain.
+adn = -adn;
+
+// ---- sidechain high pass (detector path only) ----
+hp0 += hp_a*(in0 + adn - hp0); sc0 = in0 - hp0;
+hp1 += hp_a*(in1 + adn - hp1); sc1 = in1 - hp1;
+
+// ---- level detection ----
+det_mode < 0.5 ? (
+  a0 = abs(sc0); a1 = abs(sc1);
+  det0 = ( a0 > det0 ? a0 : a0 + (det0-a0)*det_rel );
+  det1 = ( a1 > det1 ? a1 : a1 + (det1-a1)*det_rel );
+) : (
+  s0 = sc0*sc0; s1 = sc1*sc1;
+  rms0 = s0 + (rms0-s0)*rms_coef;
+  rms1 = s1 + (rms1-s1)*rms_coef;
+  det0 = sqrt(max(rms0,0)); det1 = sqrt(max(rms1,0));
+);
+
+// ---- stereo link (pull both channels toward the louder one) ----
+dmax = max(det0,det1);
+d0 = det0 + link*(dmax-det0);
+d1 = det1 + link*(dmax-det1);
+
+// ---- static curve, clamped by Range ----
+t0 = min(lift_db(lin2db(d0)), range_db);
+t1 = min(lift_db(lin2db(d1)), range_db);
+
+// ---- ballistics ----
+// Mirrored, as above: the target rising means the signal got quieter and the
+// lift is coming IN, which is the attack side.
+c = ( t0 > gdb0 ? atk_coef : rel_coef );
+gdb0 = t0 + (gdb0-t0)*c;
+c = ( t1 > gdb1 ? atk_coef : rel_coef );
+gdb1 = t1 + (gdb1-t1)*c;
+
+// ---- apply ----
+// Makeup belongs to the WET path only, so Mix 0% is an exact bypass no
+// matter what Makeup and Range are set to.  (Earlier builds multiplied the
+// blended signal, which made Mix 0% a gain stage.)
+spl0 = dry*in0 + wet*in0*db2lin(gdb0)*makeup;
+spl1 = dry*in1 + wet*in1*db2lin(gdb1)*makeup;
+
+m = max(gdb0,gdb1);
+meter = ( m > meter ? m : m + (meter-m)*meter_coef );
+
+// ---- feed the scrolling display ----
+pkin  = max(abs(in0),  abs(in1));
+pkout = max(abs(spl0), abs(spl1));
+acc_in   = max(acc_in,  pkin);
+acc_out  = max(acc_out, pkout);
+acc_lift = max(acc_lift, m);
+acc_n += 1;
+acc_n >= col_len ? (
+  HIST_IN[hpos]   = lin2db(acc_in);
+  HIST_OUT[hpos]  = lin2db(acc_out);
+  HIST_LIFT[hpos] = acc_lift;
+  hpos = (hpos + 1) & HMASK;
+  acc_in = acc_out = acc_lift = 0;
+  acc_n = 0;
+);
+
+@gfx 760 340
+
+// Reminder: every local here is g_-prefixed and nothing calls into @init's
+// functions.  See the threading note at the top of the file.
+
+gfx_set(0.07,0.07,0.08,1); gfx_rect(0,0,gfx_w,gfx_h);
+
+g_pad    = 10;
+g_info_h = 20;
+g_curve_w = ( gfx_w >= 640 ? 150 : 0 );
+g_sx = g_pad;
+g_sy = g_pad + g_info_h;
+g_sw = gfx_w - g_pad*2 - ( g_curve_w > 0 ? g_curve_w + g_pad : 0 );
+g_lift_h = 44;
+g_sh = max(60, gfx_h - g_sy - g_pad - g_lift_h - 20);
+g_cy = g_sy + g_sh*0.5;
+g_yscale = g_sh*0.5/(-FLOORDB);
+g_ly = g_sy + g_sh + 6;
+
+gfx_set(0.11,0.11,0.13,1);
+gfx_rect(g_sx,g_sy,g_sw,g_sh);
+gfx_rect(g_sx,g_ly,g_sw,g_lift_h);
+
+// ================= scrolling waveform + lift strip =================
+// One pass, and each drawn column takes the MAX over every history slot it
+// covers.  1024 slots into ~580 pixels means point-sampling would silently
+// drop every other transient, which made the display disagree with the ear.
+g_sw > 0 ? (
+  g_i = 0;
+  loop(g_sw,
+    g_a = floor(g_i*HIST_N/g_sw);
+    g_b = floor((g_i+1)*HIST_N/g_sw);
+    g_b <= g_a ? ( g_b = g_a + 1; );
+
+    g_din = FLOORDB - 200; g_dout = FLOORDB - 200; g_dlift = 0;
+    g_k = g_a;
+    while (g_k < g_b) (
+      g_p = (hpos + g_k) & HMASK;
+      g_din   = max(g_din,  HIST_IN[g_p]);
+      g_dout  = max(g_dout, HIST_OUT[g_p]);
+      g_dlift = max(g_dlift, HIST_LIFT[g_p]);
+      g_k += 1;
+    );
+
+    g_hin  = min(g_sh*0.5, max(0, (g_din  - FLOORDB)*g_yscale));
+    g_hout = min(g_sh*0.5, max(0, (g_dout - FLOORDB)*g_yscale));
+    g_x = g_sx + g_i;
+    // draw the shorter trace last so it stays visible inside the taller one
+    g_hout >= g_hin ? (
+      g_hout > 0 ? ( gfx_set(0.24,0.72,0.46,1); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+      g_hin  > 0 ? ( gfx_set(0.38,0.70,1.00,1); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+    ) : (
+      g_hin  > 0 ? ( gfx_set(0.38,0.70,1.00,1); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+      g_hout > 0 ? ( gfx_set(0.24,0.72,0.46,1); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+    );
+
+    g_hh = ( range_db > 0 ? min(g_dlift/range_db,1)*g_lift_h : 0 );
+    g_hh > 0 ? (
+      gfx_set(0.35,0.85,0.55,0.9);
+      gfx_line(g_x, g_ly+g_lift_h-g_hh, g_x, g_ly+g_lift_h);
+    );
+
+    g_i += 1;
+  );
+);
+
+// centre line
+gfx_set(0.30,0.30,0.34,1); gfx_line(g_sx, g_cy, g_sx+g_sw, g_cy);
+
+// noise floor (dotted)
+g_hg = min(g_sh*0.5, max(0,(gate_db - FLOORDB)*g_yscale));
+gfx_set(0.55,0.55,0.60,0.8);
+g_i = 0; loop(floor(g_sw/8),
+  gfx_line(g_sx+g_i*8, g_cy-g_hg, g_sx+g_i*8+3, g_cy-g_hg);
+  gfx_line(g_sx+g_i*8, g_cy+g_hg, g_sx+g_i*8+3, g_cy+g_hg);
+  g_i += 1;
+);
+
+// threshold
+g_ht = min(g_sh*0.5, max(0,(thresh_db - FLOORDB)*g_yscale));
+gfx_set(0.95,0.62,0.22,0.95);
+gfx_line(g_sx, g_cy-g_ht, g_sx+g_sw, g_cy-g_ht);
+gfx_line(g_sx, g_cy+g_ht, g_sx+g_sw, g_cy+g_ht);
+gfx_set(0.95,0.62,0.22,0.7);
+gfx_x = g_sx+4; gfx_y = g_cy-g_ht-14; gfx_printf("THR %.1f", thresh_db);
+
+gfx_set(0.30,0.30,0.34,1);
+gfx_rect(g_sx,g_sy,g_sw,1); gfx_rect(g_sx,g_sy+g_sh-1,g_sw,1);
+gfx_rect(g_sx,g_sy,1,g_sh); gfx_rect(g_sx+g_sw-1,g_sy,1,g_sh);
+gfx_rect(g_sx,g_ly,g_sw,1); gfx_rect(g_sx,g_ly+g_lift_h-1,g_sw,1);
+gfx_rect(g_sx,g_ly,1,g_lift_h); gfx_rect(g_sx+g_sw-1,g_ly,1,g_lift_h);
+gfx_set(0.55,0.85,0.65,0.9);
+gfx_x = g_sx+4; gfx_y = g_ly+3; gfx_printf("LIFT  0..%.0f dB", range_db);
+
+// ================= transfer curve inset =================
+// The lift maths below is deliberately a copy of lift_db(): @gfx must not
+// call it.  Keep the two in step.
+g_curve_w > 0 ? (
+  g_cx = gfx_w - g_pad - g_curve_w;
+  g_ch = min(g_curve_w, g_sh);
+  g_span = CURVE_HI - CURVE_LO;                 // dB spanned vertically
+  gfx_set(0.11,0.11,0.13,1); gfx_rect(g_cx,g_sy,g_curve_w,g_ch);
+  gfx_set(0.20,0.20,0.23,1);
+  g_i = 0; loop(5,
+    gfx_line(g_cx, g_sy+g_ch*g_i*0.25, g_cx+g_curve_w, g_sy+g_ch*g_i*0.25);
+    gfx_line(g_cx+g_curve_w*g_i*0.25, g_sy, g_cx+g_curve_w*g_i*0.25, g_sy+g_ch);
+    g_i += 1;
+  );
+  // unity reference
+  gfx_set(0.40,0.40,0.44,1);
+  gfx_line(g_cx, g_sy+g_ch, g_cx+g_curve_w, g_sy+g_ch - (-CURVE_LO)*g_ch/g_span);
+  g_tx = g_cx + (thresh_db-CURVE_LO)*g_curve_w/(-CURVE_LO);
+  gfx_set(0.95,0.62,0.22,0.8); gfx_line(g_tx, g_sy, g_tx, g_sy+g_ch);
+
+  gfx_set(0.38,0.78,1.0,1);
+  g_i = 0;
+  loop(161,
+    g_ld = CURVE_LO + g_i*0.5;
+
+    g_xx0 = thresh_db - g_ld;
+    g_hk  = knee_half;
+    g_xx0 <= -g_hk ? ( g_gg = 0; ) :
+    g_xx0 <   g_hk ? ( g_gg = slope * sqr(g_xx0 + g_hk) / (4*g_hk); ) :
+                     ( g_gg = slope * g_xx0; );
+    g_gg *= min(max((g_ld - gate_db)/GATE_WIDTH, 0), 1);
+    g_gg = min(g_gg, range_db);
+
+    // plot what actually leaves the plugin: Mix and Makeup included
+    g_ov = g_ld + log(max(dry + wet*exp(g_gg*DB2LOG)*makeup, TINY))*LOG2DB;
+
+    g_xx = g_cx + (g_ld-CURVE_LO)*g_curve_w/(-CURVE_LO);
+    g_yy = max(g_sy, min(g_sy+g_ch, g_sy + g_ch - (g_ov-CURVE_LO)*g_ch/g_span));
+    g_i == 0 ? ( gfx_x = g_xx; gfx_y = g_yy; ) : gfx_lineto(g_xx,g_yy,1);
+    g_i += 1;
+  );
+  gfx_set(0.55,0.55,0.60,1);
+  gfx_x = g_cx+4; gfx_y = g_sy+g_ch-14; gfx_printf("%.0f..0 in", CURVE_LO);
+);
+
+// ================= readout =================
+// The version number is here so a stale compiled instance is visible at a
+// glance - REAPER caches compiled JSFX per FX instance.
+gfx_set(0.88,0.88,0.92,1);
+gfx_x = g_pad; gfx_y = g_pad;
+gfx_printf("v0.2   Lift %.1f dB    Thr %.1f    1:%.2f    Range %.0f    Floor %.0f    %.0f dB scale    %.1f s",
+           meter, thresh_db, ratio, range_db, gate_db, FLOORDB, hist_s);
