@@ -2,7 +2,7 @@ desc:Adaptive Compressor (adaptive threshold, stereo)
 // @description Adaptive Compressor
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Stereo compressor whose threshold follows the loudness of the incoming
 //   audio, so one setting gives the same amount of compression whether the

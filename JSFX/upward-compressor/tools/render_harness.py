@@ -41,10 +41,16 @@ class ReaperProject:
     RENDER_FMT's THIRD field is the render sample rate. Omit it and REAPER
     renders at whatever rate it used last, silently resampling the output --
     the classic "everything is subtly wrong by a fraction of a dB" failure.
+
+    SAMPLERATE's SECOND field is the "project sample rate" checkbox. Leave it
+    0 and the engine runs at the device/default rate (48k) no matter what the
+    first field says -- media at any other rate gets resampled twice, which
+    shows up as sinc ringing at item edges (measured on a 96k render before
+    this was set to 1).
     """
 
     TEMPLATE = """<REAPER_PROJECT 0.1 "7.0/linux-x86_64" 1721000000
-  SAMPLERATE %(srate)d 0 0
+  SAMPLERATE %(srate)d 1 0
   TEMPO 120 4 4
   RENDER_FILE "%(out_wav)s"
   RENDER_PATTERN ""
@@ -185,6 +191,11 @@ class Harness:
         srate = srate or self.srate
         out_wav = self.path(name + ".wav")
         rpp = self.path(name + ".rpp")
+        if input_name and self.path(input_name) == out_wav:
+            # the output is deleted before rendering -- a name collision
+            # silently eats the input and renders silence
+            raise ValueError("render name %r collides with its input file"
+                             % name)
         if os.path.exists(out_wav):
             os.remove(out_wav)      # an existing output can pop a dialog and hang
         self.proj.write(rpp, fx or self.fx, sliders, out_wav,

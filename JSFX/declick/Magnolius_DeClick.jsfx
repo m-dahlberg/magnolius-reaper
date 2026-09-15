@@ -2,7 +2,7 @@ desc:DeClick (multiband click repair)
 // @description DeClick
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Real-time click and mouth-noise repair. A port of Paul Licameli's
 //   Audacity/Nyquist De-Clicker.

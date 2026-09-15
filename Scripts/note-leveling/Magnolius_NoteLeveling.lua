@@ -1,7 +1,7 @@
 -- @description Note Leveling
 -- @author Magnolius
 -- @version 1.0
--- @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+-- @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 -- @provides
 --   [nomain] nl/*.lua
 --   [nomain] nl/dsp/*.eel

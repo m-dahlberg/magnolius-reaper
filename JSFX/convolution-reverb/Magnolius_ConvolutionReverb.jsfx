@@ -2,7 +2,7 @@ desc:Convolution Reverb (true-stereo, partitioned FFT)
 // @description Convolution Reverb
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   SETUP FIRST: create the folder REAPER/Data/ReverbIRs and put your impulse
 //   responses in it (on Linux that is usually

@@ -2,7 +2,7 @@ desc:Variable Ratio Compressor (adaptive-ratio ceiling)
 // @description Variable Ratio Compressor
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   A compressor that solves for the ratio each passage needs instead of being
 //   told one. Lookahead finds the loudest upcoming peak, derives the exact

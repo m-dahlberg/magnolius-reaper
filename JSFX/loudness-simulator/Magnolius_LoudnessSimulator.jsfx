@@ -2,7 +2,7 @@ desc:Loudness Simulator (contour EQ + upward compression + bs2b crossfeed)
 // @description Loudness Simulator
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Makes quiet monitoring sound like loud monitoring. One Simulated Loudness
 //   control drives an equal-loudness contour EQ, a two-band upward compressor

@@ -11,7 +11,7 @@ Add this repository to ReaPack:
 **Extensions → ReaPack → Import repositories…**
 
 ```
-https://github.com/m-dahlberg/Magnolius-REAPER/raw/master/index.xml
+https://github.com/m-dahlberg/magnolius-reaper/raw/master/index.xml
 ```
 
 Then **Extensions → ReaPack → Browse packages…** and install what you want.

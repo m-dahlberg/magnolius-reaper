@@ -1,7 +1,7 @@
 -- @description DeClick
 -- @author Magnolius
 -- @version 1.0
--- @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+-- @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 -- @provides
 --   [nomain] dc/*.lua
 --   [nomain] dc/dsp/*.eel

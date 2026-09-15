@@ -2,7 +2,7 @@ desc:DeNoise (libspecbleach port)
 // @description DeNoise
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Spectral noise reduction. The algorithms are ported from libspecbleach by
 //   Luciano Dato (the library behind noise-repellent). JSFX cannot link native

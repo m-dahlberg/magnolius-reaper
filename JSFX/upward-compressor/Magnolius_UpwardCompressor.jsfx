@@ -2,7 +2,7 @@ desc:Upward Compressor (low-level lift)
 // @description Upward Compressor
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   A low-level lift: it raises what is below the threshold and leaves what is
 //   above it alone - the mirror image of an ordinary compressor.

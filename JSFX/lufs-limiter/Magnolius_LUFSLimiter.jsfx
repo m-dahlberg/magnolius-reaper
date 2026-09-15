@@ -2,7 +2,7 @@ desc:LUFS Limiter (LUFS-S leveler + true peak limiter)
 // @description LUFS Limiter
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Two stages in series: a slow LUFS-S leveler (BS.1770 K-weighted, 3 s
 //   window, 1-3 s lookahead) that rides the programme toward a loudness

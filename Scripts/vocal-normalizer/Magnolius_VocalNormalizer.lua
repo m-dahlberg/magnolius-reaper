@@ -1,7 +1,7 @@
 -- @description Vocal Normalizer
 -- @author Magnolius
 -- @version 1.0
--- @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+-- @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 -- @provides
 --   [nomain] vn/*.lua
 --   [nomain] vn/dsp/*.eel

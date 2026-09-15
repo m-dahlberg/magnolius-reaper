@@ -2,7 +2,7 @@ desc:Auto Tilt (self-adjusting tilt EQ)
 // @description Auto Tilt
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Automatic tilt EQ aimed at sung vocals. It measures the long-term spectral
 //   slope of the incoming signal - dB per octave, a least-squares fit of

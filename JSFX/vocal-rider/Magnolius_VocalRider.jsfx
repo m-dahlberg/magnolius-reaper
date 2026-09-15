@@ -2,7 +2,7 @@ desc:Vocal Rider (auto gain riding + sidechain ducking)
 // @description Vocal Rider
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Automatic gain riding for vocals, with sidechain ducking so the vocal can
 //   hold its place against a backing track.

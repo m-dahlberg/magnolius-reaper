@@ -2,7 +2,7 @@ desc:Variable Ratio Compressor MB (4 band)
 // @description Variable Ratio Compressor MB
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Four-band version of the Variable Ratio Compressor. Each band solves for
 //   the ratio that lands its loudest upcoming peak on the ceiling, then holds

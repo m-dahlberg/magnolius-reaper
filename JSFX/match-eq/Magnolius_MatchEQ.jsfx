@@ -2,7 +2,7 @@ desc:Match EQ (pink noise spectral matcher)
 // @description Match EQ
 // @author Magnolius
 // @version 1.0
-// @link GitHub https://github.com/m-dahlberg/Magnolius-REAPER
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Real-time spectral matcher. It continuously measures the input spectrum
 //   and applies an FFT-domain EQ curve pulling it toward a pink noise profile
