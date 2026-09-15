@@ -53,8 +53,9 @@ desc:Vari-Mu Compressor (F670-style limiter)
 // automatable and still appear in the Param menu -- verified with
 // TrackFX_GetNumParams, see tools/render_test.py test "params".
 //
-// THREADING - do not undo this.  @gfx runs on the UI thread; @init/@slider/
-// @sample run on the audio thread, and ALL globals AND all function locals
+// THREADING - do not undo this.  @gfx runs on the UI thread, whereas
+// the @init, @slider and @sample sections run on the audio thread, and ALL
+// globals AND all function locals
 // are shared between them.  So: every @gfx variable is g_-prefixed, @gfx
 // loop counters are gi/gj and audio-side ones ai/aj, and no name is used on
 // both sides.  The knob helpers are defined INSIDE @gfx, below every

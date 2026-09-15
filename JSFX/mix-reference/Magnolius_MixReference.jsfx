@@ -30,8 +30,9 @@ desc:Mix Reference (6 slots, tonal + per-band dynamics)
 // ways, so reference length depends on your REAPER build. The header line shows
 // the real loop length of the selected slot in seconds.
 //
-// THREADING NOTE (do not undo): @gfx runs on the UI thread while @sample /
-// @block / @slider / @init run on the audio thread, and ALL globals are shared.
+// THREADING NOTE (do not undo): @gfx runs on the UI thread, whereas the
+// sections @sample, @block, @slider and @init run on the audio thread, and
+// ALL globals are shared.
 // Audio-side loop counters are named ai/aj, UI-side ones gi/gj, and no name is
 // ever used by both sides. Mixing them corrupts r_rate/r_pos mid-loop, which
 // comes out as loud noise on the reference bus.

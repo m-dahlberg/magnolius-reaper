@@ -1,4 +1,5 @@
 desc:Vocal Splitter (breath / sibilance / consonant / residual separator)
+// @noindex   not published via ReaPack; see the repository README
 
 // ---------------------------------------------------------------------------
 // THREADING CONVENTION (do not undo - looks verbose, prevents real corruption):

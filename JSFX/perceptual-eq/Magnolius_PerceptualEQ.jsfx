@@ -1,4 +1,5 @@
 desc:Perceptual EQ (hearing-test based headphone correction)
+// @noindex   not published via ReaPack; see the repository README
 //tags: equalizer correction hearing headphones
 //
 // Builds a corrective EQ for headphone monitoring without a measurement mic.
