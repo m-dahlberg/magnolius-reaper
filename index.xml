@@ -1,2 +1,594 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius"/>
+<index version="1" name="Magnolius" commit="0de620d03ed85d2a6a6688de73fa41543d7f0831">
+  <category name="JSFX/adaptive-compressor">
+    <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (adaptive threshold, stereo)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Stereo compressor whose threshold follows the loudness of the incoming audio, so one setting gives the same amount of compression whether the source arrives hot or quiet.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The threshold tracks a slow self-calibrating average of the programme: activeThreshold = Threshold + Strength * clamp(L_short - L_slow, +/-Range). Strength at 0% turns the adaptation off and leaves an ordinary fixed-threshold compressor.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Look Ahead delays the audio path and reports the delay via pdc_delay, so the threshold anticipates loudness that has not arrived yet.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/adaptive-compressor/Magnolius_AdaptiveCompressor.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/auto-tilt">
+    <reapack name="Magnolius_AutoTilt.jsfx" type="effect" desc="Auto Tilt (self-adjusting tilt EQ)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Automatic tilt EQ aimed at sung vocals. It measures the long-term spectral slope of the incoming signal - dB per octave, a least-squares fit of log-spaced band levels against log2(f) - and applies the shelf pair that corrects it toward your target slope.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Because it measures continuously, one setting tracks a performance that changes tone as it goes, instead of a static curve dialled for one phrase.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the offline Auto Tilt script, which matches one clip to another and renders a new take rather than processing in real time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/auto-tilt/Magnolius_AutoTilt.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/convolution-reverb">
+    <reapack name="Magnolius_ConvolutionReverb.jsfx" type="effect" desc="Convolution Reverb (true-stereo, partitioned FFT)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 SETUP FIRST: create the folder REAPER/Data/ReverbIRs and put your impulse responses in it (on Linux that is usually ~/.config/REAPER/Data/ReverbIRs). The plugin scans that folder; with it empty there is nothing to load and no sound.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 True-stereo convolution reverb. A 4-channel IR WAV (LL, LR, RL, RR - input letter first) is run through uniform partitioned FFT convolution.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Latency of one partition (2048 samples) is reported via pdc_delay; REAPER compensates, and the dry path is internally delayed to match.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The repository also carries tools/RescanReverbIRs.lua, a ReaScript that rebuilds the IR index after you add files. It is not installed by this package - grab it from GitHub if you want it.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/declick">
+    <reapack name="Magnolius_DeClick.jsfx" type="effect" desc="DeClick (multiband click repair)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Real-time click and mouth-noise repair. A port of Paul Licameli's Audacity/Nyquist De-Clicker.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Detects brief spikes in per-band step-peak envelopes - the level must stand above the background both before AND after the spike, which is what separates a click from a transient - and repairs them with crossfaded peaking-EQ cuts at the affected band centres, over 1 to 4 passes.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Lookahead is implemented as reported PDC latency.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the offline DeClick script, which derives its threshold from each file's own click distribution instead of a dialled-in setting.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/declick/Magnolius_DeClick.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/denoise">
+    <reapack name="Magnolius_DeNoise.jsfx" type="effect" desc="DeNoise (libspecbleach port)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Spectral noise reduction. The algorithms are ported from libspecbleach by Luciano Dato (the library behind noise-repellent). JSFX cannot link native code, so this is a reimplementation in EEL2, not a wrapper.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Three modes: Denoise, Learn Noise Profile, and Adaptive. Learn a profile from a passage of noise alone, then denoise against it; or let Adaptive estimate the floor continuously.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Includes SPP-MMSE noise estimation, Berouti oversubtraction, residual whitening and NLM musical-noise smoothing. Profiles persist with the project via @serialize.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the offline DeNoise script, which derives the profile from an analysis of the whole file instead of a manual learn pass.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 License: LGPL-2.1-or-later, matching libspecbleach. See the LICENSE file in this package's folder.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/denoise/Magnolius_DeNoise.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/loudness-simulator">
+    <reapack name="Magnolius_LoudnessSimulator.jsfx" type="effect" desc="Loudness Simulator (contour EQ + upward compression + bs2b crossfeed)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Makes quiet monitoring sound like loud monitoring. One Simulated Loudness control drives an equal-loudness contour EQ, a two-band upward compressor and optional bs2b crossfeed together.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 MONITORING ONLY. Put it last on the master bus and bypass it before rendering - everything it does is meant to be undone by listening louder.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The contour reaches +10 dB at 200 Hz and +4 dB at 6.5 kHz at full setting. A gate below -70 dBFS keeps hiss and room tone from being lifted with everything else.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/loudness-simulator/Magnolius_LoudnessSimulator.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/lufs-limiter">
+    <reapack name="Magnolius_LUFSLimiter.jsfx" type="effect" desc="LUFS Limiter (LUFS-S leveler + true peak limiter)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Two stages in series: a slow LUFS-S leveler (BS.1770 K-weighted, 3 s window, 1-3 s lookahead) that rides the programme toward a loudness target, followed by a true peak limiter that guarantees the sample ceiling.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Splitting the job lets each stage work on the timescale it belongs on - the leveler moves over seconds and is inaudible, and the limiter only has the last dB or two of peak control left to do.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 True peak detection uses an 8x oversampled polyphase FIR, so the ceiling holds after conversion to lossy formats.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The Lookahead slider changes plugin latency and therefore PDC. Set it once and leave it.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/lufs-limiter/Magnolius_LUFSLimiter.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/match-eq">
+    <reapack name="Magnolius_MatchEQ.jsfx" type="effect" desc="Match EQ (pink noise spectral matcher)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Real-time spectral matcher. It continuously measures the input spectrum and applies an FFT-domain EQ curve pulling it toward a pink noise profile (power ~ 1/f, i.e. -3 dB/octave).\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Pink noise is a reasonable first approximation of a balanced mix, so this is a way of seeing - and correcting - where a source departs from that reference without dialling bands by hand.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/match-eq/Magnolius_MatchEQ.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/mix-reference">
+    <reapack name="Magnolius_MixReference.jsfx" type="effect" desc="Mix Reference (6 slots, tonal + per-band dynamics)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 SETUP FIRST: create the folder REAPER/Data/mixref and put your reference WAVs in it (on Linux that is usually ~/.config/REAPER/Data/mixref). The six Ref N file dropdowns scan that folder for .wav, .ogg and .raw. With it empty there is nothing to compare against.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Six reference slots with tonal and per-band dynamics comparison against your mix, so you can see where a reference is wider, denser or brighter rather than only hearing it.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/mix-reference/Magnolius_MixReference.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/upward-compressor">
+    <reapack name="Magnolius_UpwardCompressor.jsfx" type="effect" desc="Upward Compressor (low-level lift)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 A low-level lift: it raises what is below the threshold and leaves what is above it alone - the mirror image of an ordinary compressor.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The loud parts keep their level and their transients, and only the low-level detail moves: breaths, room, the tail of a reverb, the quiet half of a performance.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Zero latency, no lookahead, no PDC. Mix at 0% is an exact bypass.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/vari-mu-compressor">
+    <reapack name="Magnolius_VariMuCompressor.jsfx" type="effect" desc="Vari-Mu Compressor (F670-style limiter)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Vari-mu compressor/limiter in the Fairchild 670 idiom, with a custom GUI.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Derived from 'Fairly Childish' by Thomas Scott Stillwell (Copyright 2006), with the variable-mu detector topology and time-constant behaviour that gives the original its program-dependent release.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 License: 3-clause BSD, matching the upstream work. See the LICENSE file in this package's folder.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/vari-mu-compressor/Magnolius_VariMuCompressor.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/variable-ratio-compressor">
+    <reapack name="Magnolius_VariableRatioCompressor.jsfx" type="effect" desc="Variable Ratio Compressor (adaptive-ratio ceiling)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 A compressor that solves for the ratio each passage needs instead of being told one. Lookahead finds the loudest upcoming peak, derives the exact ratio that lands it on the output ceiling, then holds that ratio across the passage.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Everything between threshold and ceiling is compressed at the same currently-valid ratio, so relative dynamics inside the passage survive instead of only the tips being flattened.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 A sliding-min plus double-boxcar smoother makes the ceiling a hard guarantee rather than a target: no overshoot, so the safety clip is a genuine last resort.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 A four-band version is available as Variable Ratio Compressor MB.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.jsfx</source>
+      </version>
+    </reapack>
+    <reapack name="Magnolius_VariableRatioCompressorMB.jsfx" type="effect" desc="Variable Ratio Compressor MB (4 band)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Four-band version of the Variable Ratio Compressor. Each band solves for the ratio that lands its loudest upcoming peak on the ceiling, then holds it across the passage.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The crossover is a sequential LR4 tree with allpass compensation, so the four bands sum flat - flat magnitude, phase rotation only.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Note that the ceiling is per band, and four bands each held at the ceiling can sum above it: the ceiling is a shaping control here, not the output level. Use Output Trim for level. A disabled band still runs its delay line, so toggling one never shifts the others in time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressorMB.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/vocal-rider">
+    <reapack name="Magnolius_VocalRider.jsfx" type="effect" desc="Vocal Rider (auto gain riding + sidechain ducking)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Automatic gain riding for vocals, with sidechain ducking so the vocal can hold its place against a backing track.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Rides level toward a target rather than compressing toward a threshold, so the result reads as a performance that was sung evenly rather than one that was compressed.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/auto-tilt">
+    <reapack name="Magnolius_AutoTilt.lua" type="script" desc="Auto Tilt">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Matches the spectral balance of one clip to another with a single tilt EQ. It measures the high/low energy ratio of both about a pivot you set, solves for the shelf-pair gain that equalises them, and renders the target as a new take.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Offline and destructive-by-render: the original take is preserved underneath, so the correction is always reversible.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the Auto Tilt JSFX, which does the same correction continuously in real time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/Magnolius_AutoTilt.lua</source>
+        <source file="at/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/analyze.lua</source>
+        <source file="at/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/apply.lua</source>
+        <source file="at/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/config.lua</source>
+        <source file="at/kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/kernel.lua</source>
+        <source file="at/render.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/render.lua</source>
+        <source file="at/select.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/select.lua</source>
+        <source file="at/solve.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/solve.lua</source>
+        <source file="at/spectrum.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/spectrum.lua</source>
+        <source file="at/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/ui.lua</source>
+        <source file="at/wav.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/wav.lua</source>
+        <source file="at/dsp/tilt.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/auto-tilt/at/dsp/tilt.eel</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/declick">
+    <reapack name="Magnolius_DeClick.lua" type="script" desc="DeClick">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Finds and repairs mouth noise in vocal takes. The detection and repair are a port of the DeClick JSFX (itself a port of Paul Licameli's Audacity/Nyquist De-Clicker).\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 What is different here is that the sensitivity threshold is derived from each file's own click distribution instead of dialled in - so a quiet take and a loud one both get an appropriate threshold without adjustment.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the DeClick JSFX for the real-time version.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/Magnolius_DeClick.lua</source>
+        <source file="dc/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/analyze.lua</source>
+        <source file="dc/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/apply.lua</source>
+        <source file="dc/autothresh.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/autothresh.lua</source>
+        <source file="dc/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/config.lua</source>
+        <source file="dc/detect.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/detect.lua</source>
+        <source file="dc/kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/kernel.lua</source>
+        <source file="dc/log.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/log.lua</source>
+        <source file="dc/render.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/render.lua</source>
+        <source file="dc/silence.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/silence.lua</source>
+        <source file="dc/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/ui.lua</source>
+        <source file="dc/wav.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/wav.lua</source>
+        <source file="dc/dsp/declick.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/declick/dc/dsp/declick.eel</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/denoise">
+    <reapack name="Magnolius_DeNoise.lua" type="script" desc="DeNoise">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Offline spectral noise reduction. The DSP is a port of the DeNoise JSFX (itself a port of libspecbleach by Luciano Dato).\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 What is different here is that the noise profile is derived from an analysis of the whole file instead of a manual learn pass - there is no need to find and select a passage of noise alone.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the DeNoise JSFX for the real-time version.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/Magnolius_DeNoise.lua</source>
+        <source file="dn/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/analyze.lua</source>
+        <source file="dn/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/apply.lua</source>
+        <source file="dn/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/config.lua</source>
+        <source file="dn/gains.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/gains.lua</source>
+        <source file="dn/kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/kernel.lua</source>
+        <source file="dn/profile.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/profile.lua</source>
+        <source file="dn/render.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/render.lua</source>
+        <source file="dn/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/ui.lua</source>
+        <source file="dn/wav.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/wav.lua</source>
+        <source file="dn/dsp/denoise.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/denoise/dn/dsp/denoise.eel</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/deresonate">
+    <reapack name="Magnolius_DeResonate.lua" type="script" desc="DeResonate">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Finds fixed-frequency room resonances and broad room/mic colouration in a close-mic vocal, and measures the room's decay time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 It uses the singer's own pitch to tell a resonance apart from a harmonic - the distinction that makes automatic de-resonance possible at all, since a sustained note and a ringing room mode look alike in a plain spectrum.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository. It is used both for the panel and, via CreateFunctionFromEEL, for the analysis kernel.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/Magnolius_DeResonate.lua</source>
+        <source file="dr/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/analyze.lua</source>
+        <source file="dr/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/apply.lua</source>
+        <source file="dr/auto.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/auto.lua</source>
+        <source file="dr/broad.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/broad.lua</source>
+        <source file="dr/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/config.lua</source>
+        <source file="dr/detect.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/detect.lua</source>
+        <source file="dr/edc.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/edc.lua</source>
+        <source file="dr/gains.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/gains.lua</source>
+        <source file="dr/gate.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/gate.lua</source>
+        <source file="dr/kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/kernel.lua</source>
+        <source file="dr/mask.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/mask.lua</source>
+        <source file="dr/pitch_kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/pitch_kernel.lua</source>
+        <source file="dr/render.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/render.lua</source>
+        <source file="dr/ring.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/ring.lua</source>
+        <source file="dr/select.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/select.lua</source>
+        <source file="dr/solve.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/solve.lua</source>
+        <source file="dr/spectrum.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/spectrum.lua</source>
+        <source file="dr/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/ui.lua</source>
+        <source file="dr/wav.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/wav.lua</source>
+        <source file="dr/dsp/deresonate.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/dsp/deresonate.eel</source>
+        <source file="dr/dsp/pitch.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/deresonate/dr/dsp/pitch.eel</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/note-leveling">
+    <reapack name="Magnolius_NoteLeveling.lua" type="script" desc="Note Leveling">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Levels a vocal per sung note rather than per sample. It detects pitch every few milliseconds, clusters the pitch points into musical notes, measures each note's RMS, and moves notes outside a floor/ceiling window back toward it.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 The result is written as track Volume (Pre-FX) automation, so the original audio is untouched and the correction sits ahead of the vocal chain.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 This package also installs 'Note Leveling - Ride against reference', a no-panel action that rides the vocal against a reference track. Bind it to a key or call it from another script.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/Magnolius_NoteLeveling.lua</source>
+        <source file="nl/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/analyze.lua</source>
+        <source file="nl/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/apply.lua</source>
+        <source file="nl/cluster.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/cluster.lua</source>
+        <source file="nl/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/config.lua</source>
+        <source file="nl/kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/kernel.lua</source>
+        <source file="nl/level.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/level.lua</source>
+        <source file="nl/octave.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/octave.lua</source>
+        <source file="nl/reference.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/reference.lua</source>
+        <source file="nl/ride.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/ride.lua</source>
+        <source file="nl/rider.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/rider.lua</source>
+        <source file="nl/select.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/select.lua</source>
+        <source file="nl/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/ui.lua</source>
+        <source file="nl/dsp/pitch.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/nl/dsp/pitch.eel</source>
+        <source main="main" file="Magnolius_NoteLevelingRide.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/note-leveling/Magnolius_NoteLevelingRide.lua</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/track-manager">
+    <reapack name="Magnolius_TrackManager.lua" type="script" desc="Track Manager">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Nine named track groups on a narrow always-on-top panel. Type a pattern ('drums*', 'gtr*, -gtr ref') into a slot once, and from then on that slot's button - or its numpad key - selects that group, hides it, or solos and mutes it, depending on which of the three modes the panel is in.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Each mode has its own page of nine: the groups you reach for are rarely the ones you hide, and neither is the handful you solo.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Slots save with the project, so a session opens with its own groups. Presets are global, so the names you always use follow you between sessions.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/track-manager/Magnolius_TrackManager.lua</source>
+        <source file="tm/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/track-manager/tm/apply.lua</source>
+        <source file="tm/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/track-manager/tm/config.lua</source>
+        <source file="tm/match.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/track-manager/tm/match.lua</source>
+        <source file="tm/tracks.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/track-manager/tm/tracks.lua</source>
+        <source file="tm/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/track-manager/tm/ui.lua</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/vocal-normalizer">
+    <reapack name="Magnolius_VocalNormalizer.lua" type="script" desc="Vocal Normalizer">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Normalises vocal clips to a target loudness measured through the frequency range the melody's fundamentals occupy, rather than across the whole spectrum.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Ordinary LUFS normalisation is K-weighted, which adds high-frequency weight - so a breathy or sibilant take reads louder than it sounds and gets pushed down, while a dark take gets pushed up. Measuring in the fundamental range instead makes clips match by the part of the sound that carries the melody.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/Magnolius_VocalNormalizer.lua</source>
+        <source file="vn/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/analyze.lua</source>
+        <source file="vn/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/apply.lua</source>
+        <source file="vn/biquad.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/biquad.lua</source>
+        <source file="vn/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/config.lua</source>
+        <source file="vn/kernel.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/kernel.lua</source>
+        <source file="vn/loudness.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/loudness.lua</source>
+        <source file="vn/plan.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/plan.lua</source>
+        <source file="vn/select.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/select.lua</source>
+        <source file="vn/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/ui.lua</source>
+        <source file="vn/dsp/loudness.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-normalizer/vn/dsp/loudness.eel</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="Scripts/vocal-splitter">
+    <reapack name="Magnolius_VocalSplitter.lua" type="script" desc="Vocal Splitter">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 Segments a vocal take top-down into sections, phrases, breaths, hard consonants and sibilance, then splits, levels and crossfades it.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Working top-down means the section boundaries are found before the phrase boundaries and the phrases before the breaths, so a quiet breath inside a loud phrase is still found as a breath.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 See also the Vocal Splitter JSFX, which separates the same classes in real time as a four-way output split.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Requires ReaImGui, which ReaPack will not install for you - get it from the ReaTeam Extensions repository. It is used both for the panel and, via CreateFunctionFromEEL, for the analysis kernel.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
+        <changelog><![CDATA[Initial ReaPack release]]></changelog>
+        <source main="main">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/Magnolius_VocalSplitter.lua</source>
+        <source file="vs/analyze.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/analyze.lua</source>
+        <source file="vs/apply.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/apply.lua</source>
+        <source file="vs/autothresh.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/autothresh.lua</source>
+        <source file="vs/config.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/config.lua</source>
+        <source file="vs/hierarchy.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/hierarchy.lua</source>
+        <source file="vs/levels.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/levels.lua</source>
+        <source file="vs/ui.lua">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/ui.lua</source>
+        <source file="vs/dsp/features.eel">https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/Scripts/vocal-splitter/vs/dsp/features.eel</source>
+      </version>
+    </reapack>
+  </category>
+  <metadata>
+    <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel0 \b \fs36 Magnolius\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 JSFX plugins and ReaScripts for REAPER, mostly built around vocal production: levelling, de-noising, de-clicking, de-resonating, spectral matching and dynamics.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Install\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Add this repository to ReaPack:\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 {\b Extensions \u8594 ? ReaPack \u8594 ? Import repositories\u8230 ?}\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \f1 https://github.com/m-dahlberg/magnolius-reaper/raw/master/index.xml\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Then {\b Extensions \u8594 ? ReaPack \u8594 ? Browse packages\u8230 ?} and install what you want. JSFX land in {\f1 Effects/Magnolius/}, scripts in {\f1 Scripts/Magnolius/}.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Several scripts need {\field{\*\fldinst{HYPERLINK "https://github.com/cfillion/reaimgui"}}{\fldrslt{\ul
+ReaImGui
+}}}
+, which ReaPack will not pull in automatically \u8212- install it from the {\b ReaTeam Extensions} repository first.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 What's here\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 JSFX\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 | Plugin | What it does | | --- | --- | | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. | | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. | | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. | | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. | | DeNoise | Spectral noise reduction, ported from libspecbleach. | | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. | | LUFS Limiter | LUFS-S leveler into a true peak limiter. | | Match EQ | Pulls the input spectrum toward a pink-noise reference. | | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. | | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. | | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. | | Variable Ratio Compressor | Solves for the ratio each passage needs. Single-band and 4-band. | | Vocal Rider | Automatic gain riding with sidechain ducking. |\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 Scripts\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 | Script | What it does | | --- | --- | | Auto Tilt | Matches one clip's spectral balance to another and renders a new take. | | DeClick | Click repair with the threshold derived from each file's own distribution. | | DeNoise | Offline denoising with the profile derived from the whole file. | | DeResonate | Finds room resonances using the singer's pitch to separate them from harmonics. | | Note Leveling | Levels a vocal per sung note, written as Pre-FX volume automation. | | Track Manager | Nine named track groups on a numpad-driven panel. | | Vocal Normalizer | Normalises through the melody's fundamental range, not K-weighted. | | Vocal Splitter | Segments a take into phrases, breaths, consonants and sibilance. |\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Four of these exist as both a plugin and a script \u8212- {\b Auto Tilt}, {\b DeClick}, {\b DeNoise} and {\b Vocal Splitter}. The plugin is real-time; the script is offline and can analyse the whole file before deciding anything, which usually means less tuning. ReaPack's Type column tells them apart.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Licensing\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 GPL-3.0-or-later, except where an upstream work requires otherwise:\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\b DeNoise} \u8212- LGPL-2.1-or-later, matching libspecbleach by Luciano Dato.\par}
+{\pard \ql \f0 \sa0 \li360 \fi-360 \bullet \tx360\tab {\b Vari-Mu Compressor} \u8212- 3-clause BSD, derived from "Fairly Childish" by Thomas Scott Stillwell.\sa180\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Those two carry their own {\f1 LICENSE} files.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 Development\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Each package folder holds its own README. Most carry a {\f1 test/} or {\f1 tools/} tree: headless render harnesses for the JSFX and in-REAPER test scripts for the ReaScripts. Those trees ship in the repo but are excluded from the ReaPack index.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Test and demo audio is {\b not} in git \u8212- it is regenerable from the fixture generators in those same folders.\par}
+}
+]]></description>
+  </metadata>
+</index>
