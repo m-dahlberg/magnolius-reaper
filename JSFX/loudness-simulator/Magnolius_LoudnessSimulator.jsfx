@@ -1,7 +1,7 @@
 desc:Loudness Simulator (Magnolius)
 // @description Loudness Simulator (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Makes quiet monitoring sound like loud monitoring. One Simulated Loudness
@@ -17,9 +17,9 @@ desc:Loudness Simulator (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   Restore the tags: header, so the FX browser can search these by category again
 
-// tags - mastering loudness contour crossfeed
+//tags: mastering loudness contour crossfeed
 in_pin:left input
 in_pin:right input
 out_pin:left output

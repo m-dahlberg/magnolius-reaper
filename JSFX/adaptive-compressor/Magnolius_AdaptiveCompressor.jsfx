@@ -1,7 +1,7 @@
 desc:Adaptive Compressor (Magnolius)
 // @description Adaptive Compressor (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Stereo compressor whose threshold follows the loudness of the incoming
@@ -18,9 +18,9 @@ desc:Adaptive Compressor (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   Restore the tags: header, so the FX browser can search these by category again
 
-// tags - dynamics compressor
+//tags: dynamics compressor
 // Stereo compressor whose threshold follows the loudness of the incoming
 // audio, so fixed settings give the same amount of compression regardless
 // of input level.

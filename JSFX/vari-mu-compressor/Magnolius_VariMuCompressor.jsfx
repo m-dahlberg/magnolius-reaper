@@ -1,7 +1,7 @@
 desc:Vari-Mu Compressor (Magnolius)
 // @description Vari-Mu Compressor (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Vari-mu compressor/limiter in the Fairchild 670 idiom, with a custom GUI.
@@ -13,9 +13,9 @@ desc:Vari-Mu Compressor (Magnolius)
 //   License: 3-clause BSD, matching the upstream work. See the LICENSE file in
 //   this package's folder.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   Restore the tags: header, so the FX browser can search these by category again
 
-// tags - dynamics compressor limiter vari-mu stereo
+//tags: dynamics compressor limiter vari-mu stereo
 // License: 3-clause BSD. See LICENSE.
 //
 // Derived from "Fairly Childish" by Thomas Scott Stillwell (Copyright 2006,

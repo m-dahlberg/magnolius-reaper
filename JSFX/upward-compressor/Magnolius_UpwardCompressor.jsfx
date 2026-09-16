@@ -1,7 +1,7 @@
 desc:Upward Compressor (Magnolius)
 // @description Upward Compressor (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   A low-level lift: it raises what is below the threshold and leaves what is
@@ -15,9 +15,9 @@ desc:Upward Compressor (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   Restore the tags: header, so the FX browser can search these by category again
 
-// tags - dynamics upward compression vocal
+//tags: dynamics upward compression vocal
 // An upward compressor: it raises what is BELOW the threshold and leaves
 // what is above it alone.  A downward compressor turns peaks down; this
 // turns the quiet parts up, so the loud parts keep their level and their

@@ -1,7 +1,7 @@
 desc:Convolution Reverb (Magnolius)
 // @description Convolution Reverb (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   SETUP FIRST: create the folder REAPER/Data/ReverbIRs and put your impulse
@@ -21,9 +21,9 @@ desc:Convolution Reverb (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   Restore the tags: header, so the FX browser can search these by category again
 
-// tags - reverb convolution true-stereo
+//tags: reverb convolution true-stereo
 // True-stereo convolution reverb. A 4-channel IR WAV (LL,LR,RL,RR — input
 // letter first) from Data/ReverbIRs is run through uniform partitioned FFT
 // convolution. Latency of one partition (2048 samples) is reported via

@@ -1,7 +1,7 @@
 desc:Match EQ (Magnolius)
 // @description Match EQ (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Real-time spectral matcher. It continuously measures the input spectrum
@@ -14,9 +14,9 @@ desc:Match EQ (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   Restore the tags: header, so the FX browser can search these by category again
 
-// tags - EQ spectral matching analysis
+//tags: EQ spectral matching analysis
 // Real-time spectral matcher: continuously measures the input spectrum and
 // applies an FFT-domain EQ curve pulling it toward a pink noise profile
 // (power ~ 1/f, i.e. -3 dB/octave).
