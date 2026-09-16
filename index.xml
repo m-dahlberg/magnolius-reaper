@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c">
+<index version="1" name="Magnolius" commit="d47b02f4375a1210fab5668e5414566ecdeb9d1e">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -22,6 +22,10 @@
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/adaptive-compressor/Magnolius_AdaptiveCompressor.jsfx</source>
+      </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/adaptive-compressor/Magnolius_AdaptiveCompressor.jsfx</source>
       </version>
     </reapack>
   </category>
@@ -48,6 +52,10 @@
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/auto-tilt/Magnolius_AutoTilt.jsfx</source>
       </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/auto-tilt/Magnolius_AutoTilt.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/convolution-reverb">
@@ -73,6 +81,10 @@
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.jsfx</source>
+      </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.jsfx</source>
       </version>
     </reapack>
   </category>
@@ -151,6 +163,10 @@
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/loudness-simulator/Magnolius_LoudnessSimulator.jsfx</source>
       </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/loudness-simulator/Magnolius_LoudnessSimulator.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/lufs-limiter">
@@ -177,6 +193,10 @@
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/lufs-limiter/Magnolius_LUFSLimiter.jsfx</source>
       </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/lufs-limiter/Magnolius_LUFSLimiter.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/match-eq">
@@ -200,6 +220,10 @@
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/match-eq/Magnolius_MatchEQ.jsfx</source>
+      </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/match-eq/Magnolius_MatchEQ.jsfx</source>
       </version>
     </reapack>
   </category>
@@ -250,6 +274,10 @@
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
       </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/vari-mu-compressor">
@@ -273,6 +301,10 @@
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/vari-mu-compressor/Magnolius_VariMuCompressor.jsfx</source>
+      </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/vari-mu-compressor/Magnolius_VariMuCompressor.jsfx</source>
       </version>
     </reapack>
   </category>
@@ -346,6 +378,10 @@
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
+      </version>
+      <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
+        <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
       </version>
     </reapack>
   </category>
