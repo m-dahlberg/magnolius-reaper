@@ -25,6 +25,9 @@ Extensions** repository first.
 
 ### JSFX
 
+Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
+`magnolius` in the FX add dialog lists the whole set.
+
 | Plugin | What it does |
 | --- | --- |
 | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. |

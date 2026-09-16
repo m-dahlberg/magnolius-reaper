@@ -1,7 +1,7 @@
-desc:Vocal Rider (auto gain riding + sidechain ducking)
-// @description Vocal Rider
+desc:Vocal Rider (Magnolius)
+// @description Vocal Rider (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Automatic gain riding for vocals, with sidechain ducking so the vocal can
@@ -13,7 +13,7 @@ desc:Vocal Rider (auto gain riding + sidechain ducking)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // tags - dynamics gain vocal
 slider1:-18<-40,0,0.1>Target level (dB)

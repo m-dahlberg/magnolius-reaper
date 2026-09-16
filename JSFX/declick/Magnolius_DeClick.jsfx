@@ -1,7 +1,7 @@
-desc:DeClick (multiband click repair)
-// @description DeClick
+desc:DeClick (Magnolius)
+// @description DeClick (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Real-time click and mouth-noise repair. A port of Paul Licameli's
@@ -19,7 +19,7 @@ desc:DeClick (multiband click repair)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // Port of Paul Licameli's Audacity/Nyquist "De-Clicker" to real-time JSFX.
 // Detects brief spikes in per-band step-peak envelopes (level must stand above

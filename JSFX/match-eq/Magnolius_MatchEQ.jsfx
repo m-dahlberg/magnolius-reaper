@@ -1,7 +1,7 @@
-desc:Match EQ (pink noise spectral matcher)
-// @description Match EQ
+desc:Match EQ (Magnolius)
+// @description Match EQ (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Real-time spectral matcher. It continuously measures the input spectrum
@@ -14,7 +14,7 @@ desc:Match EQ (pink noise spectral matcher)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // tags - EQ spectral matching analysis
 // Real-time spectral matcher: continuously measures the input spectrum and

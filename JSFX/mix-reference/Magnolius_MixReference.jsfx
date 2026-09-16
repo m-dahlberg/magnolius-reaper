@@ -1,7 +1,7 @@
-desc:Mix Reference (6 slots, tonal + per-band dynamics)
-// @description Mix Reference
+desc:Mix Reference (Magnolius)
+// @description Mix Reference (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   SETUP FIRST: create the folder REAPER/Data/mixref and put your reference
@@ -15,7 +15,7 @@ desc:Mix Reference (6 slots, tonal + per-band dynamics)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // SETUP: create a folder  REAPER/Data/mixref/  and put your reference WAVs in it.
 // On Linux that is usually  ~/.config/REAPER/Data/mixref/

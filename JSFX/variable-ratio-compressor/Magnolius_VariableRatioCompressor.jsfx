@@ -1,7 +1,7 @@
-desc:Variable Ratio Compressor (adaptive-ratio ceiling)
-// @description Variable Ratio Compressor
+desc:Variable Ratio Compressor (Magnolius)
+// @description Variable Ratio Compressor (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   A compressor that solves for the ratio each passage needs instead of being
@@ -21,7 +21,7 @@ desc:Variable Ratio Compressor (adaptive-ratio ceiling)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // Program-dependent compressor: lookahead finds the loudest upcoming peak,
 // derives the exact ratio that lands that peak on the output ceiling, then

@@ -1,7 +1,7 @@
-desc:Variable Ratio Compressor MB (4 band)
-// @description Variable Ratio Compressor MB
+desc:Variable Ratio Compressor MB (Magnolius)
+// @description Variable Ratio Compressor MB (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Four-band version of the Variable Ratio Compressor. Each band solves for
@@ -18,7 +18,7 @@ desc:Variable Ratio Compressor MB (4 band)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // Four-band version of the adaptive-ratio compressor. Each band runs the same
 // core: lookahead sliding-max finds the loudest upcoming peak, solves for the

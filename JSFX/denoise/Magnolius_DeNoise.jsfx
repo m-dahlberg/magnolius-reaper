@@ -1,7 +1,7 @@
-desc:DeNoise (libspecbleach port)
-// @description DeNoise
+desc:DeNoise (Magnolius)
+// @description DeNoise (Magnolius)
 // @author Magnolius
-// @version 1.0
+// @version 1.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Spectral noise reduction. The algorithms are ported from libspecbleach by
@@ -22,7 +22,7 @@ desc:DeNoise (libspecbleach port)
 //   License: LGPL-2.1-or-later, matching libspecbleach. See the LICENSE file
 //   in this package's folder.
 // @changelog
-//   Initial ReaPack release
+//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
 
 // Spectral noise reduction for REAPER, algorithms ported from libspecbleach
 // (https://github.com/lucianodato/libspecbleach) by Luciano Dato.
