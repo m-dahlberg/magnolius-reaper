@@ -1,7 +1,7 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="0de620d03ed85d2a6a6688de73fa41543d7f0831">
+<index version="1" name="Magnolius" commit="6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c">
   <category name="JSFX/adaptive-compressor">
-    <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (adaptive threshold, stereo)">
+    <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -19,10 +19,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/adaptive-compressor/Magnolius_AdaptiveCompressor.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/adaptive-compressor/Magnolius_AdaptiveCompressor.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/auto-tilt">
-    <reapack name="Magnolius_AutoTilt.jsfx" type="effect" desc="Auto Tilt (self-adjusting tilt EQ)">
+    <reapack name="Magnolius_AutoTilt.jsfx" type="effect" desc="Auto Tilt (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -40,10 +44,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/auto-tilt/Magnolius_AutoTilt.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/auto-tilt/Magnolius_AutoTilt.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/convolution-reverb">
-    <reapack name="Magnolius_ConvolutionReverb.jsfx" type="effect" desc="Convolution Reverb (true-stereo, partitioned FFT)">
+    <reapack name="Magnolius_ConvolutionReverb.jsfx" type="effect" desc="Convolution Reverb (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -62,10 +70,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/declick">
-    <reapack name="Magnolius_DeClick.jsfx" type="effect" desc="DeClick (multiband click repair)">
+    <reapack name="Magnolius_DeClick.jsfx" type="effect" desc="DeClick (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -84,10 +96,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/declick/Magnolius_DeClick.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/declick/Magnolius_DeClick.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/denoise">
-    <reapack name="Magnolius_DeNoise.jsfx" type="effect" desc="DeNoise (libspecbleach port)">
+    <reapack name="Magnolius_DeNoise.jsfx" type="effect" desc="DeNoise (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -106,10 +122,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/denoise/Magnolius_DeNoise.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/denoise/Magnolius_DeNoise.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/loudness-simulator">
-    <reapack name="Magnolius_LoudnessSimulator.jsfx" type="effect" desc="Loudness Simulator (contour EQ + upward compression + bs2b crossfeed)">
+    <reapack name="Magnolius_LoudnessSimulator.jsfx" type="effect" desc="Loudness Simulator (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -127,10 +147,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/loudness-simulator/Magnolius_LoudnessSimulator.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/loudness-simulator/Magnolius_LoudnessSimulator.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/lufs-limiter">
-    <reapack name="Magnolius_LUFSLimiter.jsfx" type="effect" desc="LUFS Limiter (LUFS-S leveler + true peak limiter)">
+    <reapack name="Magnolius_LUFSLimiter.jsfx" type="effect" desc="LUFS Limiter (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -149,10 +173,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/lufs-limiter/Magnolius_LUFSLimiter.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/lufs-limiter/Magnolius_LUFSLimiter.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/match-eq">
-    <reapack name="Magnolius_MatchEQ.jsfx" type="effect" desc="Match EQ (pink noise spectral matcher)">
+    <reapack name="Magnolius_MatchEQ.jsfx" type="effect" desc="Match EQ (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -169,10 +197,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/match-eq/Magnolius_MatchEQ.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/match-eq/Magnolius_MatchEQ.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/mix-reference">
-    <reapack name="Magnolius_MixReference.jsfx" type="effect" desc="Mix Reference (6 slots, tonal + per-band dynamics)">
+    <reapack name="Magnolius_MixReference.jsfx" type="effect" desc="Mix Reference (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -189,10 +221,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/mix-reference/Magnolius_MixReference.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/mix-reference/Magnolius_MixReference.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/upward-compressor">
-    <reapack name="Magnolius_UpwardCompressor.jsfx" type="effect" desc="Upward Compressor (low-level lift)">
+    <reapack name="Magnolius_UpwardCompressor.jsfx" type="effect" desc="Upward Compressor (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -210,10 +246,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/vari-mu-compressor">
-    <reapack name="Magnolius_VariMuCompressor.jsfx" type="effect" desc="Vari-Mu Compressor (F670-style limiter)">
+    <reapack name="Magnolius_VariMuCompressor.jsfx" type="effect" desc="Vari-Mu Compressor (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -230,10 +270,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/vari-mu-compressor/Magnolius_VariMuCompressor.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/vari-mu-compressor/Magnolius_VariMuCompressor.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/variable-ratio-compressor">
-    <reapack name="Magnolius_VariableRatioCompressor.jsfx" type="effect" desc="Variable Ratio Compressor (adaptive-ratio ceiling)">
+    <reapack name="Magnolius_VariableRatioCompressor.jsfx" type="effect" desc="Variable Ratio Compressor (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -252,8 +296,12 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.jsfx</source>
+      </version>
     </reapack>
-    <reapack name="Magnolius_VariableRatioCompressorMB.jsfx" type="effect" desc="Variable Ratio Compressor MB (4 band)">
+    <reapack name="Magnolius_VariableRatioCompressorMB.jsfx" type="effect" desc="Variable Ratio Compressor MB (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -271,10 +319,14 @@
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressorMB.jsfx</source>
       </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressorMB.jsfx</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/vocal-rider">
-    <reapack name="Magnolius_VocalRider.jsfx" type="effect" desc="Vocal Rider (auto gain riding + sidechain ducking)">
+    <reapack name="Magnolius_VocalRider.jsfx" type="effect" desc="Vocal Rider (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
@@ -290,6 +342,10 @@
       <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
         <changelog><![CDATA[Initial ReaPack release]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
+      </version>
+      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
+        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
       </version>
     </reapack>
   </category>
@@ -576,6 +632,7 @@ ReaImGui
 , which ReaPack will not pull in automatically \u8212- install it from the {\b ReaTeam Extensions} repository first.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 What's here\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 JSFX\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Each appears in REAPER's FX browser with a {\f1 (Magnolius)} suffix, so typing {\f1 magnolius} in the FX add dialog lists the whole set.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 | Plugin | What it does | | --- | --- | | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. | | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. | | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. | | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. | | DeNoise | Spectral noise reduction, ported from libspecbleach. | | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. | | LUFS Limiter | LUFS-S leveler into a true peak limiter. | | Match EQ | Pulls the input spectrum toward a pink-noise reference. | | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. | | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. | | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. | | Variable Ratio Compressor | Solves for the ratio each passage needs. Single-band and 4-band. | | Vocal Rider | Automatic gain riding with sidechain ducking. |\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 Scripts\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 | Script | What it does | | --- | --- | | Auto Tilt | Matches one clip's spectral balance to another and renders a new take. | | DeClick | Click repair with the threshold derived from each file's own distribution. | | DeNoise | Offline denoising with the profile derived from the whole file. | | DeResonate | Finds room resonances using the singer's pitch to separate them from harmonics. | | Note Leveling | Levels a vocal per sung note, written as Pre-FX volume automation. | | Track Manager | Nine named track groups on a numpad-driven panel. | | Vocal Normalizer | Normalises through the melody's fundamental range, not K-weighted. | | Vocal Splitter | Segments a take into phrases, breaths, consonants and sibilance. |\par}
