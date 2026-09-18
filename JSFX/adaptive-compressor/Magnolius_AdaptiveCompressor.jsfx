@@ -1,7 +1,7 @@
 desc:Adaptive Compressor (Magnolius)
 // @description Adaptive Compressor (Magnolius)
 // @author Magnolius
-// @version 1.3
+// @version 1.3.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @provides
 //   gui_kit/gui_kit.jsfx-inc
@@ -22,14 +22,9 @@ desc:Adaptive Compressor (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Custom GUI, replacing the generic sliders:
-//   - scrolling waveform of the detector signal with the active threshold,
-//     its range rails and gain reduction drawn over it
-//   - controls grouped into Compressor / Adaptation / Output panels, each
-//     knob with an editable number box: click to type a value, or drag it
-//   - interface scale control, shared by every open instance
-//   - built-in user guide behind the ? button
-//   The DSP is unchanged, and every parameter still automates as before.
+//   The interface now opens at 100% instead of Fit, so the artwork is blitted
+//   pixel for pixel. Fit is unchanged and still one click away in the
+//   dropdown; it is the one to use if REAPER restores a smaller FX window.
 
 //tags: dynamics compressor
 // Stereo compressor whose threshold follows the loudness of the incoming
@@ -153,9 +148,14 @@ GM_UI_SCALE = 0;          // gmem slot holding the shared scale
 // gmem is session-scoped: REAPER frees it once the last instance is removed,
 // and a JSFX cannot write a settings file, so the scale cannot be persisted
 // from in here. A permanent size belongs in the @gfx line instead.
-// UI_SCALE_DEFAULT applies until something sets it; leave it at 0 (Fit) unless
-// you also enlarge the @gfx window, or the interface will be clipped.
-UI_SCALE_DEFAULT = 0;
+// UI_SCALE_DEFAULT applies until something sets it. 100%, not Fit: the @gfx
+// line already asks for exactly the design size, so 100% is pixel-exact on a
+// fresh window and the artwork is blitted 1:1, where Fit softens everything
+// by a fractional factor as soon as REAPER restores the window at some other
+// size. Keep this in step across every plugin using options:gmem=Magnolius -
+// they share the one gmem slot, so whichever opens first in a session seeds
+// it, and a sibling still defaulting to Fit would win that race.
+UI_SCALE_DEFAULT = 1;
 gui_scale_idx = UI_SCALE_DEFAULT;
 function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
 

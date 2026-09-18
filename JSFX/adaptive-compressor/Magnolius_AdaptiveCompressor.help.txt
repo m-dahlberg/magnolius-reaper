@@ -114,12 +114,14 @@ are clamped to it. Typing needs the FX window focused.
 The three boxes that only report - Active Thr, Output Gain and the
 GR readout - are not editable.
 
-The dropdown in the title bar sets the interface scale. Fit scales
-the interface to whatever size you drag the FX window to, which is
-the normal way to make it bigger. The fixed percentages hold a scale
-regardless of window size; a JSFX cannot resize its own window, so a
-scale larger than the window is clipped. The dropdown always stays
-on screen, so Fit is one click away.
+The dropdown in the title bar sets the interface scale. It opens at
+100%, where the artwork is drawn pixel for pixel and looks its
+sharpest. Fit instead scales the interface to whatever size you drag
+the FX window to, which is the normal way to make it bigger, at the
+cost of a fractional scale factor that softens the artwork. A JSFX
+cannot resize its own window, so a fixed scale larger than the
+window is clipped rather than fitted - the dropdown always stays on
+screen, so Fit is one click away.
 
 The scale is shared by every open instance and by any instance added
 afterwards, but REAPER forgets it when the last one is removed. For
