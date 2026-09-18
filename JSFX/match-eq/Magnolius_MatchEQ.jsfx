@@ -1,8 +1,12 @@
 desc:Match EQ (Magnolius)
 // @description Match EQ (Magnolius)
 // @author Magnolius
-// @version 1.2
+// @version 1.3
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_MatchEQ.help.txt
 // @about
 //   Real-time spectral matcher. It continuously measures the input spectrum
 //   and applies an FFT-domain EQ curve pulling it toward a pink noise profile
@@ -14,7 +18,17 @@ desc:Match EQ (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Restore the tags: header, so the FX browser can search these by category again
+//   Custom GUI, replacing the generic sliders:
+//   - the analyser fills the window: input, correction and (in Reference mode)
+//     the side-chain spectrum, all plotted against pink
+//   - controls grouped into Match / Target / Side Chain panels plus an Output
+//     column, each knob with an editable number box: click to type, or drag
+//   - the five log-scaled parameters (Speed, Tilt Center, Min/Max Frequency,
+//     Side Chain Speed) now scrub logarithmically on their knobs
+//   - interface scale control, shared by every open instance; opens at
+//     100%, where the artwork is blitted pixel for pixel
+//   - built-in user guide behind the ? button
+//   The DSP is unchanged, and every parameter still automates as before.
 
 //tags: EQ spectral matching analysis
 // Real-time spectral matcher: continuously measures the input spectrum and
@@ -25,21 +39,32 @@ desc:Match EQ (Magnolius)
 // windows. Latency of 4096 samples is reported to Reaper via PDC.
 // The correction curve is normalized to zero mean dB so it only changes
 // spectral shape, never overall level; use Compensation Gain as output trim.
+//
+// Install: copy or symlink this file into REAPER's Effects folder
+// (Linux: ~/.config/REAPER/Effects/), keeping the gui_kit folder and the
+// .help.txt file next to it.
 
-slider1:amount=100<0,100,1>Amount (%)
-slider2:nbands_sl=24<8,64,1>EQ Bands
-slider3:speed=1<0.1,10,0.01:log>Speed (s)
-slider4:comp_db=0<-24,24,0.1>Compensation Gain (dB)
-slider5:tilt=0<-6,6,0.1>Target Tilt (dB/oct)
-slider6:tiltfc=1000<100,8000,1:log>Tilt Center (Hz)
-slider7:minf=30<20,1000,1:log>Min Frequency (Hz)
-slider8:maxf=20000<1000,22000,10:log>Max Frequency (Hz)
-slider9:agc_on=0<0,1,1{Off,On}>Auto Gain Compensation
-slider10:sc_mode=0<0,3,1{No side chain,Only side chain,Combined,Reference}>Side Chain
-slider11:sc_gain_db=0<-60,24,0.1>Side Chain Gain (dB)
-slider12:sc_amount=100<0,100,1>Side Chain Amount (%)
-slider13:eq_dir=0<0,1,1{Counteract (balance),Mimic (invert)}>EQ Direction
-slider14:sc_speed=1<0.1,10,0.01:log>Side Chain Speed (s)
+// Shared memory, namespaced to this vendor so it cannot collide with other
+// plugins' gmem. Slot map (shared by EVERY Magnolius plugin - keep in step):
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
+
+// Every slider name carries a leading '-' so REAPER's generic control panel
+// stays hidden behind the custom GUI while the parameter stays automatable.
+slider1:amount=100<0,100,1>-Amount (%)
+slider2:nbands_sl=24<8,64,1>-EQ Bands
+slider3:speed=1<0.1,10,0.01:log>-Speed (s)
+slider4:comp_db=0<-24,24,0.1>-Compensation Gain (dB)
+slider5:tilt=0<-6,6,0.1>-Target Tilt (dB/oct)
+slider6:tiltfc=1000<100,8000,1:log>-Tilt Center (Hz)
+slider7:minf=30<20,1000,1:log>-Min Frequency (Hz)
+slider8:maxf=20000<1000,22000,10:log>-Max Frequency (Hz)
+slider9:agc_on=0<0,1,1{Off,On}>-Auto Gain Compensation
+slider10:sc_mode=0<0,3,1{No side chain,Only side chain,Combined,Reference}>-Side Chain
+slider11:sc_gain_db=0<-60,24,0.1>-Side Chain Gain (dB)
+slider12:sc_amount=100<0,100,1>-Side Chain Amount (%)
+slider13:eq_dir=0<0,1,1{Counteract (balance),Mimic (invert)}>-EQ Direction
+slider14:sc_speed=1<0.1,10,0.01:log>-Side Chain Speed (s)
 
 in_pin:left input
 in_pin:right input
@@ -47,6 +72,29 @@ in_pin:sidechain left
 in_pin:sidechain right
 out_pin:left output
 out_pin:right output
+
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 knob, Match      1/2 knob, Target (2 = bipolar, Tilt)
+//   3 knob, Side Chain 4   knob, Output (bipolar, Compensation Gain)
+//   13 is the help text and must stay last, after every image.
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/knob_orange_bipolar_grid.png
+filename:3,gui_kit/knob_yellow_grid.png
+filename:4,gui_kit/knob_yellow_bipolar_grid.png
+filename:5,gui_kit/toggle_yellow.png
+filename:6,gui_kit/value_field.png
+filename:7,gui_kit/header_bar.png
+filename:8,gui_kit/panel_tile.png
+filename:9,gui_kit/dropdown.png
+filename:10,gui_kit/button_cyan.png
+filename:11,gui_kit/wave_frame_9slice.png
+filename:12,gui_kit/logo_magnolius_grey.png
+filename:13,Magnolius_MatchEQ.help.txt
 
 @init
 FFTSIZE = 4096;
@@ -83,6 +131,10 @@ scbufL  = binfade + (HALF+1);      // FFTSIZE side-chain L ring (parallel to inb
 scbufR  = scbufL  + FFTSIZE;       // FFTSIZE side-chain R ring
 bandE_sc= scbufR  + FFTSIZE;       // MAXBANDS smoothed SC band power (Reference mode)
 bandDB_sc=bandE_sc+ MAXBANDS;      // MAXBANDS SC reference dB per band
+gfxD_sc = bandDB_sc+ MAXBANDS;      // MAXBANDS display scratch, SC reference
+bands_shadow=gfxD_sc+MAXBANDS;      // 1 slot: unrounded EQ Bands knob position
+plot_y  = bands_shadow+1;          // 640: one plotted polyline, device px y
+                                   // (PLW/PLOT_STEP+1 = 589 at the design size)
 
 // periodic sqrt-Hann window
 i = 0;
@@ -181,8 +233,12 @@ agc = 1; agc_t = 1; in_e = 0; out_e = 0;
 pdc_delay = FFTSIZE;
 pdc_bot_ch = 0; pdc_top_ch = 2;
 
-@slider
-nbands = max(8, min(MAXBANDS, nbands_sl|0));
+// Every derived DSP value lives here, so behaviour does not depend on REAPER
+// re-running @slider after the GUI calls slider_automate. The names stay
+// global (no local() list) so @sample and @gfx read exactly what they did
+// when this was the body of @slider.
+function update_params()
+(nbands = max(8, min(MAXBANDS, floor(nbands_sl + 0.5)));
 alpha = 1 - exp(-HOP/(srate*speed));
 alpha_sc = 1 - exp(-HOP/(srate*sc_speed));
 amt = amount*0.01;
@@ -239,6 +295,196 @@ loop(nbands,
   bandTL[b] = tilt*log(bandFC[b]/tiltfc)/log(2);
   b += 1;
 );
+);
+
+// ==================================================================== GUI ===
+gk_init();
+gk_img_field = 6; gk_img_header = 7; gk_img_panel = 8;
+gk_img_dropdown = 9; gk_img_button = 10; gk_img_wave_frame = 11;
+
+// REAPER refuses to load an image taller than somewhere between 6144 and 7680
+// px and returns a zero-size image rather than an error, so the knob strips
+// are packed as grids: 64 frames in 8 columns (1024 x 1024). The _grid suffix
+// in the filenames keeps a cached failed load of an earlier oversized file at
+// the same path from being reused.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+IMG_MATCH  = 0;   // cyan
+IMG_TARGET = 1;   // orange
+IMG_TILT   = 2;   // orange, bipolar
+IMG_SC     = 3;   // yellow
+IMG_COMP   = 4;   // yellow, bipolar
+IMG_TOGGLE = 5;
+IMG_LOGO   = 12;
+NIMAGES    = 13;  // slots 0..12; slot 13 is the help text, not an image
+
+// Counts image slots REAPER would not load. It reports a zero-size image and
+// no error, and every filmstrip widget then falls back to vector drawing, so
+// without this a failed load is completely silent and passes for working art.
+// By far the most likely cause is a bad path - and note that a filename: line
+// takes the whole rest of the line, so a trailing comment silently breaks it.
+function count_missing_images(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// ---- help viewer ----
+// The panel is drawn by the widget library; the plugin only owns the state.
+HELP_FILE = 13;
+HELP_BASE = 300;          // first string slot used for help text
+HELP_MAX  = 600;          // most lines kept
+help_open = 0; help_lines = 0;
+
+// ---- interface scale ----
+// The layout is authored at UI_W x UI_H logical px and every coordinate runs
+// through gk_S, so scaling the whole interface - drawing, blits, hit-testing
+// and drag deltas alike - is a matter of setting gk_S. A JSFX cannot resize
+// its own window (@gfx W H is a compile-time literal), so this scales the
+// content inside whatever window REAPER gives us: "Fit" tracks the window, a
+// fixed percentage does not and will clip if it exceeds the window.
+// Equivalent window sizes: 100% 790x548, 125% 988x685, 150% 1185x822.
+UI_W = 790; UI_H = 548;
+LOGO_ASPECT = 512/101;    // magnolius-grey-512.png
+GM_UI_SCALE = 0;          // gmem slot holding the shared scale
+
+// The scale is global: every instance reads it from gmem each frame, so
+// changing it in one window changes all open windows and any instance added
+// later in this session. Each instance also serialises its own copy, which
+// seeds the global when the first one loads in a fresh REAPER session.
+// gmem is session-scoped: REAPER frees it once the last instance is removed,
+// and a JSFX cannot write a settings file, so the scale cannot be persisted
+// from in here. A permanent size belongs in the @gfx line instead.
+// 100%, not Fit: @gfx 790 548 already asks for exactly the design size, so
+// 100% is pixel-exact on a fresh window and the artwork is blitted 1:1. Fit
+// stays in the menu because REAPER remembers FX window sizes per project - if
+// the window comes back smaller than the design size, 100% clips and Fit is
+// the way to see all of it again, at the cost of a fractional gk_S.
+// NOTE: the scale lives in gmem, which is shared by EVERY plugin using
+// options:gmem=Magnolius, so whichever Magnolius plugin opens first in a
+// session seeds it. A sibling plugin still defaulting to Fit will win that
+// race; keep UI_SCALE_DEFAULT in step across the vendor.
+UI_SCALE_DEFAULT = 1;
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- analyser geometry (logical px) ----
+GX = 10; GY = 40; GW = 630; GH = 220;    // outer frame
+PLX = GX + 32; PLW = GW - 42;            // plot area: left gutter for dB labels
+PLY = GY + 12; PLH = GH - 34;            //            bottom band for Hz labels
+DBR = 24;                                // display range, +/- dB
+PLOT_STEP = 1;                           // logical px between plot samples
+
+// The vector fallbacks draw in the current accent, and the accent persists
+// between frames, so each section sets it before drawing.
+function accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+
+// ---- knob bindings the stock widgets do not cover ----
+// Speed, Tilt Center, Min/Max Frequency and Side Chain Speed are log sliders.
+// gk_knob is linear, so driving it with the log of the value gives the knob an
+// even feel across the range instead of cramming 0.1-1 s into the first tenth
+// of the travel. The value fields stay linear: typing is the precise path, and
+// a linear scrub there is a useful second gear.
+function knob_log_slider(id, img, x, y, size, sidx, vmin, vmax, vdef) local(v)
+(
+  v = gk_clamp(exp(gk_knob(id, img, x, y, size, log(slider(sidx)),
+                           log(vmin), log(vmax), log(vdef))), vmin, vmax);
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// EQ Bands steps by 1. Rounding the knob's value every frame would throw away
+// any mouse movement smaller than half a band, so slow drags would stall; the
+// unrounded position lives in shadow[0] and only the rounded value is written.
+function knob_int_slider(id, img, x, y, size, sidx, vmin, vmax, vdef, shadow)
+  local(v)
+(
+  floor(shadow[0] + 0.5) != slider(sidx) ? shadow[0] = slider(sidx);  // changed elsewhere
+  shadow[0] = gk_knob(id, img, x, y, size, shadow[0], vmin, vmax, vdef);
+  v = floor(shadow[0] + 0.5);
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+function dropdown_slider(id, x, y, w, h, sidx, menu, label) local(i)
+(
+  i = gk_dropdown(id, x, y, w, h, slider(sidx), menu, label);
+  i != slider(sidx) ? ( slider(sidx) = i; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// ---- analyser plotting helpers (device px) ----
+function gx_f(f)  ( (PLX + PLW*log(f/g_flo)/g_lgr)*gk_S; );
+function gy_db(v) ( (PLY + PLH*(0.5 - gk_clamp(v, -DBR, DBR)/(2*DBR)))*gk_S; );
+
+// Plain 1 px anti-aliased polyline. gfx_line has no width parameter and
+// stroking wider - parallel offset passes, or a filled quad per segment - was
+// tried and looked heavy against this artwork, so the curves stay hairline.
+function stroke_poly(buf, n, x0, dx)
+  local(i)
+(
+  gfx_x = x0; gfx_y = buf[0];
+  i = 1;
+  while (i < n) ( gfx_lineto(x0 + i*dx, buf[i], 1); i += 1; );
+);
+
+// Catmull-Rom through the band centres. Straight segments between them show as
+// visible corners - at 24 bands a band is ~25 px wide at the top of the plot -
+// which reads as the analyser being crude rather than the band count being low.
+// It can overshoot slightly between distant values; gy_db clamps to +/-DBR.
+function band_val(buf, t) local(i, fr, p0, p1, p2, p3)
+(
+  i = min(floor(t), nbands - 2); fr = t - i;
+  p1 = buf[i];                 p2 = buf[i + 1];
+  p0 = buf[max(i - 1, 0)];     p3 = buf[min(i + 2, nbands - 1)];
+  0.5*(2*p1 + (p2 - p0)*fr
+       + (2*p0 - 5*p1 + 4*p2 - p3)*fr*fr
+       + (3*p1 - 3*p2 + p3 - p0)*fr*fr*fr);
+);
+
+// The three fill_* functions sample one curve into plot_y and return the point
+// count, so stroke_poly can do the drawing for all of them.
+function fill_band_curve(buf) local(i, px, f, t)
+(
+  i = 0; px = 0;
+  while (px <= PLW) (
+    f = g_flo*exp(g_lgr*px/PLW);
+    t = gk_clamp(nbands*log(f/fminp)/logr - 0.5, 0, nbands - 1);
+    plot_y[i] = gy_db(band_val(buf, t));
+    i += 1; px += PLOT_STEP;
+  );
+  i;
+);
+
+function fill_corr_curve() local(i, px, f, kk, k0, fr, gn)
+(
+  i = 0; px = 0;
+  while (px <= PLW) (
+    f = g_flo*exp(g_lgr*px/PLW);
+    kk = f*FFTSIZE/srate;
+    k0 = min(floor(kk), HALF - 1); fr = kk - k0;
+    gn = bingain[k0]*(1 - fr) + bingain[k0 + 1]*fr;
+    plot_y[i] = gy_db(20*log10(max(gn, 0.000001)));
+    i += 1; px += PLOT_STEP;
+  );
+  i;
+);
+
+function fill_tilt_curve() local(i, px, f)
+(
+  i = 0; px = 0;
+  while (px <= PLW) (
+    f = g_flo*exp(g_lgr*px/PLW);
+    plot_y[i] = gy_db(tilt*log(f/tiltfc)/log(2));
+    i += 1; px += PLOT_STEP;
+  );
+  i;
+);
+
+function stroke_cur(n) ( stroke_poly(plot_y, n, PLX*gk_S, PLOT_STEP*gk_S); );
+
+bands_shadow[0] = nbands_sl;   // seed the EQ Bands knob shadow
+
+@slider
+update_params();
 
 @sample
 alnL = inbufL[pos];   // input from exactly FFTSIZE samples ago: aligns with output
@@ -365,141 +611,255 @@ hopcount >= HOP ? (
   );
 );
 
-@gfx 720 400
-gfx_clear = 18 + 20*256 + 24*65536;
+@gfx 790 548
+gk_begin();
+g_chg = 0;
 
-LM = 46; RM = 14; TM = 14; BM = 30;
-gw = gfx_w-LM-RM; gh = gfx_h-TM-BM;
-flo = 20; fhi = min(20000, srate*0.5);
-lgr = log(fhi/flo);
-DBR = 24;   // display range +/- dB
+// Take the scale from the shared global, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
 
-gfx_setfont(1, "Arial", 13);
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). Fixed percentages are taken
+// relative to that, so 100% stays pixel-exact on a HiDPI display; Fit divides
+// the physical window by the design size, which already includes it.
+g_ret = gk_S;
+g_scl = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_scl > 0 ? g_ret * g_scl : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(1);
+
+gk_header(0, 10, 10, 770, 22, "MATCH EQ", -1, 0);
+
+// Scale selector and help button, far right of the header. Their x is pinned
+// to the right edge of what is actually on screen, so a scale too large for
+// the window can never push these controls out of reach.
+g_r  = min(UI_W - 20, gfx_w/gk_S - 10);
+g_sx = g_r - 86;
+g_i = gk_dropdown(40, g_sx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
+);
+
+// Freeze the controls underneath while the help is open, keeping the two
+// header controls live so the help can be closed again.
+help_open ? gk_help_input(40, 41);
+
+// ================================================================ analyser ==
+// Every variable below is g_-prefixed. @gfx runs on the UI thread while
+// @sample runs on the audio thread, so a bare name like t, b0, fr or g here
+// would be the same global the hop processing is using, and the two would
+// corrupt each other.
+gk_nine(gk_img_wave_frame, 16, 8, GX, GY, GW, GH);
+
+g_flo = 20; g_fhi = min(20000, srate*0.5);
+g_lgr = log(g_fhi/g_flo);
 
 // ---- grid: frequency lines ----
-dec = 10;
-while (dec < fhi) (
-  m = 1;
-  while (m < 10) (
-    f = m*dec;
-    (f >= flo && f <= fhi) ? (
-      x = LM + gw*log(f/flo)/lgr;
-      major = (m == 1 || m == 2 || m == 5);
-      gfx_r = gfx_g = gfx_b = major ? 0.28 : 0.17; gfx_a = 1;
-      gfx_line(x, TM, x, TM+gh);
-      major ? (
-        gfx_r = gfx_g = gfx_b = 0.55;
-        f >= 1000 ? sprintf(#fl, "%dk", f/1000) : sprintf(#fl, "%d", f);
-        gfx_measurestr(#fl, tw, th);
-        gfx_x = x-tw*0.5; gfx_y = TM+gh+4;
-        gfx_drawstr(#fl);
+g_dec = 10;
+while (g_dec < g_fhi) (
+  g_m = 1;
+  while (g_m < 10) (
+    g_f = g_m*g_dec;
+    (g_f >= g_flo && g_f <= g_fhi) ? (
+      g_x = gx_f(g_f);
+      g_maj = (g_m == 1 || g_m == 2 || g_m == 5);
+      gfx_set(g_maj ? 0.28 : 0.17, g_maj ? 0.29 : 0.176, g_maj ? 0.30 : 0.188, 1);
+      gfx_line(g_x, PLY*gk_S, g_x, (PLY + PLH)*gk_S);
+      g_maj ? (
+        g_f >= 1000 ? sprintf(#s, "%dk", g_f/1000) : sprintf(#s, "%d", g_f);
+        gk_text_c(g_x/gk_S, PLY + PLH + 4, #s, 1);
       );
     );
-    m += 1;
+    g_m += 1;
   );
-  dec *= 10;
+  g_dec *= 10;
 );
 
 // ---- grid: dB lines ----
-db = -DBR;
-while (db <= DBR) (
-  y = TM + gh*(0.5 - db/(2*DBR));
-  gfx_r = gfx_g = gfx_b = db == 0 ? 0.38 : 0.20; gfx_a = 1;
-  gfx_line(LM, y, LM+gw, y);
-  gfx_r = gfx_g = gfx_b = 0.55;
-  sprintf(#dl, "%+d", db);
-  gfx_measurestr(#dl, tw, th);
-  gfx_x = LM-tw-5; gfx_y = y-th*0.5;
-  gfx_drawstr(#dl);
-  db += 6;
+g_db = -DBR;
+while (g_db <= DBR) (
+  g_y = gy_db(g_db);
+  gfx_set(g_db == 0 ? 0.38 : 0.20, g_db == 0 ? 0.39 : 0.208, g_db == 0 ? 0.40 : 0.22, 1);
+  gfx_line(PLX*gk_S, g_y, (PLX + PLW)*gk_S, g_y);
+  sprintf(#s, "%+d", g_db);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_measurestr(#s, g_tw, g_th);
+  gfx_x = PLX*gk_S - g_tw - 5*gk_S; gfx_y = g_y - g_th*0.5;
+  gfx_drawstr(#s);
+  g_db += 6;
 );
 
 // ---- processing range markers ----
-gfx_r = 0.8; gfx_g = 0.42; gfx_b = 0.42; gfx_a = 0.9;
-(fminp >= flo && fminp <= fhi) ? (
-  x = LM + gw*log(fminp/flo)/lgr;
-  gfx_line(x, TM, x, TM+gh);
+gfx_set(0.8, 0.42, 0.42, 0.9);
+(fminp >= g_flo && fminp <= g_fhi) ? (
+  g_x = gx_f(fminp); gfx_line(g_x, PLY*gk_S, g_x, (PLY + PLH)*gk_S);
 );
-(fmaxp >= flo && fmaxp <= fhi) ? (
-  x = LM + gw*log(fmaxp/flo)/lgr;
-  gfx_line(x, TM, x, TM+gh);
+(fmaxp >= g_flo && fmaxp <= g_fhi) ? (
+  g_x = gx_f(fmaxp); gfx_line(g_x, PLY*gk_S, g_x, (PLY + PLH)*gk_S);
 );
 
-// ---- target reference: pink + tilt (display is pink-compensated, so the
-//      pure pink target is 0 dB and the tilt pivots at tiltfc) ----
-gfx_r = 0.55; gfx_g = 0.5; gfx_b = 0.5; gfx_a = 0.9;
-x = 0;
-while (x <= gw) (
-  f = flo*exp(lgr*x/gw);
-  v = tilt*log(f/tiltfc)/log(2);
-  y = TM + gh*(0.5 - max(-DBR, min(DBR, v))/(2*DBR));
-  x == 0 ? ( gfx_x = LM; gfx_y = y; ) : gfx_lineto(LM+x, y);
-  x += 2;
-);
+// ---- target line: pink + tilt. The plot is pink-compensated, so pure pink
+//      is the 0 dB line and this shows only the tilt, pivoting at tiltfc. ----
+gfx_set(0.55, 0.5, 0.5, 0.9);
+stroke_cur(fill_tilt_curve());
+
+g_showref = (sc_mode == 3 && have_ref);
 
 have_data ? (
-  // deviation of measured spectrum from the target (pink, or SC ref), centered at 0
-  usesc_disp = (sc_mode == 3 && have_ref);
-  ref = 0; b = 0;
-  loop(nbands, ref += bandDB[b] - (usesc_disp ? bandDB_sc[b] : bandTDB[b]); b += 1;);
-  ref /= nbands;
-  b = 0;
-  loop(nbands, gfxD[b] = bandDB[b] - (usesc_disp ? bandDB_sc[b] : bandTDB[b]) - ref; b += 1;);
+  // Both spectra are plotted against pink and centred on their own mean, so
+  // the vertical gap between them is exactly the correction the matcher is
+  // computing, before Tilt and Amount: the difference of the two means is the
+  // zero-mean offset the DSP subtracts.
+  g_ref = 0; g_b = 0;
+  loop(nbands, g_ref += bandDB[g_b] - bandTDB[g_b]; g_b += 1;);
+  g_ref /= nbands;
+  g_b = 0;
+  loop(nbands, gfxD[g_b] = bandDB[g_b] - bandTDB[g_b] - g_ref; g_b += 1;);
 
-  // input spectrum (relative to pink)
-  gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.95; gfx_a = 1;
-  x = 0;
-  while (x <= gw) (
-    f = flo*exp(lgr*x/gw);
-    t = nbands*log(f/fminp)/logr - 0.5;
-    t = max(0, min(nbands-1, t));
-    b0 = min(floor(t), nbands-2); fr = t-b0;
-    v = gfxD[b0]*(1-fr) + gfxD[b0+1]*fr;
-    y = TM + gh*(0.5 - max(-DBR, min(DBR, v))/(2*DBR));
-    x == 0 ? ( gfx_x = LM; gfx_y = y; ) : gfx_lineto(LM+x, y);
-    x += 2;
+  g_showref ? (
+    g_ref = 0; g_b = 0;
+    loop(nbands, g_ref += bandDB_sc[g_b] - bandTDB[g_b]; g_b += 1;);
+    g_ref /= nbands;
+    g_b = 0;
+    loop(nbands, gfxD_sc[g_b] = bandDB_sc[g_b] - bandTDB[g_b] - g_ref; g_b += 1;);
+    gfx_set(0.941, 0.784, 0.235, 0.85);      // yellow: what we are matching TO
+    stroke_cur(fill_band_curve(gfxD_sc));
   );
+
+  gfx_set(0.149, 0.784, 0.902, 1);           // cyan: the measured input
+  stroke_cur(fill_band_curve(gfxD));
 );
 
-// ---- applied correction curve (from the smoothed per-bin gains) ----
-gfx_r = 0.98; gfx_g = 0.62; gfx_b = 0.2; gfx_a = 1;
-x = 0;
-while (x <= gw) (
-  f = flo*exp(lgr*x/gw);
-  kk = f*FFTSIZE/srate;
-  k0 = min(floor(kk), HALF-1); fr = kk-k0;
-  g = bingain[k0]*(1-fr) + bingain[k0+1]*fr;
-  v = 20*log10(max(g, 0.000001));
-  y = TM + gh*(0.5 - max(-DBR, min(DBR, v))/(2*DBR));
-  x == 0 ? ( gfx_x = LM; gfx_y = y; ) : gfx_lineto(LM+x, y);
-  x += 2;
+// ---- applied correction, read back from the smoothed per-bin gains ----
+gfx_set(0.941, 0.588, 0.157, 1);             // orange
+stroke_cur(fill_corr_curve());
+
+// ---- legend ----
+gfx_set(0.149, 0.784, 0.902, 1);
+gfx_x = (PLX + 6)*gk_S; gfx_y = (PLY + 4)*gk_S; gfx_drawstr("input");
+g_showref ? (
+  gfx_set(0.941, 0.784, 0.235, 1);
+  gfx_x = (PLX + 50)*gk_S; gfx_y = (PLY + 4)*gk_S; gfx_drawstr("SC reference");
+);
+gfx_set(0.941, 0.588, 0.157, 1);
+gfx_x = (PLX + (g_showref ? 140 : 50))*gk_S; gfx_y = (PLY + 4)*gk_S;
+gfx_drawstr("correction");
+
+!have_data ? gk_text_c(PLX + PLW*0.5, PLY + PLH*0.5 - 6, "waiting for signal...", 1);
+
+// ================================================================== output ==
+gk_panel(650, 40, 130, 220);
+gk_header(0, 650, 40, 130, 22, "OUTPUT", -1, 0);
+accent(0.941, 0.784, 0.235);   // yellow
+
+g_chg |= gk_knob_slider(20, IMG_COMP, 683, 72, 64, 4, -24, 24, 0);
+gk_text_c(715, 140, "Comp Gain", 0);
+sprintf(#s, "%+.1f dB", comp_db);
+g_chg |= gk_field_edit_slider(60, 685, 154, 60, 16, 4, -24, 24, 0, #s);
+
+gk_text_c(715, 180, "Auto Gain", 0);
+g_chg |= gk_toggle_slider(30, IMG_TOGGLE, 701, 194, 28, 16, 9);
+agc_on ? sprintf(#s, "AGC  %+.1f dB", 20*log10(agc)) : sprintf(#s, "AGC  off");
+gk_field(660, 218, 110, 16, #s);
+
+// =================================================================== match ==
+gk_panel(10, 270, 250, 242);
+gk_header(0, 10, 270, 250, 22, "MATCH", -1, 0);
+accent(0.149, 0.784, 0.902);   // cyan
+
+g_chg |= gk_knob_slider(10, IMG_MATCH,  27, 300, 64, 1, 0, 100, 100);
+g_chg |= knob_int_slider(11, IMG_MATCH, 103, 300, 64, 2, 8, 64, 24, bands_shadow);
+g_chg |= knob_log_slider(12, IMG_MATCH, 179, 300, 64, 3, 0.1, 10, 1);
+gk_text_c( 59, 366, "Amount", 0);
+gk_text_c(135, 366, "Bands", 0);
+gk_text_c(211, 366, "Speed", 0);
+sprintf(#s, "%.0f %%", amount);
+g_chg |= gk_field_edit_slider(50,  29, 380, 60, 16, 1, 0, 100, 100, #s);
+sprintf(#s, "%d", nbands);
+g_chg |= gk_field_edit_slider(51, 105, 380, 60, 16, 2, 8, 64, 24, #s);
+sprintf(#s, "%.2f s", speed);
+g_chg |= gk_field_edit_slider(52, 181, 380, 60, 16, 3, 0.1, 10, 1, #s);
+
+gk_text_c(135, 432, "EQ Direction", 1);
+g_chg |= dropdown_slider(31, 45, 452, 180, 20, 13,
+         "Counteract (balance)|Mimic (invert)",
+         eq_dir ? "Mimic (invert)" : "Counteract (balance)");
+
+// ================================================================== target ==
+gk_panel(270, 270, 250, 242);
+gk_header(0, 270, 270, 250, 22, "TARGET", -1, 0);
+accent(0.941, 0.588, 0.157);   // orange
+
+g_chg |= gk_knob_slider (13, IMG_TILT,   287, 300, 64, 5, -6, 6, 0);
+g_chg |= knob_log_slider(14, IMG_TARGET, 363, 300, 64, 6, 100, 8000, 1000);
+g_chg |= knob_log_slider(15, IMG_TARGET, 439, 300, 64, 7, 20, 1000, 30);
+gk_text_c(319, 366, "Tilt", 0);
+gk_text_c(395, 366, "Pivot", 0);
+gk_text_c(471, 366, "Min Freq", 0);
+sprintf(#s, "%+.1f dB/oct", tilt);
+g_chg |= gk_field_edit_slider(53, 289, 380, 60, 16, 5, -6, 6, 0, #s);
+sprintf(#s, "%.0f Hz", tiltfc);
+g_chg |= gk_field_edit_slider(54, 365, 380, 60, 16, 6, 100, 8000, 1000, #s);
+sprintf(#s, "%.0f Hz", minf);
+g_chg |= gk_field_edit_slider(55, 441, 380, 60, 16, 7, 20, 1000, 30, #s);
+
+g_chg |= knob_log_slider(16, IMG_TARGET, 363, 404, 64, 8, 1000, 22000, 20000);
+gk_text_c(395, 470, "Max Freq", 0);
+maxf >= 1000 ? sprintf(#s, "%.1f kHz", maxf*0.001) : sprintf(#s, "%.0f Hz", maxf);
+g_chg |= gk_field_edit_slider(56, 365, 484, 60, 16, 8, 1000, 22000, 20000, #s);
+
+// ============================================================== side chain ==
+gk_panel(530, 270, 250, 242);
+gk_header(0, 530, 270, 250, 22, "SIDE CHAIN", -1, 0);
+accent(0.941, 0.784, 0.235);   // yellow
+
+g_chg |= gk_knob_slider (17, IMG_SC, 547, 300, 64, 11, -60, 24, 0);
+g_chg |= gk_knob_slider (18, IMG_SC, 623, 300, 64, 12, 0, 100, 100);
+g_chg |= knob_log_slider(19, IMG_SC, 699, 300, 64, 14, 0.1, 10, 1);
+// A control that the current mode ignores gets a dimmed label: Amount feeds
+// only the analysis mix (Only SC / Combined), and Speed times only the
+// side-chain average (Only SC / Reference).
+gk_text_c(579, 366, "SC Gain",   sc_mode == 0);
+gk_text_c(655, 366, "SC Amount", sc_mode != 1 && sc_mode != 2);
+gk_text_c(731, 366, "SC Speed",  sc_mode != 1 && sc_mode != 3);
+sprintf(#s, "%+.1f dB", sc_gain_db);
+g_chg |= gk_field_edit_slider(57, 549, 380, 60, 16, 11, -60, 24, 0, #s);
+sprintf(#s, "%.0f %%", sc_amount);
+g_chg |= gk_field_edit_slider(58, 625, 380, 60, 16, 12, 0, 100, 100, #s);
+sprintf(#s, "%.2f s", sc_speed);
+g_chg |= gk_field_edit_slider(59, 701, 380, 60, 16, 14, 0.1, 10, 1, #s);
+
+gk_text_c(655, 432, "Side Chain Mode", 1);
+g_chg |= dropdown_slider(32, 565, 452, 180, 20, 10,
+         "No side chain|Only side chain|Combined|Reference",
+         sc_mode == 0 ? "No side chain" : sc_mode == 1 ? "Only side chain" :
+         sc_mode == 2 ? "Combined" : "Reference");
+
+// ==================================================================== help ==
+help_open ? gk_help_draw(10, 40, 770, 472, "Help  -  Match EQ", HELP_BASE, help_lines);
+
+// Wordmark, bottom right, its right edge on the same 10 px margin as the
+// panels. LOGO_ASPECT is the source's width/height; a 1-frame strip is just a
+// scaled blit that respects gk_S.
+gk_strip(IMG_LOGO, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = count_missing_images(NIMAGES);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 330*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
 );
 
-// ---- legend + readout ----
-gfx_r = 0.35; gfx_g = 0.65; gfx_b = 0.95;
-gfx_x = LM+gw-190; gfx_y = TM+6;
-gfx_drawstr((sc_mode == 3 && have_ref) ? "input vs SC ref" : "input vs pink");
-gfx_r = 0.98; gfx_g = 0.62; gfx_b = 0.2;
-gfx_x = LM+gw-90; gfx_y = TM+6; gfx_drawstr("correction");
+g_chg ? update_params();
+gk_end();
 
-gfx_r = gfx_g = gfx_b = 0.75;
-sprintf(#rd, "Amount %d%%   Bands %d   Speed %.2f s   Tilt %+.1f dB/oct @ %d Hz   Comp %+.1f dB",
-        amount, nbands, speed, tilt, tiltfc, comp_db);
-agc_on ? (
-  sprintf(#agcs, "   AGC %+.1f dB", 20*log10(agc));
-  strcat(#rd, #agcs);
-);
-sc_mode > 0 ? (
-  sc_mode == 1 ? (#scm = "Only SC";) : sc_mode == 2 ? (#scm = "Combined";) : (#scm = "Reference";);
-  sprintf(#scs, "   SC[%s] %+.1f dB %d%% %.2f s", #scm, sc_gain_db, sc_amount, sc_speed);
-  strcat(#rd, #scs);
-);
-strcat(#rd, eq_dir ? "   Mimic" : "   Counteract");
-gfx_x = LM; gfx_y = TM+6;
-gfx_drawstr(#rd);
-
-!have_data ? (
-  gfx_r = gfx_g = gfx_b = 0.6;
-  gfx_x = LM + gw*0.5 - 60; gfx_y = TM + gh*0.5 - 20;
-  gfx_drawstr("waiting for signal...");
-);
+@serialize
+// GUI-only state, so it is serialised rather than made a slider
+file_var(0, gui_scale_idx);

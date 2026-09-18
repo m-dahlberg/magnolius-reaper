@@ -10,10 +10,18 @@ input, or match the main input to the side chain's own spectrum instead of pink.
 
 ## Install
 
-Copy (or symlink) `Magnolius_MatchEQ.jsfx` into your Reaper Effects folder:
+Copy (or symlink) `Magnolius_MatchEQ.jsfx` into your Reaper Effects folder,
+**together with `gui_kit/` and `Magnolius_MatchEQ.help.txt`** — the plugin reads
+all three at runtime, relative to the `.jsfx` as Reaper sees it. If you symlink
+the plugin, symlink the other two into the same folder as well, or the GUI will
+fall back to plain vector drawing and report `images failed to load: n` across
+the header.
 
 ```sh
-ln -s "$(pwd)/Magnolius_MatchEQ.jsfx" ~/.config/REAPER/Effects/Magnolius_MatchEQ.jsfx
+DEST=~/.config/REAPER/Effects
+ln -s "$(pwd)/Magnolius_MatchEQ.jsfx"      "$DEST/Magnolius_MatchEQ.jsfx"
+ln -s "$(pwd)/Magnolius_MatchEQ.help.txt"  "$DEST/Magnolius_MatchEQ.help.txt"
+ln -s "$(pwd)/gui_kit"                     "$DEST/gui_kit"
 ```
 
 Then in Reaper: FX browser → refresh (F5) → search for "PinkMatch EQ"
@@ -47,12 +55,46 @@ Then in Reaper: FX browser → refresh (F5) → search for "PinkMatch EQ"
 | Combined | Main input + Side chain × Amount | Pink noise (+ tilt) |
 | Reference | Main input | **Side-chain spectrum** (+ tilt) — the main input is pulled toward the side chain's own tonal balance instead of pink. Falls back to pink until a side-chain signal is present. |
 
-## Display
+## Interface
 
-- **Blue** — input spectrum relative to the target (pink noise, or the side-chain reference in *Reference* mode; a matching input shows as a flat line at 0 dB).
-- **Gray line** — the target: flat at 0 dB for pure pink, tilted when Target Tilt is set (crossing 0 dB at the Tilt Center).
+The analyser fills the top of the window; the controls sit below it in Match /
+Target / Side Chain panels with an Output column beside the graph.
+
+Every knob has a number box under it: click it to type a value, or drag it to
+scrub. On a knob, drag vertically, hold Shift for fine adjustment, use the
+wheel, or Ctrl-click to reset to the default. Speed, Tilt Center, Min/Max
+Frequency and Side Chain Speed scrub logarithmically on their knobs and
+linearly in their number boxes.
+
+A side-chain label is dimmed when the current mode ignores that control. The
+**?** button opens the built-in guide.
+
+The scale selector at the top right sizes the whole interface and is shared by
+every open instance — it lives in `gmem`, so keep `UI_SCALE_DEFAULT` in step
+across the Magnolius plugins or whichever one opens first in a session wins.
+It defaults to 100%, which is pixel-exact against the `@gfx 790 548` window.
+*Fit* is still there for the case where Reaper restores a smaller FX window,
+but it scales by a fractional factor and softens the artwork.
+
+### Display
+
+Everything is plotted against pink noise, so a source that already matches pink
+reads as a flat line at 0 dB.
+
+- **Cyan** — the measured input spectrum, relative to pink.
+- **Yellow** — in *Reference* mode only, the side-chain spectrum, also relative
+  to pink. This is what you are matching *to*, and the vertical gap between the
+  cyan and yellow traces is the correction being computed, before Target Tilt
+  and Amount are applied.
 - **Orange** — the correction curve currently being applied.
+- **Gray line** — the target: flat at 0 dB for pure pink, tilted when Target
+  Tilt is set (crossing 0 dB at the Tilt Center).
 - **Red vertical lines** — the Min/Max Frequency processing range.
+
+In previous versions the blue trace showed the input's deviation *from* the
+side-chain reference in *Reference* mode. Both spectra are now drawn in the
+same pink-relative space instead, so you can see the reference itself rather
+than only the error against it.
 
 ## Notes
 

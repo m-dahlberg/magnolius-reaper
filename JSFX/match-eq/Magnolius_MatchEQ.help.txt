@@ -1,0 +1,207 @@
+MATCH EQ - Magnolius
+
+A real-time spectral matcher. It measures the incoming audio's
+spectrum continuously and applies an EQ curve that pulls it toward a
+pink noise profile (power proportional to 1/f, i.e. -3 dB/octave).
+
+Pink noise is a reasonable first approximation of a balanced mix, so
+this is a way of seeing - and correcting - where a source departs
+from that reference without dialling bands by hand.
+
+An optional side-chain input (channels 3/4) lets a second signal
+drive the EQ profile: trigger the match from another track, blend it
+with the main input, or match the main input to the side chain's own
+spectrum instead of pink.
+
+
+SETTING IT UP
+
+Drop it on a track and it works on its own: the analyser starts
+measuring and the correction fades in over the Speed time. Start
+with Amount at 100% and Bands at 24, then back Amount off until the
+result sounds like the source rather than like the plugin.
+
+Latency is 4096 samples, reported to REAPER via PDC, so playback
+stays time-aligned. Live input monitoring through it will be
+audibly delayed.
+
+To use the side chain, send the reference or trigger signal to this
+track's channels 3/4 - on the sending track, Track Send with
+Audio channels 1/2 -> 3/4 - and set this FX's pin connector if it
+does not line up by itself. The side-chain channels are used for
+analysis only and are not passed to the output. Every side-chain
+mode other than "No side chain" needs that routing.
+
+
+THE DISPLAY
+
+Everything is plotted against pink noise, so a source that already
+matches pink reads as a flat line at 0 dB.
+
+  Cyan     the measured input spectrum, relative to pink.
+  Yellow   in Reference mode, the side-chain spectrum, also
+           relative to pink - this is what you are matching to.
+           The vertical gap between cyan and yellow is the
+           correction being computed, before Tilt and Amount.
+  Orange   the correction curve currently being applied.
+  Grey     the target line. Flat at 0 dB for pure pink; it tilts
+           when Target Tilt is set, crossing 0 dB at the Pivot.
+  Red      the two vertical Min/Max Frequency markers, the edges
+           of the processing range.
+
+"waiting for signal..." means the analysis is gated: the input is
+below -70 dBFS RMS and the measured spectrum is frozen rather than
+allowed to drift toward maximum boost during silence.
+
+
+MATCH
+
+  Amount     0-100%. How much of the computed correction is
+             applied. At 0% the plugin analyses but does not
+             change the sound, so it nulls against the dry signal
+             (offset by the 4096-sample latency).
+
+  Bands      8-64. Resolution of the correction curve, log-spaced
+             between Min and Max Frequency. Fewer bands gives a
+             broad tonal tilt; more bands matches in detail and
+             will start to follow the material's own resonances.
+
+  Speed      0.1-10 s. Averaging time of the spectrum analysis.
+             Short follows the material as it changes; long
+             corrects the long-term average tone and is the right
+             choice for mix or master duty.
+
+  EQ Direction
+             Counteract (balance) pulls the input toward the
+             target - the corrective, default behaviour. Mimic
+             (invert) flips the whole curve, pushing the input
+             away from the target and exaggerating whatever makes
+             it distinctive.
+
+
+TARGET
+
+  Tilt       -6 to +6 dB/oct. Tilts the target profile away from
+             plain pink. Positive is a brighter target.
+
+  Pivot      100-8000 Hz. The frequency the tilt turns about: the
+             target equals pure pink there, and the boost or cut
+             grows by the Tilt amount per octave away from it.
+
+  Min Freq   20-1000 Hz. Lower edge of analysis and processing.
+             Below it the correction fades to 0 dB over half an
+             octave.
+
+  Max Freq   1-22 kHz. Upper edge, with the same half-octave fade
+             above it. The EQ bands are laid out between Min and
+             Max, so moving these also changes what each band
+             covers.
+
+
+SIDE CHAIN
+
+  Side Chain Mode
+             No side chain    the main input drives the profile,
+                              target is pink (+ tilt).
+             Only side chain  the side chain drives the profile,
+                              target is pink (+ tilt).
+             Combined         main input + side chain drive it,
+                              target is pink (+ tilt).
+             Reference        the main input is pulled toward the
+                              side chain's own tonal balance
+                              instead of pink. Falls back to pink
+                              until a side-chain signal arrives.
+             The correction is always applied to the main input.
+
+  SC Gain    -60 to +24 dB. Applied to the side chain before it is
+             analysed.
+
+  SC Amount  0-100%. How much side chain is fed into the analysis
+             mix. Used in Only side chain and Combined; ignored in
+             Reference mode.
+
+  SC Speed   0.1-10 s. Averaging time of the side-chain analysis,
+             independent of Speed. Used in Only side chain and for
+             the reference spectrum in Reference mode; Combined
+             mode uses the main Speed.
+
+A label is dimmed when the current mode ignores that control.
+
+
+OUTPUT
+
+  Comp Gain  -24 to +24 dB. Plain output trim. The correction
+             curve is normalised to zero mean dB, so it only
+             changes spectral shape and never overall level; this
+             is where you put the level back.
+
+  Auto Gain  When on, continuously matches output loudness to the
+             latency-aligned input, independent of the correction
+             and the tilt. Makeup is clamped to +/-24 dB and held
+             during silence. Comp Gain still applies on top of it
+             as an offset. The readout below shows the makeup
+             currently being applied.
+
+
+USING THE CONTROLS
+
+Every knob has a number box under it. Click the box to type a
+value, or drag it to scrub; Enter commits, Esc cancels. On a knob:
+drag vertically, hold Shift for fine adjustment, use the wheel, and
+Ctrl-click to return it to its default.
+
+Speed, Pivot, Min Freq, Max Freq and SC Speed scrub logarithmically
+on their knobs and linearly in their number boxes.
+
+The scale selector in the top right sizes the whole interface and is
+shared by every open instance. It opens at 100%, where the artwork
+is drawn pixel for pixel and looks its sharpest.
+
+A JSFX cannot resize its own window, so a scale bigger than the
+window is clipped rather than fitted. REAPER remembers FX window
+sizes per project, so if this one comes back smaller than it should
+be, either drag it back out or switch to "Fit", which always tracks
+whatever size REAPER gives the window - at the cost of a fractional
+scale factor, which softens the artwork and the curves.
+
+
+WHEN SOMETHING LOOKS WRONG
+
+Correction stays at 0 dB
+  Amount is at 0%, or the input is below the -70 dBFS analysis
+  gate ("waiting for signal..."), or in Reference mode nothing has
+  arrived on the side chain yet.
+
+The curve is chasing the material
+  Speed is too short, or Bands is too high. Both make the matcher
+  follow individual notes instead of the overall tone.
+
+It sounds thin or boomy after matching
+  Check Tilt and Pivot, and remember the correction cannot change
+  level: if the balance is right but the level is not, that is
+  Comp Gain or Auto Gain.
+
+Nothing happens in a side-chain mode
+  The routing is missing. The reference has to arrive on channels
+  3/4 of this track.
+
+"images failed to load: n" across the header
+  The gui_kit folder is not next to the .jsfx file as REAPER sees
+  it. If the plugin is symlinked into the Effects folder, gui_kit
+  has to be reachable from there too.
+
+
+NOTES
+
+Engine: STFT overlap-add, FFT 4096, 75% overlap, sqrt-Hann analysis
+and synthesis windows.
+
+Per-band correction is clamped to +/-18 dB.
+
+Stereo is analysed as the sum of both channels and the same
+correction is applied to both, so the stereo image is preserved.
+
+Quick sanity checks: pink noise in gives a flat cyan curve and
+roughly no correction; white noise in settles to a -3 dB/octave
+correction; stopping playback freezes the curves rather than
+letting them drift.
