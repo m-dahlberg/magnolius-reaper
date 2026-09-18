@@ -1,8 +1,12 @@
 desc:Adaptive Compressor (Magnolius)
 // @description Adaptive Compressor (Magnolius)
 // @author Magnolius
-// @version 1.2
+// @version 1.3
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_AdaptiveCompressor.help.txt
 // @about
 //   Stereo compressor whose threshold follows the loudness of the incoming
 //   audio, so one setting gives the same amount of compression whether the
@@ -18,7 +22,14 @@ desc:Adaptive Compressor (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Restore the tags: header, so the FX browser can search these by category again
+//   Custom GUI, replacing the generic sliders:
+//   - scrolling waveform of the detector signal with the active threshold,
+//     its range rails and gain reduction drawn over it
+//   - controls grouped into Compressor / Adaptation / Output panels, each
+//     knob with an editable number box: click to type a value, or drag it
+//   - interface scale control, shared by every open instance
+//   - built-in user guide behind the ? button
+//   The DSP is unchanged, and every parameter still automates as before.
 
 //tags: dynamics compressor
 // Stereo compressor whose threshold follows the loudness of the incoming
@@ -38,42 +49,139 @@ desc:Adaptive Compressor (Magnolius)
 // gain slope (1-ratio)/ratio, and a decoupled release->attack gain smoother.
 //
 // Install: copy or symlink this file into REAPER's Effects folder
-// (Linux: ~/.config/REAPER/Effects/), then find it as "AdaptiveCOMP".
+// (Linux: ~/.config/REAPER/Effects/), keeping the gui_kit folder next to it,
+// then find it as "AdaptiveCOMP".
+
+// Shared memory, namespaced to this vendor so it cannot collide with other
+// plugins' gmem. Slot map:
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
 
 in_pin:left input
 in_pin:right input
 out_pin:left output
 out_pin:right output
 
-slider1:thresh_db=-20<-40,0,0.1>Threshold (dB)
-slider2:ratio=4<1,10,0.1>Ratio
-slider3:attack_ms=5<0.1,50,0.1>Attack (ms)
-slider4:release_ms=150<10,1000,1>Release (ms)
-slider5:knee_pct=50<0,100,1>Knee (%)
-slider6:rms_ms=0<0,100,0.5>RMS Size (ms, 0=peak)
-slider7:lookahead_ms=100<0,1000,1>Look Ahead (ms)
-slider8:window_ms=300<10,1000,1>Window (ms)
-slider9:speed_ms=200<0,1000,1>Speed (ms)
-slider10:range_db=6<0,10,0.1>Range (dB)
-slider11:strength_pct=100<0,100,1>Strength (%)
-slider12:autogain=1<0,1,1{Off,On}>Auto Gain
-slider13:manual_gain_db=0<-10,10,0.1>Manual Gain (dB)
+slider1:thresh_db=-20<-40,0,0.1>-Threshold (dB)
+slider2:ratio=4<1,10,0.1>-Ratio
+slider3:attack_ms=5<0.1,50,0.1>-Attack (ms)
+slider4:release_ms=150<10,1000,1>-Release (ms)
+slider5:knee_pct=50<0,100,1>-Knee (%)
+slider6:rms_ms=0<0,100,0.5>-RMS Size (ms, 0=peak)
+slider7:lookahead_ms=100<0,1000,1>-Look Ahead (ms)
+slider8:window_ms=300<10,1000,1>-Window (ms)
+slider9:speed_ms=200<0,1000,1>-Speed (ms)
+slider10:range_db=6<0,10,0.1>-Range (dB)
+slider11:strength_pct=100<0,100,1>-Strength (%)
+slider12:autogain=1<0,1,1{Off,On}>-Auto Gain
+slider13:manual_gain_db=0<-10,10,0.1>-Manual Gain (dB)
+
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 knob, Compressor   1 knob, Adaptation   2 knob, Output (bipolar)
+//   7 gain-reduction bar
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/knob_yellow_bipolar_grid.png
+filename:3,gui_kit/toggle_yellow.png
+filename:4,gui_kit/value_field.png
+filename:5,gui_kit/header_bar.png
+filename:6,gui_kit/panel_tile.png
+filename:7,gui_kit/bar_red_grid.png
+filename:8,gui_kit/wave_frame_9slice.png
+filename:9,gui_kit/playhead_line_cyan.png
+filename:10,gui_kit/playhead_marker_cyan.png
+filename:11,gui_kit/dropdown.png
+filename:12,gui_kit/button_cyan.png
+filename:13,gui_kit/logo_magnolius_grey.png
+filename:14,Magnolius_AdaptiveCompressor.help.txt
 
 @init
+gk_init();
+gk_img_field = 4; gk_img_header = 5; gk_img_panel = 6;
+gk_img_wave_frame = 8; gk_img_playhead_line = 9; gk_img_playhead_marker = 10;
+gk_img_dropdown = 11; gk_img_button = 12;
+// REAPER refuses to load an image taller than somewhere between 6144 and 7680
+// px, and returns a zero-size image rather than an error - a filmstrip widget
+// then draws nothing while still responding to the mouse. Width is not
+// affected (7680 x 128 loads fine). So the long strips are packed as grids:
+// the knobs are 64 frames in 8 columns (1024 x 1024, a size this REAPER was
+// measured to load) and the bar is 64 frames in 8 columns (192 x 1600).
+// The filenames carry a _grid suffix so that a cached failed load of an
+// earlier oversized file at the same path cannot be reused.
+gk_knob_cols = 8;  gk_knob_frames = 64;
+gk_bar_cols  = 8;  gk_bar_frames  = 64;
+
+// Counts image slots REAPER would not load. It reports a zero-size image and
+// no error, and every filmstrip widget then falls back to vector drawing, so
+// without this a failed load is completely silent and passes for working art.
+// By far the most likely cause is a bad path - and note that a filename: line
+// takes the whole rest of the line, so a trailing comment silently breaks it.
+function count_missing_images(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// ---- help viewer ----
+// The panel is drawn by the widget library; the plugin only owns the state.
+// The help file is the last filename: slot, after the images, so the
+// missing-image count is not thrown off by it.
+HELP_FILE = 14;
+HELP_BASE = 300;          // first string slot used for help text
+HELP_MAX  = 600;          // most lines kept
+help_open = 0; help_lines = 0;
+
+// ---- interface scale ----
+// The layout is authored at UI_W x UI_H logical px and every coordinate runs
+// through gk_S, so scaling the whole interface - drawing, blits, hit-testing
+// and drag deltas alike - is a matter of setting gk_S. JSFX cannot resize its
+// own window, so this scales the content inside whatever window REAPER gives
+// us; "Fit" tracks the window, a fixed percentage does not.
+UI_W = 720; UI_H = 488;
+LOGO_ASPECT = 512/101;    // magnolius-grey-512.png
+GM_UI_SCALE = 0;          // gmem slot holding the shared scale
+
+// The scale is global: every instance reads it from gmem each frame, so
+// changing it in one window changes all open windows and any instance added
+// later in this session. Each instance also serialises its own copy, which
+// seeds the global when the first one loads in a fresh REAPER session.
+// gmem is session-scoped: REAPER frees it once the last instance is removed,
+// and a JSFX cannot write a settings file, so the scale cannot be persisted
+// from in here. A permanent size belongs in the @gfx line instead.
+// UI_SCALE_DEFAULT applies until something sets it; leave it at 0 (Fit) unless
+// you also enlarge the @gfx window, or the interface will be clipped.
+UI_SCALE_DEFAULT = 0;
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- display constants ----
+WAVE_COLS    = 512;   // waveform columns; the threshold/GR history shares them
+GRAPH_SEC    = 8;     // seconds of history on screen
+WAVE_GAIN_DB = 12;    // display gain, applied to the waveform AND the overlay
+GR_FULL_DB   = 24;    // top of the gain-reduction scale
+
 // ---- memory layout ----
 delaybuf  = 0;
 delaysize = (srate|0) + 4;             // samples of max look-ahead (1 s) + margin
-HIST_N    = 480;                       // history points for the @gfx graph (~8 s)
-hist_lvl  = delaybuf + delaysize*2;    // delay buffer is interleaved stereo
-hist_thr  = hist_lvl + HIST_N;
-hist_gr   = hist_thr + HIST_N;
+hist_thr  = delaybuf + delaysize*2;    // delay buffer is interleaved stereo
+hist_gr   = hist_thr + WAVE_COLS;
+wave_mem  = hist_gr  + WAVE_COLS;      // gk_wave_init reserves 3*WAVE_COLS slots
 
 memset(delaybuf, 0, delaysize*2);
 i = 0;
-loop(HIST_N,
-  hist_lvl[i] = -60; hist_thr[i] = -60; hist_gr[i] = 0;
+loop(WAVE_COLS,
+  hist_thr[i] = -60; hist_gr[i] = 0;
   i += 1;
 );
+
+wv.gk_wave_init(wave_mem, WAVE_COLS);
+wave_col = 0;   // waveform column currently being accumulated
+gr_acc   = 0;   // peak GR within that column
 
 wpos = 0;
 
@@ -90,28 +198,37 @@ active_thresh = thresh_db;
 
 warmup = srate;   // ~1 s: adapt the slow average quickly after reset
 
-// gfx history accumulation
-hist_pos = 0; hist_cnt = 0; hist_gr_acc = 0;
-
 SILENCE_MS = 0.000001;  // mean-square gate: -60 dBFS RMS
 
+// The vector fallbacks draw in the current accent, and the accent persists
+// between frames, so each section sets it before drawing.
+function accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+
+// Every derived DSP value lives here, so behaviour does not depend on REAPER
+// re-running @slider after the GUI calls slider_automate.
+function update_params()
+(
+  lookahead_smp = min((lookahead_ms * 0.001 * srate)|0, delaysize - 1);
+  pdc_delay  = lookahead_smp;
+  pdc_bot_ch = 0; pdc_top_ch = 2;
+
+  atk_coef   = exp(-1 / (max(attack_ms, 0.02) * 0.001 * srate));
+  rel_coef   = exp(-1 / (release_ms * 0.001 * srate));
+  rms_coef   = rms_ms  > 0 ? exp(-1 / (rms_ms  * 0.001 * srate)) : 0;
+  win_coef   = exp(-1 / (window_ms * 0.001 * srate));
+  speed_coef = speed_ms > 0 ? exp(-1 / (speed_ms * 0.001 * srate)) : 0;
+  slow_coef  = exp(-1 / (8 * srate));    // ~8 s self-calibrating average
+  makeup_coef = exp(-1 / (3 * srate));   // ~3 s auto-gain smoothing
+
+  strength = strength_pct * 0.01;
+  slope = (1 - ratio) / ratio;           // gain slope in dB per dB overshoot (negative)
+);
+update_params();
+wv.gk_wave_window(GRAPH_SEC);
+
 @slider
-lookahead_smp = min((lookahead_ms * 0.001 * srate)|0, delaysize - 1);
-pdc_delay  = lookahead_smp;
-pdc_bot_ch = 0; pdc_top_ch = 2;
-
-atk_coef   = exp(-1 / (max(attack_ms, 0.02) * 0.001 * srate));
-rel_coef   = exp(-1 / (release_ms * 0.001 * srate));
-rms_coef   = rms_ms  > 0 ? exp(-1 / (rms_ms  * 0.001 * srate)) : 0;
-win_coef   = exp(-1 / (window_ms * 0.001 * srate));
-speed_coef = speed_ms > 0 ? exp(-1 / (speed_ms * 0.001 * srate)) : 0;
-slow_coef  = exp(-1 / (8 * srate));    // ~8 s self-calibrating average
-makeup_coef = exp(-1 / (3 * srate));   // ~3 s auto-gain smoothing
-
-strength = strength_pct * 0.01;
-slope = (1 - ratio) / ratio;           // gain slope in dB per dB overshoot (negative)
-
-hist_rate = max((8 * srate / HIST_N)|0, 1);  // graph covers ~8 s
+update_params();
+wv.gk_wave_window(GRAPH_SEC);
 
 @block
 ext_gr_meter = -gr_env;
@@ -184,103 +301,218 @@ gain = 10 ^ ((makeup - gr_env) / 20);
 spl0 = dl * gain;
 spl1 = dr * gain;
 
-// ---- meter history (one point per hist_rate samples) ----
-hist_gr_acc = max(hist_gr_acc, gr_env);
-hist_cnt += 1;
-hist_cnt >= hist_rate ? (
-  hist_lvl[hist_pos] = l_short_db;
-  hist_thr[hist_pos] = active_thresh;
-  hist_gr[hist_pos]  = hist_gr_acc;
-  hist_pos += 1;
-  hist_pos >= HIST_N ? hist_pos = 0;
-  hist_cnt = 0;
-  hist_gr_acc = 0;
+// ---- display history ----
+// The waveform shows the detector signal (delayed, pre-gain), so the threshold
+// drawn over it is literally the line the compressor is acting on. Threshold
+// and GR are stored per waveform column, driven by the waveform's own write
+// position, which keeps the overlay in exact register with the audio.
+wv.gk_wave_push(dl, dr);
+gr_acc = max(gr_acc, gr_env);
+wv.wpos != wave_col ? (
+  hist_thr[wave_col] = active_thresh;
+  hist_gr[wave_col]  = gr_acc;
+  gr_acc = 0;
+  wave_col = wv.wpos;
 );
 
-@gfx 660 240
-gx = 10; gy = 10;
-gw = gfx_w - 150;
-gh = gfx_h - 20;
-gfx_setfont(1, "Arial", 14);
+// The size REAPER opens the FX window at. This is the ONLY way to set it: a
+// JSFX cannot resize its own window (gfx_w/gfx_h are read-only), and there is
+// no way for it to persist a window size. Change these two numbers for a
+// permanent default, and leave the scale selector on Fit so the interface
+// scales to match:
+//   100%  720 488     125%  900 610
+//   150% 1080 732     200% 1440 976   (200% is pixel-exact: the art is 2x)
+@gfx 720 488
+gk_begin();
+g_chg = 0;
 
-// background
-gfx_set(0.09, 0.09, 0.11);
-gfx_rect(gx, gy, gw, gh);
+// Take the scale from the shared global, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
 
-// gridlines every 10 dB (level scale: 0 .. -60 dB)
-db = 0;
-loop(7,
-  y = gy + (-db / 60) * gh;
-  gfx_set(0.25, 0.25, 0.28);
-  gfx_line(gx, y, gx + gw, y);
-  gfx_set(0.45, 0.45, 0.5);
-  gfx_x = gx + 3; gfx_y = y + 1;
-  db < 0 ? gfx_printf("%d", db);
-  db -= 10;
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). Fixed percentages are taken
+// relative to that, so 100% stays pixel-exact on a HiDPI display; Fit divides
+// the physical window by the design size, which already includes it.
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret * g_sc : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(1);
+
+gk_header(0, 10, 10, 700, 22, "ADAPTIVE COMPRESSOR", -1, 0);
+
+// Scale selector and help button, far right of the header. Their x is pinned
+// to the right edge of what is actually on screen, so a scale too large for
+// the window can never push these controls out of reach.
+g_r  = min(UI_W - 20, gfx_w/gk_S - 10);
+g_sx = g_r - 86;
+g_i = gk_dropdown(40, g_sx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
 );
 
-// static threshold and range bounds (faint reference lines)
-gfx_set(0.35, 0.3, 0.15);
-y = gy + (-max(min(thresh_db + range_db, 0), -60) / 60) * gh;
-gfx_line(gx, y, gx + gw, y);
-y = gy + (-max(min(thresh_db - range_db, 0), -60) / 60) * gh;
-gfx_line(gx, y, gx + gw, y);
+// Freeze the controls underneath while the help is open, keeping the two
+// header controls live so the help can be closed again.
+help_open ? gk_help_input(40, 41);
 
-// traces
-i = 0; plyl = -1; plyt = -1; plyg = -1; plx = gx;
-loop(HIST_N,
-  idx = hist_pos + i;
-  idx >= HIST_N ? idx -= HIST_N;
-  x = gx + (i / (HIST_N - 1)) * gw;
+// ---------------------------------------------------------------- waveform
+accent(0.149, 0.784, 0.902);   // cyan: the waveform itself
+wv.gk_wave_draw(10, 40, 630, 160, WAVE_GAIN_DB, 0);
+gk_wave_geom(10, 40, 630, 160);   // same box: publishes the inner plot geometry
+g_wgain = 10 ^ (WAVE_GAIN_DB / 20);
 
-  // input loudness: filled from the bottom
-  lvl = max(min(hist_lvl[idx], 0), -60);
-  yl = gy + (-lvl / 60) * gh;
-  gfx_set(0.25, 0.42, 0.62, 0.5);
-  gfx_line(x, gy + gh, x, yl);
+// Static rails: Threshold +/- Range, the limits the active threshold can reach.
+gfx_set(0.94, 0.78, 0.24, 0.16);
+g_a = min(1, 10^((thresh_db + range_db)/20) * g_wgain) * gk_wv_half;
+gfx_line(gk_wv_ix, gk_wv_cy - g_a, gk_wv_ix + gk_wv_iw, gk_wv_cy - g_a);
+gfx_line(gk_wv_ix, gk_wv_cy + g_a, gk_wv_ix + gk_wv_iw, gk_wv_cy + g_a);
+g_a = min(1, 10^((thresh_db - range_db)/20) * g_wgain) * gk_wv_half;
+gfx_line(gk_wv_ix, gk_wv_cy - g_a, gk_wv_ix + gk_wv_iw, gk_wv_cy - g_a);
+gfx_line(gk_wv_ix, gk_wv_cy + g_a, gk_wv_ix + gk_wv_iw, gk_wv_cy + g_a);
 
-  // gain reduction: drawn downward from the top (scale 0..24 dB)
-  gr = min(hist_gr[idx], 24);
-  yg = gy + (gr / 24) * gh;
-  gr > 0.01 ? (
-    gfx_set(0.85, 0.25, 0.25, 0.8);
-    plyg >= 0 ? gfx_line(plx, plyg, x, yg) : gfx_line(x - 1, yg, x, yg);
+// Active threshold (mirrored about the centre) and gain reduction (from the top).
+g_iwi = floor(gk_wv_iw);
+g_px = 0; g_pth = -1; g_pgr = -1;
+loop(g_iwi,
+  g_c = floor(g_px * WAVE_COLS / g_iwi);
+  g_k = (wv.wpos + g_c) % WAVE_COLS;
+  g_x = gk_wv_ix + g_px;
+
+  g_a = min(1, 10^(hist_thr[g_k]/20) * g_wgain) * gk_wv_half;
+  g_pth >= 0 ? (
+    gfx_set(0.94, 0.78, 0.24, 0.85);
+    gfx_line(g_x - 1, gk_wv_cy - g_pth, g_x, gk_wv_cy - g_a);
+    gfx_line(g_x - 1, gk_wv_cy + g_pth, g_x, gk_wv_cy + g_a);
   );
-  plyg = gr > 0.01 ? yg : -1;
+  g_pth = g_a;
 
-  // active threshold line
-  thr = max(min(hist_thr[idx], 0), -60);
-  yt = gy + (-thr / 60) * gh;
-  gfx_set(1, 0.7, 0.1);
-  plyt >= 0 ? gfx_line(plx, plyt, x, yt);
-  plyt = yt;
+  g_gr = min(hist_gr[g_k], GR_FULL_DB);
+  g_gr > 0.01 ? (
+    g_y = gk_wv_iy + (g_gr / GR_FULL_DB) * gk_wv_ih;
+    gfx_set(0.85, 0.29, 0.26, 0.9);
+    g_pgr >= 0 ? gfx_line(g_x - 1, g_pgr, g_x, g_y) : gfx_line(g_x, g_y, g_x, g_y);
+    g_pgr = g_y;
+  ) : g_pgr = -1;
 
-  plx = x;
-  i += 1;
+  g_px += 1;
 );
 
-// ---- right panel ----
-px = gx + gw + 12;
+// ---------------------------------------------------------------- GR meter
+gk_panel(650, 40, 60, 160);
+gk_header(0, 650, 40, 60, 22, "GR", -1, 0);
+accent(0.851, 0.290, 0.259);   // red: gain reduction
+gk_vbar(0, 7, 664, 70, 20, 104, min(gr_env, GR_FULL_DB), 0, GR_FULL_DB);
+gk_text_c(696, 68, "24", 1);
+gk_text_c(696, 162, "0", 1);
+sprintf(#s, "%.1f dB", gr_env);
+gk_field(654, 180, 52, 16, #s);
 
-// GR bar meter (0..24 dB, top down)
-bx = px; bw = 22; bh = gh - 70; by = gy;
-gfx_set(0.09, 0.09, 0.11);
-gfx_rect(bx, by, bw, bh);
-grb = min(gr_env, 24) / 24;
-gfx_set(0.85, 0.25, 0.25);
-gfx_rect(bx, by, bw, grb * bh);
-gfx_set(0.4, 0.4, 0.45);
-gfx_line(bx, by, bx + bw, by);
-gfx_x = bx + bw + 4; gfx_y = by; gfx_printf("0");
-gfx_x = bx + bw + 4; gfx_y = by + bh - 12; gfx_printf("24");
-gfx_set(0.85, 0.25, 0.25);
-gfx_x = bx; gfx_y = by + bh + 6;
-gfx_printf("GR %.1f dB", gr_env);
+// ---------------------------------------------------------------- compressor
+gk_panel(10, 210, 248, 246);
+gk_header(0, 10, 210, 248, 22, "COMPRESSOR", -1, 0);
+accent(0.149, 0.784, 0.902);   // cyan
 
-// readouts
-gfx_set(1, 0.7, 0.1);
-gfx_x = px; gfx_y = by + bh + 24;
-gfx_printf("Thr %.1f dB", active_thresh);
-gfx_set(0.6, 0.8, 0.6);
-gfx_x = px; gfx_y = by + bh + 42;
-gfx_printf("Gain %+.1f dB", (autogain ? makeup_env : 0) + manual_gain_db);
+g_chg |= gk_knob_slider(10, 0,  22, 240, 64,  1, -40, 0, -20);
+g_chg |= gk_knob_slider(11, 0,  98, 240, 64,  2, 1, 10, 4);
+g_chg |= gk_knob_slider(12, 0, 174, 240, 64,  3, 0.1, 50, 5);
+gk_text_c( 54, 306, "Threshold", 1);
+gk_text_c(130, 306, "Ratio", 1);
+gk_text_c(206, 306, "Attack", 1);
+sprintf(#s, "%.1f dB", thresh_db);
+g_chg |= gk_field_edit_slider(50,  24, 320, 60, 16,  1, -40, 0, -20, #s);
+sprintf(#s, "%.1f:1", ratio);
+g_chg |= gk_field_edit_slider(51, 100, 320, 60, 16,  2, 1, 10, 4, #s);
+sprintf(#s, "%.1f ms", attack_ms);
+g_chg |= gk_field_edit_slider(52, 176, 320, 60, 16,  3, 0.1, 50, 5, #s);
+
+g_chg |= gk_knob_slider(13, 0,  22, 348, 64,  4, 10, 1000, 150);
+g_chg |= gk_knob_slider(14, 0,  98, 348, 64,  5, 0, 100, 50);
+g_chg |= gk_knob_slider(15, 0, 174, 348, 64,  6, 0, 100, 0);
+gk_text_c( 54, 414, "Release", 1);
+gk_text_c(130, 414, "Knee", 1);
+gk_text_c(206, 414, "RMS Size", 1);
+sprintf(#s, "%.0f ms", release_ms);
+g_chg |= gk_field_edit_slider(53,  24, 428, 60, 16,  4, 10, 1000, 150, #s);
+sprintf(#s, "%.0f %%", knee_pct);
+g_chg |= gk_field_edit_slider(54, 100, 428, 60, 16,  5, 0, 100, 50, #s);
+rms_ms > 0 ? sprintf(#s, "%.1f ms", rms_ms) : sprintf(#s, "Peak");
+g_chg |= gk_field_edit_slider(55, 176, 428, 60, 16,  6, 0, 100, 0, #s);
+
+// ---------------------------------------------------------------- adaptation
+gk_panel(268, 210, 248, 246);
+gk_header(0, 268, 210, 248, 22, "ADAPTATION", -1, 0);
+accent(0.941, 0.588, 0.157);   // orange
+
+g_chg |= gk_knob_slider(20, 1, 280, 240, 64, 11, 0, 100, 100);
+g_chg |= gk_knob_slider(21, 1, 356, 240, 64,  8, 10, 1000, 300);
+g_chg |= gk_knob_slider(22, 1, 432, 240, 64,  9, 0, 1000, 200);
+gk_text_c(312, 306, "Strength", 1);
+gk_text_c(388, 306, "Window", 1);
+gk_text_c(464, 306, "Speed", 1);
+sprintf(#s, "%.0f %%", strength_pct);
+g_chg |= gk_field_edit_slider(56, 282, 320, 60, 16, 11, 0, 100, 100, #s);
+sprintf(#s, "%.0f ms", window_ms);
+g_chg |= gk_field_edit_slider(57, 358, 320, 60, 16,  8, 10, 1000, 300, #s);
+sprintf(#s, "%.0f ms", speed_ms);
+g_chg |= gk_field_edit_slider(58, 434, 320, 60, 16,  9, 0, 1000, 200, #s);
+
+g_chg |= gk_knob_slider(23, 1, 280, 348, 64, 10, 0, 10, 6);
+g_chg |= gk_knob_slider(24, 1, 356, 348, 64,  7, 0, 1000, 100);
+gk_text_c(312, 414, "Range", 1);
+gk_text_c(388, 414, "Look Ahead", 1);
+sprintf(#s, "%.1f dB", range_db);
+g_chg |= gk_field_edit_slider(59, 282, 428, 60, 16, 10, 0, 10, 6, #s);
+sprintf(#s, "%.0f ms", lookahead_ms);
+g_chg |= gk_field_edit_slider(60, 358, 428, 60, 16,  7, 0, 1000, 100, #s);
+
+// the live value the whole section exists to move
+gk_text_c(464, 356, "Active Thr", 1);
+sprintf(#s, "%.1f dB", active_thresh);
+gk_field(432, 372, 64, 18, #s);
+
+// ---------------------------------------------------------------- output
+gk_panel(526, 210, 184, 246);
+gk_header(0, 526, 210, 184, 22, "OUTPUT", -1, 0);
+accent(0.941, 0.784, 0.235);   // yellow
+
+// rows share the grid of the two panels to the left: knob row 1, value row 1,
+// knob row 2, value row 2
+gk_text(538, 266, "Auto Gain");
+g_chg |= gk_toggle_slider(30, 3, 660, 264, 28, 16, 12);
+
+gk_text_c(618, 306, "Output Gain", 1);
+sprintf(#s, "%+.1f dB", (autogain ? makeup_env : 0) + manual_gain_db);
+gk_field(558, 320, 120, 16, #s);
+
+g_chg |= gk_knob_slider(31, 2, 586, 348, 64, 13, -10, 10, 0);
+gk_text_c(618, 414, "Manual", 1);
+sprintf(#s, "%+.1f dB", manual_gain_db);
+g_chg |= gk_field_edit_slider(61, 588, 428, 60, 16, 13, -10, 10, 0, #s);
+
+help_open ? gk_help_draw(10, 40, 700, 424, "Help  -  Adaptive Compressor", HELP_BASE, help_lines);
+
+// Wordmark, bottom right, its right edge on the same 10 px margin as the
+// panels. LOGO_ASPECT is the source's width/height; a 1-frame strip is just a
+// scaled blit that respects gk_S.
+gk_strip(13, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = count_missing_images(14);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+g_chg ? update_params();
+gk_end();
+
+@serialize
+// GUI-only state, so it is serialised rather than made a slider
+file_var(0, gui_scale_idx);

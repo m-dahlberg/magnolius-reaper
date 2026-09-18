@@ -1,0 +1,137 @@
+ADAPTIVE COMPRESSOR                                        Magnolius
+
+A stereo compressor whose threshold follows the loudness of the
+incoming audio, so one setting gives the same amount of compression
+whether the source arrives hot or quiet.
+
+An ordinary compressor's threshold is a fixed line in dBFS, so it is
+a setting you re-dial for every source and any preset is a lie. Here
+the threshold tracks a slow self-calibrating average of the material
+and moves with it:
+
+    active threshold
+      = Threshold + Strength x clamp(L_short - L_slow, +/-Range)
+
+L_short is the loudness over Window ms. L_slow is a roughly 8 second
+average that defines "normal" for this source. When a passage runs
+louder than its own recent history the threshold rises with it, so
+the compressor follows the shape of the performance rather than its
+absolute level.
+
+
+SETTING IT UP
+
+  1. Set Strength to 0%. The plugin is now an ordinary fixed
+     threshold compressor.
+  2. Dial Threshold, Ratio, Attack and Release until the loudest
+     passage sounds right.
+  3. Raise Strength to 100% and play a quiet passage. It should get
+     comparable treatment without touching anything.
+  4. If quiet passages are over-compressed, lower Range.
+     If the compression audibly breathes between phrases, raise
+     Speed.
+
+Window decides what "the programme" means. At 300 ms it follows
+phrases; at 1000 ms it follows sections and largely ignores
+individual words.
+
+
+COMPRESSOR
+
+  Threshold   Base threshold. The adaptive offset is added to this,
+              so it sets the centre of a range rather than a hard
+              line.
+  Ratio       Compression ratio above the active threshold.
+  Attack      Gain-reduction onset.
+  Release     Gain-reduction recovery. Decoupled, so it is not
+              retriggered by every sample above the knee.
+  Knee        Knee width as a proportion of the threshold, so the
+              knee scales with the threshold instead of staying a
+              fixed dB width.
+  RMS Size    Peak detection at 0 (shown as "Peak"), otherwise RMS
+              over that window. Raise it for level, leave it at
+              Peak for transients.
+
+
+ADAPTATION
+
+  Strength    How much of the clamped offset is applied.
+              0% = an ordinary fixed-threshold compressor.
+  Window      Averaging window for L_short. Short values track
+              phrases, long values track sections.
+  Speed       How quickly the active threshold may move. Slow it
+              down if the compression audibly breathes.
+  Range       Clamp on the adaptive offset, both directions. The
+              safety rail: the threshold can never run further than
+              this from where you set it.
+  Look Ahead  Audio delay, reported to REAPER as PDC so the project
+              stays time-aligned. Lets the threshold see loudness
+              before it arrives. Changes plugin latency, so set it
+              and leave it.
+  Active Thr  Read-only: where the threshold is right now.
+
+
+OUTPUT
+
+  Auto Gain   Compensates output level for the gain reduction being
+              applied, so A/B comparisons are level-matched.
+  Manual      Output trim, applied after auto gain.
+  Output Gain Read-only: the total gain being applied.
+
+
+THE DISPLAY
+
+The graph is a scrolling waveform of the detector signal - the
+delayed, pre-gain audio the compressor is actually acting on - over
+the last 8 seconds. Drawn over it:
+
+  Yellow pair   The active threshold, mirrored above and below the
+                centre line. Watching this move with the material is
+                the whole point of the plugin. At Strength 0% it is
+                flat.
+  Faint yellow  Threshold +/- Range: the rails the active threshold
+                can never pass.
+  Red trace     Gain reduction, hanging from the top on a 0-24 dB
+                scale, matching the GR meter on the right.
+
+The waveform is on a linear amplitude scale with 12 dB of display
+gain, and the threshold lines use the same scale. So where the
+waveform crosses the yellow line is where compression starts.
+
+
+THE INTERFACE
+
+Every control is a knob. Drag vertically to change it, hold Shift
+for fine adjustment, use the mouse wheel, and Ctrl-click to reset it
+to the default.
+
+The number box under each knob is editable. Click it and type a
+value, then press Enter. Esc cancels, and clicking anywhere else
+also commits. You can drag the box up and down to scrub the value
+too, and Ctrl-click it to reset. Values outside a control's range
+are clamped to it. Typing needs the FX window focused.
+
+The three boxes that only report - Active Thr, Output Gain and the
+GR readout - are not editable.
+
+The dropdown in the title bar sets the interface scale. Fit scales
+the interface to whatever size you drag the FX window to, which is
+the normal way to make it bigger. The fixed percentages hold a scale
+regardless of window size; a JSFX cannot resize its own window, so a
+scale larger than the window is clipped. The dropdown always stays
+on screen, so Fit is one click away.
+
+The scale is shared by every open instance and by any instance added
+afterwards, but REAPER forgets it when the last one is removed. For
+a size that survives everything, edit the @gfx line in the plugin
+source - the sizes are listed in a comment right above it.
+
+
+IF SOMETHING LOOKS WRONG
+
+Flat, unshaded knobs and a red "images failed to load" in the title
+bar mean one of the GUI images could not be read. The gui_kit folder
+must sit next to the plugin file. The controls still work; only the
+artwork is affected.
+
+An empty help panel means this file is not next to the plugin file.
