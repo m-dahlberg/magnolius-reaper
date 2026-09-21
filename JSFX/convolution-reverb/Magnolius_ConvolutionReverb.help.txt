@@ -1,0 +1,252 @@
+CONVOLUTION REVERB  (Magnolius)
+
+True-stereo convolution reverb. A 4-channel impulse response is run
+through uniform partitioned FFT convolution, so a room recorded in
+true stereo keeps its cross-feed instead of collapsing to two
+independent channels.
+
+The reverb is active whenever a valid IR is loaded. Wet and Dry set
+the balance; there is no separate bypass.
+
+
+SETUP - DO THIS FIRST
+
+1. Create the folder REAPER/Data/ReverbIRs and put your impulse
+   responses in it. On Linux that is usually
+   ~/.config/REAPER/Data/ReverbIRs. Subfolders are supported and are
+   the tidy way to keep a library.
+
+2. Pick an IR. Two sources, and the last one you touch wins:
+
+   - The Reverb IR parameter in REAPER's parameter list. It is a file
+     slider: REAPER owns it, it recurses into subfolders on its own,
+     it is automatable, and it needs no setup. It stays visible on
+     purpose - only the host can drive a file slider.
+
+   - The browser in this window. It needs an index file (see below),
+     but it gives you search, folders and counts.
+
+3. Balance Wet and Dry. Both go down to -60 dB, which is off.
+
+Accepted IR files:
+
+   4-channel WAV  true stereo, channel order LL LR RL RR, with the
+                  input letter first: ch1 = left in to left out,
+                  ch2 = left to right, ch3 = right to left,
+                  ch4 = right to right.
+   2-channel WAV  parallel stereo (LL, RR), no cross-feed.
+   mono WAV       the same IR on both channels.
+
+Any sample rate works - IRs are resampled to the project rate when
+they load. They are capped at 393216 samples (about 8.2 s at 48 kHz,
+8.9 s at 44.1 kHz) and energy-normalised, so swapping IRs keeps a
+comparable wet level. Past that the convolver drops the rest of the
+tail, and the line above the decay view says so and gives both
+figures.
+
+
+THE IR BROWSER  (the upper panel)
+
+Search box   Type anywhere in the window to filter - you do not have
+             to click the box first. Clicking it lights its edges and
+             shows a caret, which is simply where your typing is
+             going. Terms are separated by spaces, all of them must
+             match, and case is ignored. Backspace erases, Esc
+             clears, and the small x at the right of the box clears
+             it too.
+Folder list  Click a folder to narrow the results to it. "All" shows
+             everything. The number after each name is its file count.
+File list    Click a file to load it. The green bar marks the IR that
+             is loaded now. The mouse wheel scrolls either list.
+Rescan       Re-reads the index file after you have added IRs.
+
+Keys: Up and Down move the highlight, PgUp and PgDn move a page,
+Enter loads the highlighted file.
+
+The browser reads Data/ConvReverbIRs.idx, a plain text file with one
+IR path per line, relative to Data/ReverbIRs. JSFX cannot list a
+directory, so this file has to be generated: run tools/index_irs.py,
+or the ReaScript tools/RescanReverbIRs.lua from inside REAPER, then
+press Rescan. Without it the browser says so and the Reverb IR
+parameter keeps working.
+
+The browser stores its choice as a path, not as a position in the
+list, so adding IRs later never repoints a saved project at some
+other file.
+
+
+THE DECAY VIEW  (the middle panel)
+
+The line above it gives the channel count and the length of the IR
+after the IR length stretch, so it moves as you move that knob - and
+it keeps moving while you drag, ahead of the resample itself. It
+also says which source the IR came from, browser or slider, and when
+an IR is too long for the convolver it gives the file's real length
+and how much of it is actually used.
+
+The display is the peak envelope of the loaded IR, drawn as the
+square root of amplitude. Linear would bury everything past the first
+tenth of the tail; a decibel scale lifts the whole decay into the top
+of the box and turns it into one solid slab. This keeps the wedge.
+The dim band at the left, up to the bright line, is the pre-delay:
+wet-path silence before the IR starts.
+
+The ruler along the bottom is seconds from the moment the dry signal
+hits, and it is a FIXED five-second window - it never rescales. So a
+longer IR is drawn longer: move IR length and the envelope itself
+stretches or shrinks against a ruler that stays put, which is what
+you want to see. A tail running past five seconds is simply cut off
+at the right edge; the length in seconds above the display is the
+real figure either way.
+
+Use it to see how long a tail really is, where the early reflections
+sit, and how far IR length and pre-delay have moved things.
+
+
+SHAPE
+
+Pre-delay  0 to 500 ms. Delays only the wet path, so the dry hit
+           stays where it is and the reverb arrives after it. Around
+           80-150 ms on a percussive part keeps the transient clear.
+           This is NOT latency and does not change reported PDC. A
+           change equal-power crossfades over 512 samples instead of
+           jumping the read pointer, which would pitch the tail.
+
+Length     25 to 400 %. Resamples the IR, so it stretches or shortens
+           the tail and shifts its spectrum with it, the way playing
+           tape slower does. Longer is also darker; shorter is
+           brighter. That is the character, not a fault. It re-reads
+           nothing from disk, only re-resamples and re-transforms what
+           is already loaded.
+
+           Rebuilding costs more than one audio block, so the resample
+           happens when you LET GO, not while you drag. The display
+           does not wait: the percentage, the length in seconds and
+           the decay view all follow your hand the whole way, because
+           stretching is a pure time scaling and the length you are
+           heading for is known exactly. Only what you HEAR waits for
+           mouse up.
+
+
+FILTER
+
+High-pass  20 to 2000 Hz, 12 dB/oct, 20 Hz reads Off.
+Low-pass   200 to 20000 Hz, 12 dB/oct, 20000 Hz reads Off.
+
+Both act on the WET signal only - the dry path is never filtered.
+They are 2-pole Butterworth biquads, always clamped below Nyquist,
+and their cutoffs glide over about 30 ms, so moving a knob during
+playback sweeps rather than steps.
+
+The knobs run on a logarithmic taper so the useful low end is not
+squeezed into the first tenth of the travel. The value fields under
+them are in Hz either way, and so is automation.
+
+
+MIX
+
+Wet  -60 to +12 dB. -60 is off.
+Dry  -60 to +12 dB. -60 is off.
+
+The dry path is delayed internally to stay sample-aligned with the
+wet path, so the two never smear against each other.
+
+
+MODULATION
+
+A convolution reverb is a fixed filter, so its tail is frozen - the
+same comb structure on every note. On pads, strings, vocals and
+cymbal wash that reads as a static, slightly glassy quality that
+algorithmic hardware does not have. This adds slow movement to the
+tail only. The early reflections, which carry where the source is
+and what the room is, are left alone.
+
+Depth  0 to 100 %. 0 is off, and then the output is exactly what it
+       would be without this feature at all. At low settings the
+       tail breathes: smooth, periodic, no audible pitch wobble. At
+       high settings the movement turns random and you get obvious
+       shimmer and diffusion on long tails. One control does both -
+       Depth drives the sine-to-random blend as well as how far the
+       taps move.
+Rate   0.05 to 2 Hz. How fast. Slower than feels right is usually
+       correct; the default sits near the bottom on purpose.
+Onset  Where "late" begins, in ms from the start of the IR file.
+       Leave it at 0 and the plugin works it out per IR - the field
+       then shows what it chose. A ? after the number means the two
+       detectors disagreed, or that it fell back to a default, so
+       that one is worth a listen. n/a means this IR is not being
+       modulated at all.
+
+The onset is measured, not guessed at: the plugin looks for the
+point where countable reflections give way to a diffuse wash. That
+runs from about 10 ms in a small wooden room to 150 ms in a
+cathedral, so one fixed number would be wrong for most of a library.
+
+Modulation switches itself off for IRs under half a second. There is
+not enough diffuse tail to be worth moving and too much early
+structure to risk - which also keeps guitar cabinet impulses and
+speaker correction curves out of it, since phase movement destroys
+exactly what those encode.
+
+Worth knowing: this moves phase, not level. The tail does not get
+louder, quieter or duller when you turn Depth up. If you want to
+hear what it is doing, use a sustained pad and A/B Depth at 0
+against Depth at 25.
+
+Modulation is deterministic - the same project bounces to the same
+audio every time.
+
+
+WORKING WITH THE CONTROLS
+
+Every knob: drag up and down to change it, hold Shift for fine,
+Ctrl-click to return it to its default, or use the wheel over it.
+
+Every value field under a knob: drag it like a knob, or click once
+and type a number. Enter commits, Esc cancels, clicking elsewhere
+commits. Typing needs this FX window focused.
+
+The scale menu in the title bar sizes the whole interface. It is
+shared by every Magnolius plugin, so setting it here sets it
+everywhere. A JSFX cannot resize its own window, so a scale larger
+than the window will clip - drag the FX window bigger first, or use
+Fit, which tracks whatever size REAPER gives it.
+
+
+LATENCY
+
+One partition, 2048 samples, reported through PDC while an IR is
+loaded. REAPER compensates it automatically, offline renders
+included. Pre-delay is not part of it.
+
+
+WHEN SOMETHING LOOKS WRONG
+
+No sound, or the dry signal only
+  No valid IR is loaded. The line above the decay view says so. Check
+  that Data/ReverbIRs has a 1, 2 or 4 channel WAV in it, and that Wet
+  is not at -60.
+
+The browser says no IR index found
+  Data/ConvReverbIRs.idx does not exist yet. Generate it with
+  tools/index_irs.py or the ReaScript, then press Rescan. Note that
+  the index lives in Data/ and not inside Data/ReverbIRs, because
+  anything in that folder also turns up in the file slider.
+
+A red "images failed to load" line across the title bar
+  The gui_kit folder is not next to the plugin as REAPER sees it. If
+  the .jsfx is symlinked into the Effects folder, gui_kit has to be
+  reachable from there too.
+
+The tail sounds shorter than the IR
+  An IR longer than about 8.2 s at 48 kHz, or stretched past that by
+  IR length, has its tail dropped by the convolver. The line above
+  the decay view says so, and gives both the real length and the part
+  being used. Note this is NOT the same as the decay view's five
+  second window: that one only clips the picture, silently, and never
+  affects what you hear.
+
+A click when switching IRs during playback
+  Loading an IR re-reads the file and re-transforms it on the audio
+  thread. Every convolver does this. Switch between takes, not
+  mid-phrase.

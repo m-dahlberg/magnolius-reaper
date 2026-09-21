@@ -1,8 +1,12 @@
 desc:Convolution Reverb (Magnolius)
 // @description Convolution Reverb (Magnolius)
 // @author Magnolius
-// @version 1.2
+// @version 1.4
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_ConvolutionReverb.help.txt
 // @about
 //   SETUP FIRST: create the folder REAPER/Data/ReverbIRs and put your impulse
 //   responses in it (on Linux that is usually
@@ -12,8 +16,15 @@ desc:Convolution Reverb (Magnolius)
 //   True-stereo convolution reverb. A 4-channel IR WAV (LL, LR, RL, RR - input
 //   letter first) is run through uniform partitioned FFT convolution.
 //
+//   IRs are capped at 393216 samples (about 8.2 s at 48 kHz).
+//
 //   Latency of one partition (2048 samples) is reported via pdc_delay; REAPER
 //   compensates, and the dry path is internally delayed to match.
+//
+//   Late-tail modulation adds slow movement to the diffuse part of the tail
+//   without touching the early reflections. The onset - where "late" begins -
+//   is derived from each IR rather than fixed. Depth at 0 disables it
+//   entirely.
 //
 //   The repository also carries tools/RescanReverbIRs.lua, a ReaScript that
 //   rebuilds the IR index after you add files. It is not installed by this
@@ -21,7 +32,51 @@ desc:Convolution Reverb (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Restore the tags: header, so the FX browser can search these by category again
+//   Two releases' worth of work: 1.3 was never published, so this carries its
+//   interface as well.
+//
+//   NEW INTERFACE, built on the Magnolius GUI kit: knobs and typed value
+//   fields for every parameter, a decay view of the loaded IR with the
+//   pre-delay drawn on it, a built-in help panel and an interface scale. The
+//   IR browser is unchanged. The Reverb IR file slider stays visible in
+//   REAPER's parameter list, since only the host can drive a file slider.
+//   The IR length cap also goes up from 5.5 s to 8.2 s at 48 kHz (128 to 192
+//   partitions), which fits in the memory already reserved and costs no extra
+//   CPU unless you actually load a longer IR.
+//
+//   Fixes a long-standing bug in the IR browser: the file list ignored the
+//   mouse wheel until a row had been clicked, because the keep-the-selection-
+//   visible clamp ran every frame and undid the scroll on the next one.
+//
+//   LATE-TAIL MODULATION. A convolution reverb is a fixed filter, so its tail
+//   is frozen - the same comb structure on every note, which on sustained
+//   material reads as a static, glassy quality that algorithmic hardware does
+//   not have. Three new controls (Depth, Rate, Onset) add slow movement to the
+//   tail ONLY, leaving the early reflections that carry source position and
+//   room identity untouched.
+//
+//   Where "late" begins is measured per IR rather than fixed: an Abel-Huang
+//   echo-density profile finds the mixing time, which runs from ~10 ms in a
+//   small room to 150 ms in a cathedral. It converged on all 134 IRs of the
+//   Samplicity M7 set. The split is made in the IR itself, not on a partition
+//   boundary, so the detection is not quantised to 42.7 ms steps.
+//
+//   Depth at 0 is bit-identical to the unmodulated engine and costs no CPU;
+//   the whole feature costs about 10% with it on. Modulation switches itself
+//   off for IRs under half a second, which also keeps cabinet impulses and
+//   correction curves out of it. It is deterministic, so a project bounces the
+//   same way twice.
+//
+//   Depth ships at a low setting rather than Off, so the improvement is
+//   audible on first load.
+//
+//   Also fixes a pre-delay bug that predates both: the crossfade that hides a
+//   pre-delay change never ran, because EEL2 identifiers are case-insensitive
+//   and the pre_xf countdown was the same variable as the PRE_XF constant. A
+//   pre-delay change moved the read tap outright, pitch-shifting the tail.
+//
+//   The window grows to 958 px wide to fit the modulation panel; the browser
+//   and the decay view take the extra width with it.
 
 //tags: reverb convolution true-stereo
 // True-stereo convolution reverb. A 4-channel IR WAV (LL,LR,RL,RR — input
@@ -36,8 +91,8 @@ desc:Convolution Reverb (Magnolius)
 //   2-ch WAV = parallel stereo (LL, RR; no cross-feed).
 //   mono WAV = the same IR on both channels.
 //
-// IRs are resampled to the project rate on load, capped at 262144 samples
-// (~5.5 s @48k), and energy-normalized (a unit-impulse IR passes at 0 dB).
+// IRs are resampled to the project rate on load, capped at 393216 samples
+// (~8.2 s @48k), and energy-normalized (a unit-impulse IR passes at 0 dB).
 // The reverb is active whenever a valid IR is loaded; wet/dry set the mix.
 //
 // Wet-path shaping (dry is never touched): pre-delay, IR length (resampling
@@ -56,19 +111,50 @@ desc:Convolution Reverb (Magnolius)
 //     or the bundled ReaScript tools/RescanReverbIRs.lua.
 
 options:maxmem=16777216
+// Shared across every plugin using this gmem name - keep ONE slot map for
+// the whole vendor. gmem[0] is the interface scale (index+1).
+options:gmem=Magnolius
 
+// slider1 keeps NO leading '-': a file slider can only be driven by the
+// host, so hiding it would take away the one IR source that works without
+// the index file. Sliders 2-7 are hidden - the GUI owns them.
 slider1:/ReverbIRs:none:Reverb IR wav - 4ch order LL LR RL RR
-slider2:rvb_wet=-12<-60,12,0.1>Reverb wet (dB, -60=off)
-slider3:rvb_dry=0<-60,12,0.1>Reverb dry (dB, -60=off)
-slider4:rvb_pre=0<0,500,0.1>Pre-delay (ms, wet only)
-slider5:rvb_len=100<25,400,0.1>IR length (%, stretches the IR)
-slider6:rvb_hpf=20<20,2000,1>Wet high-pass (Hz, 12 dB/oct, 20=off)
-slider7:rvb_lpf=20000<200,20000,1>Wet low-pass (Hz, 12 dB/oct, 20000=off)
+slider2:rvb_wet=-12<-60,12,0.1>-Reverb wet (dB, -60=off)
+slider3:rvb_dry=0<-60,12,0.1>-Reverb dry (dB, -60=off)
+slider4:rvb_pre=0<0,500,0.1>-Pre-delay (ms, wet only)
+slider5:rvb_len=100<25,400,0.1>-IR length (%, stretches the IR)
+slider6:rvb_hpf=20<20,2000,1>-Wet high-pass (Hz, 12 dB/oct, 20=off)
+slider7:rvb_lpf=20000<200,20000,1>-Wet low-pass (Hz, 12 dB/oct, 20000=off)
+// Late-tail modulation. Depth ships at a low setting rather than Off so the
+// movement is there on first load; it also drives the sine-to-random blend,
+// the way the hardware grades low/mid/high off one control.
+slider8:rvb_mdep=25<0,100,0.1>-Modulation depth (%, 0=off)
+slider9:rvb_mrate=0.35<0.05,2,0.01>-Modulation rate (Hz)
+slider10:rvb_mons=0<0,200,1>-Modulation onset (ms from IR start, 0=auto)
 
 in_pin:left
 in_pin:right
 out_pin:left
 out_pin:right
+
+import gui_kit/gui_kit.jsfx-inc
+
+// Images first and contiguous from 0, the help file LAST so the image count
+// below is not thrown off by it. NEVER put a trailing // comment on one of
+// these lines: the line takes the whole rest of itself as the path, so the
+// comment becomes part of the filename and the image fails to load in
+// silence.
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/knob_yellow_grid.png
+filename:3,gui_kit/value_field.png
+filename:4,gui_kit/header_bar.png
+filename:5,gui_kit/panel_tile.png
+filename:6,gui_kit/dropdown.png
+filename:7,gui_kit/button_cyan.png
+filename:8,gui_kit/wave_frame_9slice.png
+filename:9,gui_kit/logo_magnolius_grey.png
+filename:10,Magnolius_ConvolutionReverb.help.txt
 
 @init
 // ---- convolution reverb memory ----
@@ -81,11 +167,22 @@ out_pin:right
 CONV_P   = 2048;              // partition size (samples) = reported latency
 CONV_N   = 4096;              // FFT size (complex points), 2*CONV_P
 CONV_N2  = 8192;              // words per spectrum (interleaved re,im)
-MAXPARTS = 128;               // IR cap: 128*2048 = 262144 samples (~5.5 s @48k)
+// IR cap. Every FFT buffer is CONV_N2 words and starts on a multiple of it,
+// which holds for any integer MAXPARTS, so this is safe to change - but it
+// scales FDL_L/R, IRSPEC and IRRAW together at 65536 words per partition.
+// 192 needs 13.02M of the 16.78M words maxmem asks for. CPU is unaffected:
+// rvb_mac() loops the LOADED partition count, not this.
+MAXPARTS = 192;               // IR cap: 192*2048 = 393216 samples (~8.2 s @48k)
 IRRAW_CAP = 8*MAXPARTS*CONV_P; // interleaved load staging (words)
 PRE_N    = 131072;            // pre-delay ring (power of two), 2.7 s @48k
 PRE_MASK = PRE_N - 1;
-PRE_XF   = 512;               // pre-delay change crossfade (samples)
+// PRE_XFLEN, not PRE_XF: EEL2 identifiers are CASE-INSENSITIVE, so a constant
+// named PRE_XF is the same variable as the pre_xf countdown in @sample. @init's
+// "start settled" line then zeroed the constant, pre_update() re-armed the
+// countdown from 0, and the crossfade never ran once - pre-delay changes moved
+// the read tap outright, which is the pitch shift this code exists to avoid.
+// Confirmed by reading PRE_XF back out of a debug build: it was 0, not 512.
+PRE_XFLEN = 512;              // pre-delay change crossfade (samples)
 MAXIR    = 1024;              // IR index: max files
 MAXFLD   = 128;               // IR index: max distinct folders
 IRTXT_CAP = 65536;            // IR index: packed name characters
@@ -98,6 +195,24 @@ IRSPEC = conv_alloc; conv_alloc += 4*MAXPARTS*CONV_N2; // IR spectra, path-major
 ACC_L  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator L
 ACC_R  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator R
 CSCR   = conv_alloc; conv_alloc += CONV_N2; // convolve_c scratch
+// ---- late-tail modulation, FFT-visible (sizes are multiples of CONV_N2, so
+// ---- the 8192-alignment argument above carries straight through) ----
+// IRSPEC keeps the WHOLE IR and is what the unmodulated path still reads, so
+// Depth = Off stays bit-identical. The split lives in two small side stores
+// covering only the partitions the crossfade touches: EARLY holds ir*(1-w),
+// LATEHD holds ir*w. Past those partitions w is 1, so the late path reads
+// IRSPEC directly and no third copy of a 6 MB IR is needed.
+// 8 partitions = 341 ms, which covers the 150 ms onset clamp stretched to
+// ~200%; beyond that rvb_split clamps the split point rather than allocate for
+// a case nobody mixes into.
+EARLYP = 8;
+EARLY  = conv_alloc; conv_alloc += EARLYP*4*CONV_N2;
+LATEHD = conv_alloc; conv_alloc += EARLYP*4*CONV_N2;
+// One frequency accumulator per (late group, IR path). The groups are what
+// decorrelate the tail: a single delay across the whole late region slides it
+// as one block, which is the audible-pitch-shift failure mode.
+NGRP   = 4;
+GACC   = conv_alloc; conv_alloc += NGRP*4*CONV_N2;
 PRE_L  = conv_alloc; conv_alloc += PRE_N;   // wet-path pre-delay rings
 PRE_R  = conv_alloc; conv_alloc += PRE_N;
 OLAP_L = conv_alloc; conv_alloc += CONV_P;  // overlap-add tails
@@ -120,6 +235,28 @@ FLDLEN = conv_alloc; conv_alloc += MAXFLD;    // per folder: length
 FLDCNT = conv_alloc; conv_alloc += MAXFLD;    // per folder: file count
 SELP   = conv_alloc; conv_alloc += SELP_CAP;  // selected path (browser), packed
 GFLT   = conv_alloc; conv_alloc += MAXIR;     // UI-thread-owned filter results
+ENVN   = 512;                                 // decay view resolution
+ENV    = conv_alloc; conv_alloc += ENVN;      // IR decay envelope, published by rvb_build
+ENVW   = conv_alloc; conv_alloc += ENVN;      // ...built here first, so ENV is never half-written
+// ---- late-tail modulation, not FFT-visible ----
+ONS_WIN_CAP = 4096;                           // window cap: 20 ms @ 192k is 3840
+HWIN   = conv_alloc; conv_alloc += ONS_WIN_CAP; // Hann weights for the detector
+ONSV   = conv_alloc; conv_alloc += 16;        // per-channel detector results
+// 256 words of delay ring is 1.3 ms at 48k and 5.3 ms at 192k; the excursion
+// tops out at 2*300 us, so this has room at every rate the plugin runs at.
+MOD_DN = 256; MOD_DMASK = MOD_DN - 1;
+GOLAP  = conv_alloc; conv_alloc += NGRP*4*CONV_P;  // per-group overlap tails
+GOUT   = conv_alloc; conv_alloc += NGRP*4*CONV_P;  // per-group time-domain block
+GDLY   = conv_alloc; conv_alloc += NGRP*4*MOD_DN;  // per-group modulation rings
+MODG   = conv_alloc; conv_alloc += NGRP + 1;       // group partition boundaries
+// Per (group, input side) LFO state. Side 0 drives LL and LR, side 1 drives RL
+// and RR - by INPUT path, never by output channel.
+MPHO   = conv_alloc; conv_alloc += NGRP*2;    // LFO phase offset
+MDLY   = conv_alloc; conv_alloc += NGRP*2;    // current delay, samples
+MINC   = conv_alloc; conv_alloc += NGRP*2;    // per-sample slew inside a sub-block
+MRW    = conv_alloc; conv_alloc += NGRP*2;    // band-limited random-walk state
+MGSC   = conv_alloc; conv_alloc += NGRP;      // per-group depth scale
+APS    = conv_alloc; conv_alloc += NGRP*4;    // allpass interpolator state
 
 // maxmem is not reliably honoured and writes past the real ceiling are dropped
 // silently. Two sentinels at different addresses near the top; a shared
@@ -134,8 +271,22 @@ conv_alloc[-1] = 0; conv_alloc[-3] = 0;
 // the audio thread reads, and audio code must not use variable names that
 // @gfx uses. DO NOT UNDO: every @gfx-only variable and function here is
 // named g_*, and nothing else in this file uses that prefix. @gfx writes
-// exactly two things the audio thread looks at — the pend_* request scalars —
+// exactly one kind of thing the audio thread looks at — the pend_* scalars —
 // and one memory region (GFLT) the audio thread never reads.
+//
+// The widget library adds a second @gfx-only prefix, gk_*: gk_init() runs
+// here, before any audio, and everything else gk_ touches is drawing state.
+// ENV/env_n go the other way — written by rvb_build on the audio thread and
+// only ever READ by @gfx. A rebuild landing mid-frame can tear one frame of
+// the decay view; nothing else depends on it. The modulation readout
+// (ons_ms, ons_pre_ms, ons_ok, ons_uncertain, mod_avail) travels the same way,
+// with the same consequence and no more.
+//
+// AND: EEL2 identifiers are CASE-INSENSITIVE. A constant NAME and a runtime
+// variable `name` are one variable, which has silently broken two things in
+// this file already (MOD_SUB/mod_sub, PRE_XF/pre_xf) with no error anywhere
+// and no render test able to see it. The `case` test in tools/render_test.py
+// scans for it; do not name a global after another one in a different case.
 
 function db2lin(db) ( 10^(db*0.05) );
 
@@ -232,9 +383,22 @@ function rvb_clear_state() (
   memset(OUTB_L, 0, CONV_P); memset(OUTB_R, 0, CONV_P);
   memset(DRY_L, 0, CONV_P);  memset(DRY_R, 0, CONV_P);
   memset(PRE_L, 0, PRE_N);   memset(PRE_R, 0, PRE_N);
+  memset(GOLAP, 0, NGRP*4*CONV_P);
+  memset(GOUT,  0, NGRP*4*CONV_P);
+  memset(GDLY,  0, NGRP*4*MOD_DN);
+  memset(MDLY, 0, NGRP*2); memset(MINC, 0, NGRP*2); memset(MRW, 0, NGRP*2);
+  memset(APS, 0, NGRP*4);
   conv_pos = 0; fdl_pos = 0; pre_w = 0; pre_xf = 0;
   hp_l1 = 0; hp_l2 = 0; hp_r1 = 0; hp_r2 = 0;
   lp_l1 = 0; lp_l2 = 0; lp_r1 = 0; lp_r2 = 0;
+  // mod_run goes back to 0 with the buffers it depends on: restarting in the
+  // modulated structure with empty overlaps would drop a tail block.
+  // mod_ctr, NOT mod_sub: EEL2 identifiers are case-insensitive, so a counter
+  // called mod_sub IS the constant MOD_SUB. Decrementing it zeroed the update
+  // interval, ran the LFO every sample and divided by a negative number, and
+  // the delays ran off to -5e8 samples. DO NOT reintroduce the name.
+  mod_run = 0; mod_dep_s = 0; mod_ph = 0; mod_ctr = 0; mod_w = 0;
+  mod_settled = 1;   // nothing to hand back: the unmodulated path may run
 );
 
 // IR sample for conv path (0=LL,1=LR,2=RL,3=RR) at output frame t, resampled
@@ -295,29 +459,328 @@ function rvb_stage(h) local(nch, sr, frames, capfr, ok) (
   ok;
 );
 
+// ---- modulation onset: the IR's mixing time ----------------------------
+// The point where discrete, countable reflections give way to a diffuse field
+// that is statistically noise. Before it, samples carry the spatial cues the
+// ear localises with and must not be modulated; after it, they are texture.
+// It runs from 10 ms in a small wooden room to 150 ms in a cathedral, so a
+// fixed constant is wrong for most of any library.
+//
+// Abel-Huang normalised echo density: over a sliding window, the fraction of
+// samples whose magnitude exceeds that window's standard deviation converges
+// to erfc(1/sqrt(2)) = 0.3173 for Gaussian noise. Dividing by that constant
+// puts the profile near 0 while discrete reflections still dominate and at 1.0
+// once the response has gone diffuse. The mixing time is the first point that
+// reaches ONS_THRESH and STAYS there for ONS_HOLD_MS. The hold is not optional:
+// a dense early-reflection cluster spikes the profile and without it triggers
+// tens of ms early.
+//
+// Excess kurtosis over the same window is the cross-check - large and positive
+// while a few big reflections dominate, falling toward 0 as the distribution
+// turns Gaussian. It does NOT override the echo-density answer: across the
+// whole Samplicity M7 set the two disagreed on exactly two IRs (Car Park,
+// Arena), both genuinely slapback-heavy, and on both the echo density was the
+// better number. Disagreement sets ons_uncertain, which the interface shows,
+// and nothing else.
+//
+// This works on the RAW staged file at the file's own rate, which makes the
+// answer a property of the file rather than of the project rate or the length
+// knob: a source time in seconds lands at (that time * stretch) seconds in the
+// built IR, so rvb_build only has to multiply. That is why changing IR length
+// does not re-analyse.
+//
+// tools/ir_onset.py is the reference implementation, and the numbers here were
+// checked against all 134 IRs of the Samplicity M7 set with it. The two must
+// be edited together.
+ONS_GAUSS   = 0.3173105078629141;  // erfc(1/sqrt(2))
+ONS_WIN_MS  = 20;      // sliding window; longer smooths but blurs the transition
+ONS_HOP_MS  = 2;
+ONS_THRESH  = 0.9;     // normalised echo density that counts as diffuse
+ONS_HOLD_MS = 30;      // ...and how long it has to stay there
+ONS_KURT_MAX = 1;      // excess kurtosis that counts as Gaussian enough
+ONS_SCAN_MS = 400;     // how far in to look; the widest raw result seen was 203
+ONS_LO_MS   = 10;
+ONS_HI_MS   = 150;
+ONS_DEF_MS  = 60;      // fallback when the detector does not converge
+ONS_MIN_SEC = 0.5;     // shorter IRs are not modulated at all
+
+// Hann weights for the detector window, rebuilt only when the window length
+// changes - i.e. when an IR at a new sample rate is staged.
+function ons_hann(win) local(i) (
+  ons_hwin != win ? (
+    ons_hwin = win;
+    ons_wsum = 0;
+    i = 0;
+    loop(win,
+      HWIN[i] = 0.5 - 0.5*cos(2*$pi*i/(win - 1));
+      ons_wsum += HWIN[i];
+      i += 1;
+    );
+  );
+);
+
+// First sample at or above 1% of the channel peak. The mixing time is a
+// property of the room measured from the direct sound, not from frame 0: IRs
+// carry leading silence and a capture pre-delay in front of it.
+function ons_direct(ch) local(i, pk, lim, r, v) (
+  pk = 0; i = 0;
+  loop(ir_src_frames,
+    v = abs(IRRAW[i*ir_nch + ch]);
+    v > pk ? pk = v;
+    i += 1;
+  );
+  r = -1;
+  pk > 0 ? (
+    lim = pk * 0.01;
+    i = 0;
+    while(i < ir_src_frames && r < 0) (
+      abs(IRRAW[i*ir_nch + ch]) >= lim ? r = i;
+      i += 1;
+    );
+  );
+  r;
+);
+
+// Echo density and kurtosis for one channel. Returns the echo-density mixing
+// time in ms after the direct sound, or -1 if it never converges; also leaves
+// the direct-sound offset in ons_t0_ms and the kurtosis answer in ons_k_ms
+// (-1 if that did not converge either).
+function ons_channel(ch) local(win, hop, t0, last, pos, i, s2, s4, m2, sig,
+                               above, dens, kurt, dr, kr, tms, res, v, vv, base) (
+  res = -1; ons_k_ms = -1; ons_t0_ms = -1;
+  win = max(8, floor(ONS_WIN_MS*0.001*ir_src_rate + 0.5));
+  win > ONS_WIN_CAP ? win = ONS_WIN_CAP;
+  hop = max(1, floor(ONS_HOP_MS*0.001*ir_src_rate + 0.5));
+  ons_hann(win);
+  t0 = ons_direct(ch);
+  (t0 >= 0 && ir_src_frames > win) ? (
+    ons_t0_ms = t0 * 1000 / ir_src_rate;
+    last = min(ir_src_frames - win, t0 + floor(ONS_SCAN_MS*0.001*ir_src_rate));
+    dr = -1; kr = -1;
+    pos = t0;
+    // while, not loop(): the iteration count depends on where the run starts
+    while(pos <= last) (
+      base = pos*ir_nch + ch;
+      s2 = 0; s4 = 0; i = 0;
+      while(i < win) (
+        v = IRRAW[base + i*ir_nch];
+        vv = v*v;
+        s2 += HWIN[i]*vv;
+        s4 += HWIN[i]*vv*vv;
+        i += 1;
+      );
+      m2 = s2 / ons_wsum;
+      dens = 0; kurt = 0;
+      m2 > 0 ? (
+        sig = sqrt(m2);
+        above = 0; i = 0;
+        while(i < win) (
+          abs(IRRAW[base + i*ir_nch]) > sig ? above += HWIN[i];
+          i += 1;
+        );
+        dens = (above / ons_wsum) / ONS_GAUSS;
+        kurt = s4 / ons_wsum / (m2*m2) - 3;
+      );
+      // window CENTRE, not start: the profile value describes the whole 20 ms
+      // span, and a window straddling the join already reads diffuse, so
+      // start-timing declares the mixing time about half a window early -
+      // the one direction that costs us, since modulating before the mixing
+      // time is exactly what this split exists to prevent.
+      tms = (pos + win*0.5 - t0) * 1000 / ir_src_rate;
+      dens >= ONS_THRESH ? (
+        dr < 0 ? ( dr = tms; ) :
+          (res < 0 && tms - dr >= ONS_HOLD_MS ? ( res = dr; ));
+      ) : ( dr = -1; );
+      kurt <= ONS_KURT_MAX ? (
+        kr < 0 ? ( kr = tms; ) :
+          (ons_k_ms < 0 && tms - kr >= ONS_HOLD_MS ? ( ons_k_ms = kr; ));
+      ) : ( kr = -1; );
+      pos += hop;
+    );
+    // a run still going at the end of the scan counts if it is long enough
+    tms = (last + win*0.5 - t0) * 1000 / ir_src_rate;
+    res < 0 && dr >= 0 && tms - dr >= ONS_HOLD_MS ? ( res = dr; );
+    ons_k_ms < 0 && kr >= 0 && tms - kr >= ONS_HOLD_MS ? ( ons_k_ms = kr; );
+  );
+  res;
+);
+
+// Median of the n values in ONSV[base..base+n). Insertion sort - n is at most
+// 4, and EEL2 has no recursion to spend a real sort on.
+function ons_median(base, n) local(i, j, v) (
+  i = 1;
+  while(i < n) (
+    v = ONSV[base+i]; j = i - 1;
+    while(j >= 0 && ONSV[base+j] > v) ( ONSV[base+j+1] = ONSV[base+j]; j -= 1; );
+    ONSV[base+j+1] = v;
+    i += 1;
+  );
+  n <= 0 ? -1 :
+    (n % 2 ? ONSV[base + floor(n*0.5)]
+           : 0.5*(ONSV[base + n*0.5 - 1] + ONSV[base + n*0.5]));
+);
+
+// Run the detector over every channel of the staged file and publish ONE onset
+// for the whole IR set. Per-channel split points would misalign the early/late
+// boundary between channels and smear the stereo image, so the four are
+// reduced to a median, not kept apart.
+// Publishes ons_src_sec: the onset in SOURCE seconds, direct-sound offset
+// included, which is what rvb_build scales by the length stretch.
+function rvb_detect() local(ch, n, nk, nt, v) (
+  ons_ok = 0; ons_uncertain = 0;
+  ons_ms = ONS_DEF_MS; ons_pre_ms = 0;
+  (ir_src_frames > 0 && ir_nch > 0) ? (
+    n = 0; nk = 0; nt = 0;
+    ch = 0;
+    loop(ir_nch,
+      v = ons_channel(ch);
+      // a silent channel has no direct sound and no opinion about either
+      ons_t0_ms >= 0 ? ( ONSV[4+nt] = ons_t0_ms; nt += 1; );
+      v >= 0 ? ( ONSV[n] = v; n += 1; );
+      ons_k_ms >= 0 ? ( ONSV[8+nk] = ons_k_ms; nk += 1; );
+      ch += 1;
+    );
+    n > 0 ? ( ons_ms = ons_median(0, n); ons_ok = 1; );
+    nt > 0 ? ( ons_pre_ms = ons_median(4, nt); );
+    // the cross-check: a big disagreement means an unusual IR, not a new answer
+    (ons_ok && nk > 0) ? (
+      abs(ons_median(8, nk) - ons_ms) > 40 ? ons_uncertain = 1;
+    ) : ( ons_uncertain = 1; );
+  );
+  ons_ms = min(max(ons_ms, ONS_LO_MS), ONS_HI_MS);
+  ons_src_sec = (ons_pre_ms + ons_ms) * 0.001;
+);
+
+// ---- early/late split --------------------------------------------------
+// The early part is never modulated; the late part is. They meet in an
+// AMPLITUDE-complementary crossfade across the detected onset - early =
+// ir*(1-w), late = ir*w - so the two sum back to ir exactly. Equal-power is
+// the right choice for decorrelated signals, but these are the same IR fed the
+// same input: equal-power would put a +3 dB bump in the crossfade region the
+// moment modulation engaged, so Depth just above Off would not sound like
+// Depth Off. Exact summation is worth more here than constant power.
+//
+// Only the partitions the crossfade actually touches get their own copies.
+// Past the fade w is 1, so the late path reads IRSPEC - which still holds the
+// whole, unweighted IR. That is also what keeps Depth = Off bit-identical:
+// the unmodulated path never learns any of this happened.
+MOD_XF_MS = 30;        // crossfade width across the onset
+MOD_A_MAX = 0.0003;    // one-sided excursion at Depth 100% (300 us)
+MOD_SUB   = 64;        // LFO / random-walk update interval, samples
+function rvb_split(out_frames, sc, stretch)
+  local(p, k, t, n, be, bl, a, b, xf, w, onf, nlate, g, v) (
+  mod_avail = 0; mod_nearly = 0; mod_k0 = 0; mod_a = 0; mod_b = 0;
+  // the override is in ms from IR start, the same number the panel displays
+  ons_eff_sec = rvb_mons > 0 ? rvb_mons * 0.001 : ons_src_sec;
+  // Under half a second there is not enough diffuse tail to be worth moving
+  // and too much early structure to risk - and this is also the guard that
+  // keeps cabinet impulses and correction curves out of the modulator, since
+  // phase movement destroys exactly what those encode.
+  (out_frames >= ONS_MIN_SEC*srate) ? (
+    xf = max(8, floor(MOD_XF_MS * 0.001 * srate));
+    // ons_eff_sec is in SOURCE seconds; the length stretch is the only thing
+    // between that and a frame index in the IR that was actually built.
+    onf = floor(ons_eff_sec * stretch * srate);
+    b = onf + xf*0.5;
+    // a long IR stretched to 400% can push the onset past the side stores;
+    // clamp the split rather than reserve 1 MB for a case nobody mixes into
+    b > EARLYP*CONV_P ? ( b = EARLYP*CONV_P; );
+    a = b - xf;
+    a < 0 ? ( a = 0; b = xf; );
+    mod_a = a; mod_b = b;
+    mod_nearly = min(EARLYP, ceil(b / CONV_P));
+    mod_k0 = floor(a / CONV_P);
+    p = 0;
+    loop(4,
+      k = 0;
+      loop(mod_nearly,
+        be = EARLY  + (p*EARLYP + k)*CONV_N2;
+        bl = LATEHD + (p*EARLYP + k)*CONV_N2;
+        memset(be, 0, CONV_N2);
+        memset(bl, 0, CONV_N2);
+        n = 0;
+        loop(CONV_P,
+          t = k*CONV_P + n;
+          t < out_frames ? (
+            v = ir_samp(p, t) * sc;
+            w = t <= a ? 0 : (t >= b ? 1 : (t - a)/(b - a));
+            be[2*n] = v*(1 - w);
+            bl[2*n] = v*w;
+          );
+          n += 1;
+        );
+        fft(be, CONV_N);
+        fft(bl, CONV_N);
+        k += 1;
+      );
+      p += 1;
+    );
+    // Contiguous, equal partition ranges over the late region. Fewer late
+    // partitions than groups means there is nothing to decorrelate.
+    nlate = ir_nparts - mod_k0;
+    nlate >= NGRP ? (
+      mod_avail = 1;
+      g = 0;
+      loop(NGRP + 1, MODG[g] = mod_k0 + floor(g*nlate/NGRP); g += 1; );
+      g = 0;
+      loop(NGRP,
+        // later tail tolerates - and wants - more movement than energy just
+        // past the mixing time
+        MGSC[g] = 0.6 + 0.4*g/(NGRP - 1);
+        // golden-ratio phase spacing so no two groups swing together; side B
+        // is a QUADRATURE offset from side A, not an independent generator,
+        // which is what keeps the phantom centre from wandering
+        v = g * 0.6180339887498949;
+        v -= floor(v);
+        MPHO[g*2]     = v * 2*$pi;
+        MPHO[g*2 + 1] = v * 2*$pi + $pi*0.5;
+        g += 1;
+      );
+      // Seeded from the IR, so the random end is reproducible: a tail that
+      // differs between two bounces of the same project is a support problem.
+      mod_seed = 1 + (floor(out_frames*7919 + ir_nparts*104729 + ons_ms*13)
+                      % 2147483646);
+    );
+  );
+);
+
 // Resample the staged IR to srate (scaled by the IR length slider),
 // energy-normalize (unity energy per output channel, so a unit-impulse IR at
 // 100% length passes at exactly 0 dB), partition, FFT into IRSPEC.
 // No file I/O: an IR length change re-runs only this.
-function rvb_build() local(out_frames, e_l, e_r, sc, p, k, t, n, buf, v, stretch) (
-  ir_ready = 0; ir_trunc = 0;
+// NOTHING here clears ir_ready or env_n on the way in. Clearing them meant
+// that for the whole length of a rebuild - which is most of a second - @gfx
+// saw "no IR loaded" and flashed the orange warning for that. The previous
+// result stays published until a new one is complete, and ir_ready is
+// assigned once, at the end, from whether this build actually produced one.
+function rvb_build() local(out_frames, e_l, e_r, sc, p, k, t, n, buf, v, stretch, pk, eb, ok, en, lfull) (
+  ok = 0;
   (ir_staged && mem_ok && ir_src_frames > 0) ? (
     stretch = max(rvb_len, 1) * 0.01;
     ir_ratio = ir_src_rate / (srate * stretch);
     out_frames = floor(ir_src_frames * srate * stretch / ir_src_rate);
+    lfull = out_frames / srate;     // what the file asks for, before the cap
     out_frames > MAXPARTS*CONV_P ? out_frames = MAXPARTS*CONV_P;
-    ir_trunc = out_frames >= MAXPARTS*CONV_P ? 1 : 0;
     out_frames > 0 ? (
+      // Energy for the normalisation, and a peak envelope for the decay view,
+      // in one pass - this loop already costs 4 ir_samp() calls per frame.
+      en = min(ENVN, out_frames);
+      memset(ENVW, 0, ENVN);
       e_l = 0; e_r = 0;
       t = 0;
       loop(out_frames,
-        v = ir_samp(0, t); e_l += v*v;
-        v = ir_samp(2, t); e_l += v*v;
-        v = ir_samp(1, t); e_r += v*v;
-        v = ir_samp(3, t); e_r += v*v;
+        v = ir_samp(0, t); e_l += v*v; pk = abs(v);
+        v = ir_samp(2, t); e_l += v*v; pk = max(pk, abs(v));
+        v = ir_samp(1, t); e_r += v*v; pk = max(pk, abs(v));
+        v = ir_samp(3, t); e_r += v*v; pk = max(pk, abs(v));
+        eb = floor(t * en / out_frames);
+        ENVW[eb] = max(ENVW[eb], pk);
         t += 1;
       );
       sc = 1 / sqrt(max(max(e_l, e_r), 0.000000000001));
+      // put the envelope on the same scale as the IR that is actually loaded
+      eb = 0;
+      loop(en, ENVW[eb] *= sc; eb += 1; );
       ir_nparts = ceil(out_frames / CONV_P);
       p = 0;
       loop(4,
@@ -336,12 +799,26 @@ function rvb_build() local(out_frames, e_l, e_r, sc, p, k, t, n, buf, v, stretch
         );
         p += 1;
       );
+      // Derive the modulation split from the IR that was just built. It reads
+      // ir_nparts, so it has to come after the loop above, and it writes only
+      // its own side stores - IRSPEC is left holding the whole IR.
+      rvb_split(out_frames, sc, stretch);
+      // publish the finished envelope in one go
+      memcpy(ENV, ENVW, ENVN);
+      env_n = en;
       ir_len_sec = out_frames / srate;
+      ir_len_full = lfull;            // >= ir_len_sec; differs only when capped
       ir_nch_disp = ir_nch;
       ir_built_srate = srate;
-      ir_ready = 1;
+      // the length THIS build used, so @gfx can scale its preview of a
+      // length the user is still dragging. Same idea as ir_built_srate, and
+      // not l_rvb_len, which @slider moves the instant the knob does.
+      ir_built_len = max(rvb_len, 1);
+      ok = 1;
     );
   );
+  ir_ready = ok;
+  ok == 0 ? ( env_n = 0; );   // a failed build publishes nothing to draw
   rvb_clear_state();
 );
 
@@ -359,6 +836,10 @@ function rvb_load() local(i) (
   ) : (
     ir_staged = rvb_stage(file_open(slider1));
   );
+  // Detection is per FILE, so it belongs here and not in rvb_build: a length
+  // change re-runs the build and must not pay for a re-analysis (or, worse,
+  // get a different answer off resampled data).
+  ir_staged ? rvb_detect();
   rvb_build();
 );
 
@@ -421,6 +902,204 @@ function rvb_process() local(sl, n) (
   );
 );
 
+// ---- late-tail modulation ------------------------------------------------
+// The late partitions are convolved into their own accumulators, one per
+// (group, IR path), and each group's time-domain output then runs through an
+// interpolated fractional delay line whose length the LFOs move. Delaying the
+// output of a linear filter IS moving its taps, so this is the same physics as
+// the hardware's moving delay taps - and much cheaper here than rotating the
+// stored IR partitions, which would add a second convolve_c per late partition
+// per path to a plugin already at ~0.57x real time on a 5.4 s IR. It is also
+// smoother: the delay is continuous, so there is no per-block phase step to
+// click on and no quantisation to sound steppy.
+//
+// Grouping by INPUT path is what protects the stereo image. LL and LR describe
+// what the left input does to the field and share one delay; RL and RR share
+// the other. Four independent generators is the tempting shortcut and the
+// wrong one - it smears the image instead of widening it, and shows up on a
+// mono fold as a wandering phantom centre.
+
+// acc += IR spectra convolved with input history, over partitions [ka, kb).
+// Same inner work as rvb_mac; the range is what lets the early and late halves
+// of the split read out of different stores.
+function rvb_mac_range(acc, pbase, fbase, ka, kb) local(k, fs) (
+  k = ka;
+  while(k < kb) (
+    fs = fbase + ((fdl_pos + k) % MAXPARTS)*CONV_N2;
+    memcpy(CSCR, pbase + k*CONV_N2, CONV_N2);
+    convolve_c(CSCR, fs, CONV_N);
+    rvb_acc(acc, CSCR);
+    k += 1;
+  );
+);
+
+// Park-Miller LCG. EEL2's rand() cannot be seeded, and an unseeded random end
+// means two bounces of the same project do not match. Multiplier and modulus
+// are picked so every intermediate stays well inside the 2^53 a double holds
+// exactly - the textbook 1103515245 does not.
+function mod_rand() (
+  mod_seed = (mod_seed * 16807) % 2147483647;
+  mod_seed / 2147483647;
+);
+
+// A new delay target for every (group, side), once per MOD_SUB samples; the
+// per-sample slew between targets is MINC. Updating only once per partition
+// would give a 2 Hz LFO a 12-step polygonal shape, and the steps in its
+// derivative - which is what the ear hears as pitch - are audible.
+function mod_lfo() local(g, s, i, a, sn, rw, v, tgt, mix, amp, base, dmin) (
+  mod_ph += 2*$pi*rvb_mrate*MOD_SUB/srate;
+  mod_ph >= 2*$pi ? mod_ph -= 2*$pi;
+  // Depth drives the sine-to-random blend as well as the excursion, the way
+  // the hardware grades low/mid/high off a single control: smooth, periodic,
+  // consistent movement at the bottom, independently wandering taps at the top.
+  mix = mod_dep_s;
+  // random-walk bandwidth tracks the rate control
+  a = 1 - exp(-2*$pi*rvb_mrate*MOD_SUB/srate);
+  // Every group swings about the SAME mean delay, and only the excursion is
+  // scaled per group. Scaling the whole one-sided delay instead would give the
+  // groups four different mean delays - a static ~120 us spread between them,
+  // which is a fixed comb filter sitting on the tail rather than movement.
+  base = mod_dep_s * MOD_A_MAX * srate;
+  // The interpolator is a 4-point Lagrange, which needs one sample of history
+  // ON EITHER SIDE of the read position, so the integer part of the delay has
+  // to be at least 1. That single sample - 21 us at 48k - sits on the late
+  // path only while modulation is running; against the early path it is a comb
+  // notch at 24 kHz, i.e. out of the band. It drops back to 0 as the depth
+  // reaches 0 so the hand-back to the unmodulated structure stays exact.
+  dmin = mod_dep_s > 0 ? 1 : 0;
+  g = 0;
+  loop(NGRP,
+    amp = base * MGSC[g];        // MGSC <= 1, so the delay never goes negative
+    s = 0;
+    loop(2,
+      i = g*2 + s;
+      sn = sin(mod_ph + MPHO[i]);
+      rw = MRW[i] + (mod_rand()*2 - 1 - MRW[i])*a;
+      MRW[i] = rw;
+      // a one-pole leaves the walk far below unit amplitude at small a; scale
+      // it back and clamp, so the two ends of the blend move by the same amount
+      v = max(-1, min(1, rw / sqrt(max(a, 0.000001))));
+      // ONE-SIDED about `base`: the delay stays in [base-amp, base+amp], which
+      // is inside [0, 2*base], so a depth of 0 gives a delay of exactly 0 and
+      // the split sums straight back to the unsplit IR. A swing centred on
+      // zero would need the late IR shifted earlier to compensate, and that
+      // shift would have to be applied to the whole IR - the one copy there is
+      // no memory for.
+      tgt = dmin + base + amp * ((1 - mix)*sn + mix*v);
+      MINC[i] = (tgt - MDLY[i]) / MOD_SUB;
+      s += 1;
+    );
+    g += 1;
+  );
+  // Once the depth has reached a true zero, drive the delays to a true zero
+  // and say so. The structure cannot hand back to the unmodulated path until
+  // every line is reading its own write position, and the delays must ARRIVE
+  // there on the slew rather than being snapped: a 1-sample jump on a tail at
+  // full amplitude is a click, and the tail is at full amplitude here - depth
+  // scales the movement, not the level.
+  mod_dep_s == 0 ? (
+    v = 0; i = 0;
+    loop(NGRP*2, v = max(v, abs(MDLY[i])); i += 1; );
+    v < 0.0001 ? (
+      memset(MDLY, 0, NGRP*2); memset(MINC, 0, NGRP*2);
+      mod_settled = 1;
+    );
+  ) : ( mod_settled = 0; );
+);
+
+// One partition step in the split structure: early into the existing
+// accumulators, late into one accumulator per (group, path).
+function rvb_process_mod() local(sl, n, g, p, acc, ka, kb, km, ob, ol) (
+  fdl_pos = fdl_pos > 0 ? fdl_pos - 1 : MAXPARTS - 1;
+  sl = FDL_L + fdl_pos*CONV_N2;
+  memset(sl, 0, CONV_N2);
+  n = 0;
+  loop(CONV_P, sl[2*n] = INB_L[n]; n += 1; );
+  fft(sl, CONV_N);
+  sl = FDL_R + fdl_pos*CONV_N2;
+  memset(sl, 0, CONV_N2);
+  n = 0;
+  loop(CONV_P, sl[2*n] = INB_R[n]; n += 1; );
+  fft(sl, CONV_N);
+
+  // ---- early: unmodulated, through the accumulators it always used ----
+  // OLAP_L/R is NOT cleared when the structure switches in. On the first
+  // modulated block it still holds the whole IR's overlap tail from the last
+  // unmodulated block, which is exactly the late tail the groups cannot supply
+  // yet - so the changeover needs no crossfade and loses nothing.
+  memset(ACC_L, 0, CONV_N2);
+  memset(ACC_R, 0, CONV_N2);
+  rvb_mac_range(ACC_L, EARLY + 0*EARLYP*CONV_N2, FDL_L, 0, mod_nearly);
+  rvb_mac_range(ACC_L, EARLY + 2*EARLYP*CONV_N2, FDL_R, 0, mod_nearly);
+  rvb_mac_range(ACC_R, EARLY + 1*EARLYP*CONV_N2, FDL_L, 0, mod_nearly);
+  rvb_mac_range(ACC_R, EARLY + 3*EARLYP*CONV_N2, FDL_R, 0, mod_nearly);
+  ifft(ACC_L, CONV_N);
+  ifft(ACC_R, CONV_N);
+  n = 0;
+  loop(CONV_P,
+    OUTB_L[n] = ACC_L[2*n]*conv_scale + OLAP_L[n];
+    OUTB_R[n] = ACC_R[2*n]*conv_scale + OLAP_R[n];
+    OLAP_L[n] = ACC_L[2*(n+CONV_P)]*conv_scale;
+    OLAP_R[n] = ACC_R[2*(n+CONV_P)]*conv_scale;
+    n += 1;
+  );
+
+  // ---- late: one accumulator, ifft and overlap per (group, path) ----
+  g = 0;
+  loop(NGRP,
+    ka = MODG[g]; kb = MODG[g+1];
+    km = min(kb, mod_nearly);      // below this the late IR lives in LATEHD
+    p = 0;
+    loop(4,
+      acc = GACC + (g*4 + p)*CONV_N2;
+      memset(acc, 0, CONV_N2);
+      // paths 0,1 (LL, LR) are fed by the left input; 2,3 (RL, RR) by the right
+      sl = p < 2 ? FDL_L : FDL_R;
+      ka < km ? rvb_mac_range(acc, LATEHD + p*EARLYP*CONV_N2, sl, ka, km);
+      kb > mod_nearly ?
+        rvb_mac_range(acc, IRSPEC + p*MAXPARTS*CONV_N2, sl,
+                      max(ka, mod_nearly), kb);
+      ifft(acc, CONV_N);
+      ob = GOUT  + (g*4 + p)*CONV_P;
+      ol = GOLAP + (g*4 + p)*CONV_P;
+      n = 0;
+      loop(CONV_P,
+        ob[n] = acc[2*n]*conv_scale + ol[n];
+        ol[n] = acc[2*(n+CONV_P)]*conv_scale;
+        n += 1;
+      );
+      p += 1;
+    );
+    g += 1;
+  );
+);
+
+// Switching back OUT of the modulated structure: the unmodulated path expects
+// OLAP_L/R to hold the whole IR's tail, and after the split it holds only the
+// early half. Folding the group overlaps back in makes that switch seamless
+// too. Only correct once the depth has reached exactly 0, because only then is
+// every delay line reading its own write position and adding nothing.
+function mod_fold_olap() local(g, p, ol, n) (
+  g = 0;
+  loop(NGRP,
+    p = 0;
+    loop(4,
+      ol = GOLAP + (g*4 + p)*CONV_P;
+      n = 0;
+      loop(CONV_P,
+        (p == 0 || p == 2) ? ( OLAP_L[n] += ol[n]; ) : ( OLAP_R[n] += ol[n]; );
+        n += 1;
+      );
+      p += 1;
+    );
+    g += 1;
+  );
+  memset(GOLAP, 0, NGRP*4*CONV_P);
+  memset(GOUT,  0, NGRP*4*CONV_P);
+  memset(GDLY,  0, NGRP*4*MOD_DN);
+  memset(APS,   0, NGRP*4);
+);
+
 function rvb_gains() (
   wet_g = rvb_wet <= -59.9 ? 0 : db2lin(rvb_wet);
   dry_g = rvb_dry <= -59.9 ? 0 : db2lin(rvb_dry);
@@ -428,7 +1107,7 @@ function rvb_gains() (
 
 // Pre-delay: target tap in samples, clamped to the ring. A change is not
 // applied by moving one read pointer (that pitch-shifts the tail); the old and
-// new taps are equal-power crossfaded over PRE_XF samples instead.
+// new taps are equal-power crossfaded over PRE_XFLEN samples instead.
 function pre_update() local(d) (
   d = floor(rvb_pre * 0.001 * srate + 0.5);
   d < 0 ? d = 0;
@@ -436,7 +1115,7 @@ function pre_update() local(d) (
   d != pre_d ? (
     pre_d_old = pre_d;
     pre_d = d;
-    pre_xf = PRE_XF;
+    pre_xf = PRE_XFLEN;
   );
 );
 
@@ -476,7 +1155,7 @@ function biq_design() local(f, w0, cs, sn, alpha, a0, nyq) (
 conv_scale = 1/CONV_N;
 rvb_gains();
 l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry;
-l_rvb_len = rvb_len;
+l_rvb_len = rvb_len; l_rvb_mons = rvb_mons;
 
 // smoothed filter cutoffs start settled so the first block is not a sweep
 hpf_s = rvb_hpf; lpf_s = rvb_lpf;
@@ -498,7 +1177,58 @@ ir_from_browser = sel_len > 0 ? ir_from_browser : 0;
   sel_idx = sel_index();
 );
 l_irslider = slider1;
-pend_pick = 0; pend_rescan = 0; pend_reload = 0;
+pend_pick = 0; pend_rescan = 0; pend_reload = 0; rb_wait = 0;
+// Set by @gfx for the length gesture only. An @init rerun (transport start,
+// srate change, recompile) clears it, so it cannot latch on permanently.
+pend_lenhold = 0;
+
+// ---- interface (gui_kit) ----
+// Drawing state only; no audio code reads any of it.
+gk_init();
+gk_img_field = 3; gk_img_header = 4; gk_img_panel = 5;
+gk_img_dropdown = 6; gk_img_button = 7; gk_img_wave_frame = 8;
+// REAPER silently refuses an image taller than ~6k px, so the knob strips are
+// grid-packed: 64 frames in 8 columns. These two numbers must match the PNG.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+IMG_CYAN = 0; IMG_ORANGE = 1; IMG_YELLOW = 2;
+// The decay view is a FIXED window, so the axis never moves and a change of
+// length stretches the envelope instead of relabelling the ruler under it.
+// Deliberately SHORTER than the IR cap (393216 spl, 8.19 s @48k): 5 s is the
+// range worth resolving, and a longer tail just runs off the edge in silence.
+DECAY_SECS = 5;
+IMG_COUNT = 10;           // slots 0..9 are images; 10 is the help file
+LOGO_IMG = 9; LOGO_ASPECT = 512/101;
+
+// The layout is authored at UI_W x UI_H logical px and every coordinate goes
+// through gk_S. A JSFX cannot resize its own window, so the @gfx literal is the
+// only real size; keep these two in step with it.
+//   958x664 @100%, 1198x830 @125%, 1437x996 @150%, 1916x1328 @200%
+// Widened from 720 in 1.4 to fit a fourth control panel on the same row; the
+// browser and the decay view took the extra width with it, which the long
+// Samplicity names wanted anyway.
+UI_W = 958; UI_H = 664;
+
+// ---- interface scale ----
+GM_UI_SCALE = 0;          // gmem slot, shared by every Magnolius plugin
+UI_SCALE_DEFAULT = 1;     // 1 = 100%, so the artwork blits pixel for pixel
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- help overlay ----
+HELP_FILE = 10;           // the last filename: slot, after every image
+HELP_BASE = 300;          // string slots 0..1023 belong to the script
+HELP_MAX  = 600;
+help_open = 0; help_lines = 0;
+
+// A slot REAPER could not load comes back as a zero-size image with no error
+// anywhere, and every filmstrip widget then falls back to vector drawing - so
+// a broken build looks plausible unless something says otherwise.
+function count_missing_images(n) local(i, w, h, bad) (
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
 
 @serialize
 // Saves the browser's chosen IR as a path (not an index), so adding IRs to the
@@ -510,6 +1240,7 @@ file_avail(0) < 0 ? (
   ser_i = 0;
   loop(sel_len, str_setchar(#sv, ser_i, SELP[ser_i]); ser_i += 1; );
   file_string(0, #sv);
+  file_var(0, gui_scale_idx);
 ) : (
   file_string(0, #sv);
   ser_n = strlen(#sv);
@@ -521,6 +1252,8 @@ file_avail(0) < 0 ? (
   sel_len = ser_n;
   ir_from_browser = sel_len > 0 ? 1 : 0;
   pend_reload = 1;
+  // appended in 1.3; projects saved before that have nothing left here
+  file_avail(0) > 0 ? file_var(0, gui_scale_idx);
 );
 
 @slider
@@ -534,6 +1267,13 @@ slider1 != l_irslider ? (
 rvb_len != l_rvb_len ? (
   l_rvb_len = rvb_len;
   pend_rebuild = 1;      // resample + re-FFT only; no file I/O
+);
+// An onset change re-derives which partitions count as late, so it costs a
+// full rebuild - the same one the length knob triggers, through the same
+// gesture guard. Depth and rate are NOT here: they are read live in @block.
+rvb_mons != l_rvb_mons ? (
+  l_rvb_mons = rvb_mons;
+  pend_rebuild = 1;
 );
 (rvb_wet != l_rvb_wet || rvb_dry != l_rvb_dry) ? (
   l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry;
@@ -554,8 +1294,28 @@ pend_pick > 0 ? (
     pend_reload = 1;
   );
 );
-pend_reload ? ( pend_reload = 0; pend_rebuild = 0; rvb_load(); sel_idx = sel_index(); );
-pend_rebuild ? ( pend_rebuild = 0; rvb_build(); );
+pend_reload ? (
+  pend_reload = 0; pend_rebuild = 0; rb_wait = 0;
+  rvb_load(); sel_idx = sel_index();
+  l_rvb_len = rvb_len; l_rvb_mons = rvb_mons;
+);
+// A rebuild is ~1M resample steps plus 512 FFTs - far longer than a block - so
+// it must never land in the middle of a length gesture. @gfx holds pend_lenhold
+// for the whole drag and drops it on mouse up; the ~120 ms timer then covers
+// what @gfx cannot schedule, namely length automation arriving through @slider.
+// pend_rebuild is left standing while the hold is on, so no request is lost.
+!pend_lenhold ? (
+  pend_rebuild ? ( pend_rebuild = 0; rb_wait = max(1, ceil(0.12 * srate / max(samplesblock, 1))); );
+  rb_wait > 0 ? (
+    rb_wait -= 1;
+    rb_wait <= 0 ? ( rb_wait = 0; l_rvb_len = rvb_len; l_rvb_mons = rvb_mons; rvb_build(); );
+  );
+);
+
+// Two 10^x per block. Cheap enough to do unconditionally, which means the
+// wet/dry gains can never be left stale by a @slider that did not re-run
+// after the GUI wrote a value.
+rvb_gains();
 
 pre_update();
 
@@ -574,6 +1334,25 @@ rvb_act = ir_ready;
 pdc_delay = rvb_act ? CONV_P : 0;
 pdc_bot_ch = 0; pdc_top_ch = 2;
 
+// ---- modulation control ----
+// Depth and rate are read live, here. Neither goes through @slider: that does
+// not re-run when the GUI writes a value with slider_automate, so a knob would
+// look alive and change nothing. Only the onset needs @slider, because it is
+// the one that costs a rebuild.
+mod_tgt = (rvb_mdep > 0 && mod_avail && rvb_act) ? rvb_mdep*0.01 : 0;
+mod_g = 1 - exp(-samplesblock / (srate * 0.05));
+mod_dep_s += (mod_tgt - mod_dep_s) * mod_g;
+abs(mod_dep_s - mod_tgt) < 0.000001 ? mod_dep_s = mod_tgt;
+// A true zero depth needs a true zero delay, or folding back into the
+// unmodulated structure would splice in a shifted tail. By the time this
+// fires the depth has been decaying for ~50 ms and the delays are far below
+// a sample, so the snap itself is inaudible.
+// Stay in the split structure until the depth has reached 0 AND mod_lfo has
+// slewed every delay line down to 0 with it (mod_settled). Snapping the delays
+// to zero instead would click: the tail is at full amplitude whatever the
+// depth, so a 1-sample jump in it is audible.
+mod_want = (mod_tgt > 0 || !mod_settled) ? 1 : 0;
+
 @sample
 rvb_act ? (
   // wet = partitioned convolution (one-partition latency); dry runs through
@@ -587,7 +1366,7 @@ rvb_act ? (
   pwl = PRE_L[prd]; pwr = PRE_R[prd];
   pre_xf > 0 ? (
     pro = (pre_w - pre_d_old + PRE_N) & PRE_MASK;
-    pxg = pre_xf / PRE_XF;              // 1 -> 0 across the fade
+    pxg = pre_xf / PRE_XFLEN;           // 1 -> 0 across the fade
     pxa = sqrt(1 - pxg); pxb = sqrt(pxg);
     pwl = pwl*pxa + PRE_L[pro]*pxb;
     pwr = pwr*pxa + PRE_R[pro]*pxb;
@@ -597,7 +1376,70 @@ rvb_act ? (
   INB_L[conv_pos] = pwl; INB_R[conv_pos] = pwr;
 
   // wet output, then the 12 dB/oct shaping filters (transposed direct form II)
+  // OUTB_L/R carries the whole wet signal unmodulated, or just the EARLY half
+  // when the split is running - the late half arrives below, one moving tap
+  // per (group, path).
   wl = OUTB_L[conv_pos]; wr = OUTB_R[conv_pos];
+  mod_run ? (
+    mod_ctr <= 0 ? ( mod_ctr = MOD_SUB; mod_lfo(); );
+    mod_ctr -= 1;
+    // mg/md/mi/mb are audio-thread names; @gfx owns g_* and gk_* and shares no
+    // loop counter with this block. DO NOT UNDO - see the threading rule.
+    mg = 0;
+    loop(NGRP,
+      mb = mg*4*MOD_DN;
+      mo = mg*4*CONV_P;
+      GDLY[mb              + mod_w] = GOUT[mo              + conv_pos];
+      GDLY[mb +   MOD_DN   + mod_w] = GOUT[mo +   CONV_P   + conv_pos];
+      GDLY[mb + 2*MOD_DN   + mod_w] = GOUT[mo + 2*CONV_P   + conv_pos];
+      GDLY[mb + 3*MOD_DN   + mod_w] = GOUT[mo + 3*CONV_P   + conv_pos];
+      mod_settled ? (
+        // delays are all a true zero and the structure is waiting to hand
+        // back: read straight out, so no interpolator touches the signal
+        wl += GDLY[mb + mod_w] + GDLY[mb + 2*MOD_DN + mod_w];
+        wr += GDLY[mb + MOD_DN + mod_w] + GDLY[mb + 3*MOD_DN + mod_w];
+      ) : (
+        md  = MDLY[mg*2];     MDLY[mg*2]     = md  + MINC[mg*2];
+        mdb = MDLY[mg*2 + 1]; MDLY[mg*2 + 1] = mdb + MINC[mg*2 + 1];
+        // First-order allpass interpolation. A Lagrange or linear interpolator
+        // is a lowpass that nulls at Nyquist for a half-sample delay, and
+        // since the fraction sweeps with the LFO that reads as a MOVING high
+        // frequency loss - measured at -2.5 dB above 15 kHz and -0.6 dB from
+        // 7.5-15 kHz with 4-point Lagrange. An allpass has unit magnitude at
+        // every frequency, which is the whole premise: this is supposed to be
+        // phase movement that leaves the spectral balance alone.
+        // The fractional part is kept in [0.5, 1.5) so the pole never gets
+        // near the unit circle (|c| stays under 0.34), which is what makes a
+        // time-varying allpass well behaved. MDLY >= 1 guarantees the integer
+        // part can absorb the shift. Indices are built non-negative before the
+        // mask, as the pre-delay ring does: EEL2's & on a negative is unsafe.
+        mi = floor(md);  mf = md - mi;
+        mf < 0.5 ? ( mi -= 1; mf += 1; );
+        ca = (1 - mf)/(1 + mf);
+        pa0 = (mod_w - mi + MOD_DN) & MOD_DMASK;
+        pa1 = (pa0 - 1 + MOD_DN) & MOD_DMASK;
+        mj = floor(mdb); mfb = mdb - mj;
+        mfb < 0.5 ? ( mj -= 1; mfb += 1; );
+        cb = (1 - mfb)/(1 + mfb);
+        pb0 = (mod_w - mj + MOD_DN) & MOD_DMASK;
+        pb1 = (pb0 - 1 + MOD_DN) & MOD_DMASK;
+        // side A carries the LEFT input's two paths, side B the right input's
+        ya = ca*GDLY[mb + pa0] + GDLY[mb + pa1] - ca*APS[mg*4];
+        APS[mg*4] = ya; wl += ya;
+        mo = mb + MOD_DN;
+        ya = ca*GDLY[mo + pa0] + GDLY[mo + pa1] - ca*APS[mg*4 + 1];
+        APS[mg*4 + 1] = ya; wr += ya;
+        mo = mb + 2*MOD_DN;
+        yb = cb*GDLY[mo + pb0] + GDLY[mo + pb1] - cb*APS[mg*4 + 2];
+        APS[mg*4 + 2] = yb; wl += yb;
+        mo = mb + 3*MOD_DN;
+        yb = cb*GDLY[mo + pb0] + GDLY[mo + pb1] - cb*APS[mg*4 + 3];
+        APS[mg*4 + 3] = yb; wr += yb;
+      );
+      mg += 1;
+    );
+    mod_w = (mod_w + 1) & MOD_DMASK;
+  );
   hp_on ? (
     hy = hp_b0*wl + hp_l1; hp_l1 = hp_b1*wl - hp_a1*hy + hp_l2; hp_l2 = hp_b2*wl - hp_a2*hy; wl = hy;
     hy = hp_b0*wr + hp_r1; hp_r1 = hp_b1*wr - hp_a1*hy + hp_r2; hp_r2 = hp_b2*wr - hp_a2*hy; wr = hy;
@@ -610,15 +1452,26 @@ rvb_act ? (
   spl0 = dry_g * cvdl + wet_g * wl;
   spl1 = dry_g * cvdr + wet_g * wr;
   conv_pos += 1;
-  conv_pos >= CONV_P ? ( conv_pos = 0; rvb_process(); );
+  conv_pos >= CONV_P ? (
+    conv_pos = 0;
+    // The structure only ever changes on a block boundary, and both directions
+    // hand the tail over exactly: on, OLAP_L/R already holds the full overlap
+    // the groups cannot supply yet; off, the group overlaps fold back into it.
+    mod_run != mod_want ? (
+      mod_want ? ( mod_run = 1; ) : ( mod_fold_olap(); mod_run = 0; );
+    );
+    mod_run ? rvb_process_mod() : rvb_process();
+  );
 );
 // no valid IR: samples pass through untouched
 
-@gfx 640 560
-// UI THREAD ONLY. Everything below is named g_* (see the threading rule in
-// @init); the only things written back to the audio thread are pend_pick,
-// pend_rescan and the GFLT array, which no audio code reads.
+@gfx 958 664
+// UI THREAD ONLY. Everything defined here is named g_* (see the threading rule
+// in @init); the widget library owns gk_*. The only things written back to the
+// audio thread are pend_pick, pend_rescan, pend_rebuild, pend_lenhold and
+// the GFLT array, which no audio code reads.
 
+// ---------------------------------------------------------------- helpers
 function g_lc(c) ( c >= 'A' && c <= 'Z' ? c + 32 : c );
 
 // case-insensitive search for the query substring [ts,te) inside the packed
@@ -679,86 +1532,201 @@ function g_setrow(o, l, strip) local(i) (
   loop(l, str_setchar(#g_row, i, IRTXT[o+i]); i += 1; );
 );
 
-// trim #g_row until it fits maxw pixels
-function g_cliprow(maxw) local(n, done) (
+// trim #g_row until it fits maxw LOGICAL px
+function g_cliprow(maxw) local(n, done, px) (
+  px = maxw * gk_S;
   done = 0;
   gfx_measurestr(#g_row, g_mw, g_mh);
-  g_mw > maxw && strlen(#g_row) > 1 ? (
-    n = floor(strlen(#g_row) * maxw / g_mw);
+  g_mw > px && strlen(#g_row) > 1 ? (
+    n = floor(strlen(#g_row) * px / g_mw);
     n < 1 ? n = 1;
     str_setlen(#g_row, n);
   );
   while(!done) (
     gfx_measurestr(#g_row, g_mw, g_mh);
-    (g_mw <= maxw || strlen(#g_row) <= 1) ? ( done = 1; ) : ( str_setlen(#g_row, strlen(#g_row) - 1); );
+    (g_mw <= px || strlen(#g_row) <= 1) ? ( done = 1; ) : ( str_setlen(#g_row, strlen(#g_row) - 1); );
   );
 );
 
-function g_col(r, g, b) ( gfx_r = r; gfx_g = g; gfx_b = b; gfx_a = 1; );
-function g_box(x, y, w, h, r, g, b) ( g_col(r, g, b); gfx_rect(x, y, w, h); );
-function g_at(x, y) ( gfx_x = x; gfx_y = y; );
-function g_hit(x, y, w, h) ( g_mx >= x && g_mx < x + w && g_my >= y && g_my < y + h );
+// colour + rect in logical px; the palette comes from gk_init, never new greys
+function g_accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+function g_fill(x, y, w, h) ( gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S); );
+function g_at(x, y) ( gfx_x = x*gk_S; gfx_y = y*gk_S; );
 
+// Filter knobs run on a log taper: 20-2000 Hz linear would bury the whole
+// useful low end in the first tenth of the travel. The SLIDER stays linear in
+// Hz, so automation and saved projects are untouched - only the control
+// surface is curved.
+function g_t2hz(t, lo, hi) ( lo * exp(t * log(hi/lo)) );
+function g_hz2t(f, lo, hi) ( log(max(f, lo)/lo) / log(hi/lo) );
+function g_freq_knob(id, img, x, y, sz, sidx, lo, hi, def) local(t, v) (
+  t = gk_knob(id, img, x, y, sz, g_hz2t(slider(sidx), lo, hi), 0, 1, g_hz2t(def, lo, hi));
+  v = floor(g_t2hz(t, lo, hi) + 0.5);
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// Same taper, but keeping a fractional step. The modulation rate lives between
+// 0.05 and 2 Hz, so rounding to whole Hz the way g_freq_knob does would leave
+// it two usable positions.
+function g_log_knob(id, img, x, y, sz, sidx, lo, hi, def, step) local(t, v) (
+  t = gk_knob(id, img, x, y, sz, g_hz2t(slider(sidx), lo, hi), 0, 1, g_hz2t(def, lo, hi));
+  v = floor(g_t2hz(t, lo, hi)/step + 0.5)*step;
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// ---- decay view -------------------------------------------------------
+// Peak envelope of the loaded IR (ENV, written by rvb_build on the audio
+// thread) with the pre-delay drawn as the silent lead-in before it. Read-only:
+// a rebuild landing mid-frame can tear one frame and nothing more.
+function g_decay(x, y, w, h, secs)
+  local(S, ix, iy, iw, ih, ph, cy, half, rul, emax, i, px, b0, b1, pk, a, t01,
+        pres, tot, prew, ew, vis, fade, st, k, tk, tx, mw, mh) (
+  S = gk_S;
+  gk_img_wave_frame >= 0 ? gk_nine(gk_img_wave_frame, 16, 8, x, y, w, h) : (
+    gfx_set(0.10, 0.106, 0.118, 1); gfx_rect(x*S, y*S, w*S, h*S);
+  );
+  gk_wave_geom(x, y, w, h);
+  ix = gk_wv_ix; iy = gk_wv_iy; iw = gk_wv_iw; ih = gk_wv_ih;
+  rul = 13*S;                  // bottom strip reserved for the time ruler
+  ph = ih - rul;
+  cy = iy + ph*0.5;
+  half = ph*0.44;
+
+  (ir_ready && env_n > 0) ? (
+    // Fixed axis. ew is the width this IR WANTS at the window's scale; vis is
+    // what is left for it after the pre-delay, so a tail running past 5 s is
+    // simply cut off at the right edge.
+    pres = rvb_pre * 0.001;
+    tot = DECAY_SECS;
+    prew = min(floor(iw * pres / tot), iw);
+    ew = max(1, floor(iw * secs / tot));
+    vis = max(0, floor(min(ew, iw - prew)));
+
+    emax = 0; i = 0;
+    loop(env_n, emax = max(emax, ENV[i]); i += 1; );
+    emax <= 0 ? emax = 1;
+
+    // pre-delay: wet-path silence, so the IR starts here and not at 0
+    prew > 0 ? (
+      gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 0.09);
+      gfx_rect(ix, iy, prew, ph);
+      gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.45);
+      gfx_rect(ix + prew, iy, max(1, S), ph);
+    );
+
+    px = 0;
+    loop(vis,
+      // bins map across the full ew, not across vis, so a clipped tail keeps
+      // the shape it would have had rather than being squeezed into the gap
+      b0 = floor(px * env_n / ew);
+      b1 = max(b0 + 1, min(env_n, floor((px + 1) * env_n / ew)));
+      pk = 0; i = b0;
+      while(i < b1) ( pk = max(pk, ENV[i]); i += 1; );
+      // sqrt of amplitude, not dB and not linear: linear buries everything past
+      // the first tenth of the tail, and a dB floor lifts the whole decay into
+      // the top of the box so it reads as one solid slab. This keeps the wedge.
+      a = max(0, min(1, pk / emax));
+      t01 = sqrt(a);
+      t01 > 0.002 ? (
+        fade = 0.45 + 0.55*t01;
+        gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.09);
+        gfx_rect(ix + prew + px - S, cy - t01*half - S, 1 + 2*S, 2*t01*half + 1 + 2*S);
+        gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.75*fade);
+        gfx_rect(ix + prew + px, cy - t01*half, 1, 2*t01*half + 1);
+      );
+      px += 1;
+    );
+
+    // Fixed ruler: a labelled tick every second, a short one on each half.
+    gfx_setfont(3);
+    st = 0.5;
+    k = 0;
+    while(k*st <= tot + 0.0001) (
+      tk = ix + iw*(k*st)/tot;
+      gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 0.30);
+      gfx_rect(tk, iy + ph, max(1, S), (k % 2 == 0 ? 4 : 2)*S);
+      k % 2 == 0 ? (
+        k == 0 ? strcpy(#g_row, "0 s") : sprintf(#g_row, "%.0f", k*st);
+        gfx_measurestr(#g_row, mw, mh);
+        tx = min(tk + 3*S, ix + iw - mw);
+        gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 0.8);
+        gfx_x = tx; gfx_y = iy + ph + 3*S;
+        gfx_drawstr(#g_row);
+      );
+      k += 1;
+    );
+  ) : (
+    gk_text_c(x + w*0.5, y + h*0.5 - 7, "no impulse response loaded", 1);
+  );
+);
+
+// ---------------------------------------------------------------- state
 g_init != 777 ? (
   g_init = 777;
   g_fold = -1; g_sel = 0; g_scroll = 0; g_fscroll = 0;
+  g_lastsel = -1;          // forces one sync on the first frame
+  g_sfocus = 0;
   g_dirty = 1; g_idxgen = -1; g_rescanning = 0;
   strcpy(#g_query, "");
 );
 
-gfx_setfont(1, "Arial", 18, 'b');
-gfx_setfont(2, "Arial", 15);
-gfx_setfont(3, "Arial", 13);
-gfx_setfont(4, "Arial", 14);
+gk_begin();
 
-g_mx = mouse_x; g_my = mouse_y;
-g_click = (mouse_cap & 1) && !g_lastcap;
-g_lastcap = mouse_cap & 1;
+// Shared interface scale: read it, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
 
-// ---- layout ----
-g_pad = 16;
-g_sy = 44; g_sh = 28;                            // search box
-g_bw = 96;                                       // rescan button
-g_ly = g_sy + g_sh + 10; g_lh = 250;             // list panels
-g_fw = 176;                                      // folder panel width
-g_fx = g_pad; g_ix = g_pad + g_fw + 10;
-g_iw = gfx_w - g_ix - g_pad;
-g_rowh = 19;
-g_rows = floor((g_lh - 8) / g_rowh);
-g_paramy = g_ly + g_lh + 60;
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). A fixed percentage is taken
+// relative to that, so 100% stays pixel-exact; Fit divides window by design.
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret * g_sc : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(3, gk_font, 11*gk_S);        // list rows and ruler
+gfx_setfont(4, gk_font, 12*gk_S);        // search box
+gfx_setfont(1);
 
-g_box(0, 0, gfx_w, gfx_h, 0.09, 0.10, 0.12);
+// ---- layout (logical px; keep in step with the @gfx literal above) ----
+// The browser and the decay view carry no section header: what they are is
+// plain from what is in them, and the two headers were 44 px of pure chrome.
+// The control panels keep theirs - those label a group of knobs.
+g_pnx = 10; g_pny = 40; g_pnw = 938; g_pnh = 276;   // browser panel
+g_sbx = 22; g_sby = 52; g_sbw = 798; g_sbh = 24;    // search box
+g_rbx = 830; g_rby = 52; g_rbw = 106; g_rbh = 24;   // rescan
+g_flx = 22; g_fly = 86; g_flw = 220; g_flh = 218;   // folder list
+g_ilx = 252; g_ily = 86; g_ilw = 684; g_ilh = 218;  // file list
+g_rowh = 19; g_rows = 11;
+g_qy = 326; g_qh = 136;                             // loaded-IR panel
+g_sty = 338;                                        // its status line
+g_dx = 22; g_dy = 360; g_dw = 914; g_dh = 90;       // decay view
+// Four control panels, 227 wide on a 237 pitch: 10, 247, 484, 721, last one
+// ending at 948 with the same 10 px margin the left edge has.
+g_cy0 = 472; g_cyh = 150; g_cpw = 227; g_cpp = 237;
+g_ky = 504; g_ksz = 64; g_lby = 572; g_vy = 588; g_vh = 18; g_vw = 76;
 
-gfx_setfont(1); g_col(0.85, 0.87, 0.9);
-g_at(g_pad, 14); gfx_drawstr("Convolution Reverb");
-gfx_setfont(3); g_col(0.4, 0.42, 0.45);
-g_at(gfx_w - 46, 20); gfx_drawstr("v0.2");
+// ---------------------------------------------------------------- header
+g_accent(0.149, 0.784, 0.902);
+gk_header(0, 10, 10, UI_W - 20, 22, "CONVOLUTION REVERB", -1, 0);
+g_r = min(UI_W - 20, gfx_w/gk_S - 10);
+g_i = gk_dropdown(40, g_r - 86, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
 
-// ---- keyboard ----
-g_ch = gfx_getchar();
-while(g_ch) (
-  g_ch >= 32 && g_ch < 127 ? (
-    strcpy(#g_ch1, "");
-    str_setlen(#g_ch1, 1); str_setchar(#g_ch1, 0, g_ch);
-    strcat(#g_query, #g_ch1);
-    g_dirty = 1; g_scroll = 0; g_sel = 0;
-  );
-  g_ch == 8 && strlen(#g_query) > 0 ? (       // backspace
-    str_setlen(#g_query, strlen(#g_query) - 1);
-    g_dirty = 1; g_scroll = 0; g_sel = 0;
-  );
-  g_ch == 27 ? ( strcpy(#g_query, ""); g_dirty = 1; g_scroll = 0; g_sel = 0; );
-  g_ch == 30064 ? ( g_sel -= 1; g_sel < 0 ? g_sel = 0; );                 // up
-  g_ch == 1685026670 ? ( g_sel += 1; g_sel > g_nflt - 1 ? g_sel = g_nflt - 1; ); // down
-  g_ch == 1885828464 ? ( g_sel -= g_rows; g_sel < 0 ? g_sel = 0; );       // pgup
-  g_ch == 1885824110 ? ( g_sel += g_rows; g_sel > g_nflt - 1 ? g_sel = g_nflt - 1; ); // pgdn
-  g_ch == 13 && g_nflt > 0 ? ( pend_pick = GFLT[g_sel] + 1; );            // enter
-  g_ch = gfx_getchar();
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
 );
+// Must come after the header controls and before every other widget.
+help_open ? gk_help_input(40, 41);
+
+// ------------------------------------------------------- browser panel
+gk_panel(g_pnx, g_pny, g_pnw, g_pnh);
 
 // a rebuilt index replaces every offset, so the filter results are stale.
 // Only an explicit Rescan can renumber the folders, so only that resets the
-// view — an @init rerun rebuilds an identical index and must not wipe what
+// view - an @init rerun rebuilds an identical index and must not wipe what
 // the user had narrowed to.
 idx_ready && idx_gen != g_idxgen ? (
   g_idxgen = idx_gen; g_dirty = 1;
@@ -769,73 +1737,107 @@ idx_ready && idx_gen != g_idxgen ? (
 );
 idx_ready && g_dirty ? ( g_dirty = 0; g_refilter(); );
 
-// keep the selection visible
-g_sel < g_scroll ? g_scroll = g_sel;
-g_sel > g_scroll + g_rows - 1 ? g_scroll = g_sel - g_rows + 1;
+// Scroll the selection back into view, but ONLY when the selection has just
+// moved - keyboard, a click, or a refilter that clamped it. Running this every
+// frame pinned g_scroll to [g_sel - g_rows + 1, g_sel], which silently undid
+// the wheel on the following frame: with g_sel still 0 the list would not
+// scroll at all until something had been clicked.
+g_sel != g_lastsel ? (
+  g_sel < g_scroll ? g_scroll = g_sel;
+  g_sel > g_scroll + g_rows - 1 ? g_scroll = g_sel - g_rows + 1;
+  g_lastsel = g_sel;
+);
+g_scroll > g_nflt - g_rows ? g_scroll = g_nflt - g_rows;
 g_scroll < 0 ? g_scroll = 0;
 
 // ---- search box ----
-g_sw = gfx_w - 2*g_pad - g_bw - 8;
-g_box(g_pad, g_sy, g_sw, g_sh, 0.16, 0.18, 0.22);
-g_col(0.3, 0.32, 0.36); gfx_rect(g_pad, g_sy, g_sw, 1); gfx_rect(g_pad, g_sy + g_sh - 1, g_sw, 1);
-gfx_rect(g_pad, g_sy, 1, g_sh); gfx_rect(g_pad + g_sw - 1, g_sy, 1, g_sh);
+// Click focus. It is an affordance only: typing reaches the box either way
+// (type-to-search is the point of it), but a click now says so, with the same
+// accent rules gk_field_edit draws on a value field that has the keyboard, and
+// a caret marking where the next character lands.
+gk_clicked ? ( g_sfocus = gk_hit(g_sbx, g_sby, g_sbw, g_sbh) ? 1 : 0; );
+
+g_hasq = strlen(#g_query) > 0;
+gk_img_field >= 0 ? gk_nine(gk_img_field, 8, 4, g_sbx, g_sby, g_sbw, g_sbh) : (
+  gfx_set(0.10, 0.106, 0.118, 1); g_fill(g_sbx, g_sby, g_sbw, g_sbh);
+);
+g_sfocus ? (
+  gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+  gfx_rect(g_sbx*gk_S, g_sby*gk_S, g_sbw*gk_S, max(1, gk_S));
+  gfx_rect(g_sbx*gk_S, (g_sby + g_sbh)*gk_S - max(1, gk_S), g_sbw*gk_S, max(1, gk_S));
+);
 gfx_setfont(4);
-strlen(#g_query) > 0 ? (
-  g_col(0.9, 0.92, 0.95);
-  g_at(g_pad + 9, g_sy + 6); gfx_drawstr(#g_query);
-  gfx_measurestr(#g_query, g_mw, g_mh);
-  g_box(g_pad + 10 + g_mw, g_sy + 6, 1, 16, 0.7, 0.75, 0.8);
+// measure a fixed pair rather than the live string: the caret must not change
+// height with the text, and must exist when there is no text at all
+gfx_measurestr("Ag", g_mw, g_mh);
+g_scy = (g_sby*gk_S) + (g_sbh*gk_S - g_mh)*0.5;
+g_hasq ? (
+  strcpy(#g_row, #g_query);
+  g_cliprow(g_sbw - 40);
+  gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = (g_sbx + 9)*gk_S; gfx_y = g_scy;
+  gfx_drawstr(#g_row);
+  gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+  gfx_rect(gfx_x + gk_S, g_scy, max(1, gk_S), g_mh);
+) : g_sfocus ? (
+  // focused and empty: the caret alone, with no placeholder to read through
+  gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+  gfx_rect((g_sbx + 10)*gk_S, g_scy, max(1, gk_S), g_mh);
 ) : (
-  g_col(0.42, 0.44, 0.48);
-  g_at(g_pad + 9, g_sy + 6); gfx_drawstr("Search IRs...");
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = (g_sbx + 9)*gk_S; gfx_y = g_scy;
+  gfx_drawstr("Search IRs...");
+);
+g_hasq && gk_button(21, g_sbx + g_sbw - 22, g_sby + 4, 16, 16, 0, "x") ? (
+  strcpy(#g_query, ""); g_dirty = 1; g_scroll = 0; g_sel = 0;
 );
 
-// rescan button
-g_brx = gfx_w - g_pad - g_bw;
-g_box(g_brx, g_sy, g_bw, g_sh, g_hit(g_brx, g_sy, g_bw, g_sh) ? 0.22 : 0.16,
-      g_hit(g_brx, g_sy, g_bw, g_sh) ? 0.24 : 0.18, g_hit(g_brx, g_sy, g_bw, g_sh) ? 0.28 : 0.21);
-g_col(0.75, 0.78, 0.82);
+gk_button(20, g_rbx, g_rby, g_rbw, g_rbh, 0, "Rescan") ? (
+  pend_rescan = 1; g_rescanning = 1;
+);
+
+// ---- list backgrounds ----
+gk_img_wave_frame >= 0 ? (
+  gk_nine(gk_img_wave_frame, 16, 8, g_flx, g_fly, g_flw, g_flh);
+  gk_nine(gk_img_wave_frame, 16, 8, g_ilx, g_ily, g_ilw, g_ilh);
+) : (
+  gfx_set(0.10, 0.106, 0.118, 1);
+  g_fill(g_flx, g_fly, g_flw, g_flh); g_fill(g_ilx, g_ily, g_ilw, g_ilh);
+);
+
 gfx_setfont(3);
-gfx_measurestr("Rescan", g_mw, g_mh);
-g_at(g_brx + (g_bw - g_mw)*0.5, g_sy + 7); gfx_drawstr("Rescan");
-
-// ---- panels ----
-g_box(g_fx, g_ly, g_fw, g_lh, 0.12, 0.13, 0.155);
-g_box(g_ix, g_ly, g_iw, g_lh, 0.12, 0.13, 0.155);
-
 !idx_ready ? (
-  gfx_setfont(2); g_col(1, 0.55, 0.4);
-  g_at(g_ix + 12, g_ly + 12); gfx_drawstr("Reading index...");
+  gfx_set(0.941, 0.588, 0.157, 1);
+  g_at(g_ilx + 12, g_ily + 12); gfx_drawstr("Reading index...");
 ) : nir <= 0 ? (
-  gfx_setfont(4); g_col(1, 0.55, 0.4);
-  g_at(g_fx + 12, g_ly + 12); gfx_drawstr("No IR index found.");
-  g_col(0.6, 0.62, 0.66);
-  g_at(g_fx + 12, g_ly + 34); gfx_drawstr("Create Data/ConvReverbIRs.idx with");
-  g_at(g_fx + 12, g_ly + 52); gfx_drawstr("tools/index_irs.py, or run the action");
-  g_at(g_fx + 12, g_ly + 70); gfx_drawstr("\"Rescan reverb IRs\" (ReaScript), then");
-  g_at(g_fx + 12, g_ly + 88); gfx_drawstr("press Rescan. The Reverb IR slider");
-  g_at(g_fx + 12, g_ly + 106); gfx_drawstr("above works without the index.");
+  gfx_set(0.941, 0.588, 0.157, 1);
+  g_at(g_ilx + 12, g_ily + 12); gfx_drawstr("No IR index found.");
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  g_at(g_ilx + 12, g_ily + 34); gfx_drawstr("Create Data/ConvReverbIRs.idx with tools/index_irs.py, or run");
+  g_at(g_ilx + 12, g_ily + 52); gfx_drawstr("the ReaScript action \"Rescan reverb IRs\", then press Rescan.");
+  g_at(g_ilx + 12, g_ily + 70); gfx_drawstr("The Reverb IR parameter in REAPER's list works without it.");
 ) : (
   // ---- folder list ----
-  gfx_setfont(3);
   g_i = 0;
   while(g_i < g_rows && g_i + g_fscroll - 1 < nfld) (
-    g_fi = g_i + g_fscroll - 1;      // -1 slot is "All"
-    g_ry = g_ly + 4 + g_i*g_rowh;
+    g_fi = g_i + g_fscroll - 1;      // the -1 slot is "All"
+    g_ry = g_fly + 5 + g_i*g_rowh;
     g_on = (g_fi < 0 && g_fold < 0) || (g_fi >= 0 && g_fold == g_fi);
-    g_on ? g_box(g_fx + 2, g_ry, g_fw - 4, g_rowh, 0.20, 0.33, 0.45);
-    g_hit(g_fx, g_ry, g_fw, g_rowh) && !g_on ? g_box(g_fx + 2, g_ry, g_fw - 4, g_rowh, 0.16, 0.17, 0.20);
-    g_col(g_on ? 0.95 : 0.72, g_on ? 0.97 : 0.74, g_on ? 1 : 0.78);
+    g_on ? ( gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.24); g_fill(g_flx + 4, g_ry, g_flw - 8, g_rowh); );
+    gk_hit(g_flx, g_ry, g_flw, g_rowh) && !g_on ? (
+      gfx_set(1, 1, 1, 0.05); g_fill(g_flx + 4, g_ry, g_flw - 8, g_rowh);
+    );
+    g_on ? gfx_set(1, 1, 1, 1) : gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
     g_fi < 0 ? (
       sprintf(#g_row, "All  (%d)", nir);
     ) : (
       FLDLEN[g_fi] > 0 ? ( g_setrow(FLDOFF[g_fi], FLDLEN[g_fi], 0); ) : ( strcpy(#g_row, "(root)"); );
       sprintf(#g_row2, "%s  (%d)", #g_row, FLDCNT[g_fi]);
       strcpy(#g_row, #g_row2);
-      g_cliprow(g_fw - 16);
+      g_cliprow(g_flw - 20);
     );
-    g_at(g_fx + 8, g_ry + 3); gfx_drawstr(#g_row);
-    g_click && g_hit(g_fx, g_ry, g_fw, g_rowh) ? (
+    g_at(g_flx + 10, g_ry + 3); gfx_drawstr(#g_row);
+    gk_clicked && gk_hit(g_flx, g_ry, g_flw, g_rowh) ? (
       g_fold = g_fi; g_dirty = 1; g_scroll = 0; g_sel = 0;
     );
     g_i += 1;
@@ -845,91 +1847,249 @@ g_box(g_ix, g_ly, g_iw, g_lh, 0.12, 0.13, 0.155);
   g_i = 0;
   while(g_i < g_rows && g_i + g_scroll < g_nflt) (
     g_k = GFLT[g_i + g_scroll];
-    g_ry = g_ly + 4 + g_i*g_rowh;
+    g_ry = g_ily + 5 + g_i*g_rowh;
     g_on = (g_i + g_scroll) == g_sel;
     g_cur = (ir_from_browser && g_k == sel_idx) ? 1 : 0;
-    g_on ? g_box(g_ix + 2, g_ry, g_iw - 4, g_rowh, 0.20, 0.33, 0.45);
-    g_hit(g_ix, g_ry, g_iw, g_rowh) && !g_on ? g_box(g_ix + 2, g_ry, g_iw - 4, g_rowh, 0.16, 0.17, 0.20);
-    g_cur ? g_box(g_ix + 2, g_ry, 3, g_rowh, 0.35, 0.85, 0.45);
+    g_on ? ( gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.24); g_fill(g_ilx + 4, g_ry, g_ilw - 8, g_rowh); );
+    gk_hit(g_ilx, g_ry, g_ilw, g_rowh) && !g_on ? (
+      gfx_set(1, 1, 1, 0.05); g_fill(g_ilx + 4, g_ry, g_ilw - 8, g_rowh);
+    );
+    g_cur ? ( gfx_set(0.35, 0.85, 0.45, 1); g_fill(g_ilx + 4, g_ry, 3, g_rowh); );
     // hide the folder prefix when a folder is selected (never for the root
-    // folder, whose prefix is empty — stripping 1 would eat a real character)
+    // folder, whose prefix is empty - stripping 1 would eat a real character)
     g_setrow(IROFF[g_k], IRLEN[g_k],
              (g_fold >= 0 && FLDLEN[g_fold] > 0) ? FLDLEN[g_fold] + 1 : 0);
-    g_cliprow(g_iw - 16);
-    g_col(g_on ? 0.95 : g_cur ? 0.85 : 0.76, g_on ? 0.97 : g_cur ? 0.92 : 0.78, g_on ? 1 : 0.82);
-    g_at(g_ix + 8, g_ry + 3); gfx_drawstr(#g_row);
-    g_click && g_hit(g_ix, g_ry, g_iw, g_rowh) ? (
+    g_cliprow(g_ilw - 24);
+    g_on ? gfx_set(1, 1, 1, 1) :
+      g_cur ? gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1) :
+      gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    g_at(g_ilx + 12, g_ry + 3); gfx_drawstr(#g_row);
+    gk_clicked && gk_hit(g_ilx, g_ry, g_ilw, g_rowh) ? (
       g_sel = g_i + g_scroll;
       pend_pick = g_k + 1;
     );
     g_i += 1;
   );
   g_nflt <= 0 ? (
-    gfx_setfont(3); g_col(0.5, 0.52, 0.56);
-    g_at(g_ix + 10, g_ly + 10); gfx_drawstr("no match");
+    gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    g_at(g_ilx + 12, g_ily + 12); gfx_drawstr("no match");
   );
 );
 
-// scroll wheel over the file list
-mouse_wheel != 0 ? (
-  g_hit(g_fx, g_ly, g_fw, g_lh) ? (
-    g_fscroll -= (mouse_wheel > 0 ? 3 : -3);
-    g_fscroll > nfld + 1 - g_rows ? g_fscroll = nfld + 1 - g_rows;
-    g_fscroll < 0 ? g_fscroll = 0;
-  ) : (
-    g_scroll -= (mouse_wheel > 0 ? 3 : -3);
-    g_scroll > g_nflt - g_rows ? g_scroll = g_nflt - g_rows;
-    g_scroll < 0 ? g_scroll = 0;
-  );
-  mouse_wheel = 0;
-);
+// --------------------------------------------------- loaded IR + decay
+gk_panel(g_pnx, g_qy, g_pnw, g_qh);
 
-g_click && g_hit(g_brx, g_sy, g_bw, g_sh) ? ( pend_rescan = 1; g_rescanning = 1; );
+// While the length knob is being dragged the IR has NOT been rebuilt yet, so
+// ir_len_sec still describes the old one. Stretching is a pure time scaling of
+// the same impulse, so the length it is heading for is exact, not a guess:
+// scale by how far rvb_len has moved from the length this build used. When the
+// rebuild lands, ir_built_len becomes rvb_len, the ratio becomes 1 and the
+// preview hands over to the real thing with nothing to see.
+g_lsc = ir_built_len > 0 ? rvb_len / ir_built_len : 1;
+g_cap = MAXPARTS * CONV_P / srate;        // the same ceiling rvb_build applies
+g_irfull = ir_len_full * g_lsc;           // what the file plus stretch asks for
+g_irsec = min(g_irfull, g_cap);           // what is actually convolved, and drawn
+g_irtr = g_irfull > g_cap + 0.005;
 
-// ---- loaded-IR status ----
-gfx_setfont(2);
-g_at(g_pad, g_ly + g_lh + 12);
+gfx_setfont(1);
+g_at(g_dx, g_sty);
 ir_ready ? (
-  g_col(0.4, 0.9, 0.5);
-  gfx_printf("IR  %d-ch, %.2f s%s", ir_nch_disp, ir_len_sec, ir_trunc ? "  (truncated at the 5.5 s cap)" : "");
+  gfx_set(0.35, 0.85, 0.45, 1);
+  // The cap is on the AUDIO, not on this display: the convolver drops whatever
+  // runs past MAXPARTS partitions. Say which number is which, and derive the
+  // limit from srate rather than hardcoding "5.5 s", which is only true at 48k.
+  g_irtr ? (
+    gfx_printf("%d-ch,  %.2f s   (only the first %.2f s is convolved)",
+               ir_nch_disp, g_irfull, g_cap);
+  ) : (
+    gfx_printf("%d-ch,  %.2f s", ir_nch_disp, g_irsec);
+  );
 ) : mem_ok ? (
-  g_col(1, 0.55, 0.4);
+  gfx_set(0.941, 0.588, 0.157, 1);
   gfx_drawstr("No valid IR - pick one above, or drop a 1/2/4-ch WAV in Data/ReverbIRs");
 ) : (
-  g_col(1, 0.35, 0.35);
+  gfx_set(1, 0.35, 0.35, 1);
   gfx_drawstr("Out of memory - lower options:maxmem or MAXPARTS");
 );
 
-// which source is driving it, and what it is called
-gfx_setfont(3); g_col(0.55, 0.58, 0.62);
-g_at(g_pad, g_ly + g_lh + 32);
+// which source is driving it, and what it is called; right-aligned
 ir_from_browser && sel_len > 0 ? (
   str_setlen(#g_row, sel_len);
   g_i = 0;
   loop(sel_len, str_setchar(#g_row, g_i, SELP[g_i]); g_i += 1; );
-  g_cliprow(gfx_w - 2*g_pad - 60);
-  gfx_printf("browser: %s", #g_row);
+  strcpy(#g_row2, "browser:  ");
 ) : (
   strcpy_fromslider(#g_row, slider1);
-  g_cliprow(gfx_w - 2*g_pad - 60);
-  gfx_printf("slider: %s", #g_row);
+  strcpy(#g_row2, "slider:  ");
+);
+strcat(#g_row2, #g_row);
+strcpy(#g_row, #g_row2);
+g_cliprow(560);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = (g_dx + g_dw)*gk_S - g_mw; gfx_y = g_sty*gk_S;
+gfx_drawstr(#g_row);
+
+g_decay(g_dx, g_dy, g_dw, g_dh, g_irsec);
+
+// ------------------------------------------------------ control panels
+// ids: knobs 10-39 (20/21 are the browser buttons), header 40-49, fields 50-79
+g_relen = 0;
+
+// ---- SHAPE (cyan) ----
+g_accent(0.149, 0.784, 0.902);
+gk_panel(10, g_cy0, g_cpw, g_cyh);
+gk_header(0, 10, g_cy0, g_cpw, 22, "SHAPE", -1, 0);
+g_c1 = 10 + g_cpw*0.30; g_c2 = 10 + g_cpw*0.70;
+gk_knob_slider(10, IMG_CYAN, g_c1 - 32, g_ky, g_ksz, 4, 0, 500, 0);
+g_relen |= gk_knob_slider(11, IMG_CYAN, g_c2 - 32, g_ky, g_ksz, 5, 25, 400, 100);
+gk_text_c(g_c1, g_lby, "Pre-delay", 1);
+gk_text_c(g_c2, g_lby, "Length", 1);
+sprintf(#g_s, "%.1f ms", rvb_pre);
+gk_field_edit_slider(50, g_c1 - g_vw*0.5, g_vy, g_vw, g_vh, 4, 0, 500, 0, #g_s);
+sprintf(#g_s, "%.0f %%", rvb_len);
+g_relen |= gk_field_edit_slider(51, g_c2 - g_vw*0.5, g_vy, g_vw, g_vh, 5, 25, 400, 100, #g_s);
+
+// ---- FILTER (orange) ----
+g_accent(0.941, 0.588, 0.157);
+g_px = 10 + g_cpp;
+gk_panel(g_px, g_cy0, g_cpw, g_cyh);
+gk_header(0, g_px, g_cy0, g_cpw, 22, "FILTER", -1, 0);
+g_c1 = g_px + g_cpw*0.30; g_c2 = g_px + g_cpw*0.70;
+g_freq_knob(12, IMG_ORANGE, g_c1 - 32, g_ky, g_ksz, 6, 20, 2000, 20);
+g_freq_knob(13, IMG_ORANGE, g_c2 - 32, g_ky, g_ksz, 7, 200, 20000, 20000);
+gk_text_c(g_c1, g_lby, "High-pass", 1);
+gk_text_c(g_c2, g_lby, "Low-pass", 1);
+rvb_hpf <= 20 ? strcpy(#g_s, "Off") : sprintf(#g_s, "%.0f Hz", rvb_hpf);
+gk_field_edit_slider(52, g_c1 - g_vw*0.5, g_vy, g_vw, g_vh, 6, 20, 2000, 20, #g_s);
+rvb_lpf >= 20000 ? strcpy(#g_s, "Off") : sprintf(#g_s, "%.0f Hz", rvb_lpf);
+gk_field_edit_slider(53, g_c2 - g_vw*0.5, g_vy, g_vw, g_vh, 7, 200, 20000, 20000, #g_s);
+
+// ---- MIX (yellow) ----
+g_accent(0.941, 0.784, 0.235);
+g_px = 10 + 2*g_cpp;
+gk_panel(g_px, g_cy0, g_cpw, g_cyh);
+gk_header(0, g_px, g_cy0, g_cpw, 22, "MIX", -1, 0);
+g_c1 = g_px + g_cpw*0.30; g_c2 = g_px + g_cpw*0.70;
+gk_knob_slider(14, IMG_YELLOW, g_c1 - 32, g_ky, g_ksz, 2, -60, 12, -12);
+gk_knob_slider(15, IMG_YELLOW, g_c2 - 32, g_ky, g_ksz, 3, -60, 12, 0);
+gk_text_c(g_c1, g_lby, "Wet", 1);
+gk_text_c(g_c2, g_lby, "Dry", 1);
+rvb_wet <= -59.9 ? strcpy(#g_s, "Off") : sprintf(#g_s, "%+.1f dB", rvb_wet);
+gk_field_edit_slider(54, g_c1 - g_vw*0.5, g_vy, g_vw, g_vh, 2, -60, 12, -12, #g_s);
+rvb_dry <= -59.9 ? strcpy(#g_s, "Off") : sprintf(#g_s, "%+.1f dB", rvb_dry);
+gk_field_edit_slider(55, g_c2 - g_vw*0.5, g_vy, g_vw, g_vh, 3, -60, 12, 0, #g_s);
+
+// ---- MODULATION (cyan) ----
+// The kit ships three knob colours and this is the fourth panel, so it reuses
+// the cyan strip; SHAPE and MODULATION bracket the row, which reads cleanly
+// enough not to be worth a new asset in the shared gui_kit folder.
+//
+// ons_ms / ons_pre_ms / mod_avail are written by the audio thread (rvb_detect,
+// rvb_split) and only READ here, the same arrangement ENV and env_n have: a
+// rebuild landing mid-frame can tear one frame of this readout and nothing
+// else depends on it.
+g_accent(0.149, 0.784, 0.902);
+g_px = 10 + 3*g_cpp;
+gk_panel(g_px, g_cy0, g_cpw, g_cyh);
+gk_header(0, g_px, g_cy0, g_cpw, 22, "MODULATION", -1, 0);
+// Three columns, not two: Onset belongs beside the controls it governs, and
+// 227 px takes three 64 px knobs with room left over.
+g_c1 = g_px + g_cpw*0.1667; g_c2 = g_px + g_cpw*0.5; g_c3 = g_px + g_cpw*0.8333;
+g_vw3 = 70;
+gk_knob_slider(16, IMG_CYAN, g_c1 - 32, g_ky, g_ksz, 8, 0, 100, 25);
+g_log_knob(17, IMG_CYAN, g_c2 - 32, g_ky, g_ksz, 9, 0.05, 2, 0.35, 0.01);
+// The onset knob costs a rebuild, exactly as the length knob does, so it joins
+// the same gesture machinery rather than firing one per mouse-move.
+g_relen |= gk_knob_slider(18, IMG_CYAN, g_c3 - 32, g_ky, g_ksz, 10, 0, 200, 0);
+gk_text_c(g_c1, g_lby, "Depth", 1);
+gk_text_c(g_c2, g_lby, "Rate", 1);
+rvb_mons > 0 ? gk_text_c(g_c3, g_lby, "Onset", 1)
+             : gk_text_c(g_c3, g_lby, "Onset auto", 1);
+rvb_mdep <= 0 ? strcpy(#g_s, "Off") : sprintf(#g_s, "%.0f %%", rvb_mdep);
+gk_field_edit_slider(56, g_c1 - g_vw3*0.5, g_vy, g_vw3, g_vh, 8, 0, 100, 25, #g_s);
+sprintf(#g_s, "%.2f Hz", rvb_mrate);
+gk_field_edit_slider(57, g_c2 - g_vw3*0.5, g_vy, g_vw3, g_vh, 9, 0.05, 2, 0.35, #g_s);
+// On auto the field shows what the detector actually chose - the number the
+// user would type to pin it there - with a ? when the kurtosis cross-check
+// disagreed, or when the detector fell back to its default.
+rvb_mons > 0 ? sprintf(#g_s, "%.0f ms", rvb_mons) :
+  (!mod_avail ? strcpy(#g_s, "n/a") :
+    (ons_ok && !ons_uncertain ? sprintf(#g_s, "%.0f ms", ons_pre_ms + ons_ms)
+                              : sprintf(#g_s, "%.0f ms?", ons_pre_ms + ons_ms)));
+g_relen |= gk_field_edit_slider(58, g_c3 - g_vw3*0.5, g_vy, g_vw3, g_vh, 10, 0, 200, 0, #g_s);
+
+// Length is the one parameter whose change is expensive, so it is the one the
+// GUI has to schedule. The value itself is written live - the field reads right
+// and automation records the whole move - and only the REBUILD waits for the
+// gesture to end. pend_lenhold tells @block a gesture is in progress, which
+// also stops the @slider path starting the rebuild timer under us mid-drag.
+//
+// Held while the knob (11) or the field (51) is dragged, and while the field is
+// being typed into. A wheel click and a Ctrl-click reset hold nothing, so those
+// flush at once, which is right for a discrete gesture. gk_end() clears
+// gk_active at the END of the frame, so the flush lands on the frame after the
+// release - one frame, not perceptible.
+// The modulation onset is the second control on this timer: changing it
+// re-derives which partitions count as late, which is the same full rebuild.
+g_relen ? ( g_lendirty = 1; );
+pend_lenhold = (gk_active == 11 || gk_active == 51 || gk_edit_id == 51 ||
+                gk_active == 18 || gk_active == 58 || gk_edit_id == 58) ? 1 : 0;
+g_lendirty && !pend_lenhold ? ( g_lendirty = 0; pend_rebuild = 1; );
+
+// ---------------------------------------------------------------- keyboard
+// Type to filter. A value field being edited drains gfx_getchar first, so its
+// keystrokes never reach the search box; the help overlay takes the keys back.
+!help_open && gk_edit_id == 0 ? (
+  g_ch = gfx_getchar();
+  while(g_ch) (
+    g_ch >= 32 && g_ch < 127 ? (
+      strcpy(#g_ch1, "");
+      str_setlen(#g_ch1, 1); str_setchar(#g_ch1, 0, g_ch);
+      strcat(#g_query, #g_ch1);
+      g_dirty = 1; g_scroll = 0; g_sel = 0;
+    );
+    g_ch == 8 && strlen(#g_query) > 0 ? (       // backspace
+      str_setlen(#g_query, strlen(#g_query) - 1);
+      g_dirty = 1; g_scroll = 0; g_sel = 0;
+    );
+    g_ch == 27 ? ( strcpy(#g_query, ""); g_dirty = 1; g_scroll = 0; g_sel = 0; );
+    g_ch == 30064 ? ( g_sel -= 1; g_sel < 0 ? g_sel = 0; );                 // up
+    g_ch == 1685026670 ? ( g_sel += 1; g_sel > g_nflt - 1 ? g_sel = g_nflt - 1; ); // down
+    g_ch == 1885828464 ? ( g_sel -= g_rows; g_sel < 0 ? g_sel = 0; );       // pgup
+    g_ch == 1885824110 ? ( g_sel += g_rows; g_sel > g_nflt - 1 ? g_sel = g_nflt - 1; ); // pgdn
+    g_ch == 13 && g_nflt > 0 ? ( pend_pick = GFLT[g_sel] + 1; );            // enter
+    g_ch = gfx_getchar();
+  );
 );
 
-// ---- parameter read-out ----
-gfx_setfont(4);
-g_cw = (gfx_w - 2*g_pad) * 0.5;
-g_col(0.85, 0.87, 0.9);
-g_at(g_pad, g_paramy);              gfx_printf("Wet        %+.1f dB", rvb_wet);
-g_at(g_pad, g_paramy + 22);         gfx_printf("Dry        %+.1f dB", rvb_dry);
-g_at(g_pad, g_paramy + 44);         gfx_printf("Pre-delay  %.1f ms", rvb_pre);
-g_at(g_pad + g_cw, g_paramy);       gfx_printf("Length     %.0f %%", rvb_len);
-g_at(g_pad + g_cw, g_paramy + 22);
-rvb_hpf <= 20 ? gfx_drawstr("High-pass  off") : gfx_printf("High-pass  %.0f Hz", rvb_hpf);
-g_at(g_pad + g_cw, g_paramy + 44);
-rvb_lpf >= 20000 ? gfx_drawstr("Low-pass   off") : gfx_printf("Low-pass   %.0f Hz", rvb_lpf);
+// ---- scroll wheel over the lists (knobs already took theirs when hovered) ----
+mouse_wheel != 0 ? (
+  gk_hit(g_flx, g_fly, g_flw, g_flh) ? (
+    g_fscroll -= (mouse_wheel > 0 ? 3 : -3);
+    g_fscroll > nfld + 1 - g_rows ? g_fscroll = nfld + 1 - g_rows;
+    g_fscroll < 0 ? g_fscroll = 0;
+    mouse_wheel = 0;
+  ) : gk_hit(g_ilx, g_ily, g_ilw, g_ilh) ? (
+    g_scroll -= (mouse_wheel > 0 ? 3 : -3);
+    g_scroll > g_nflt - g_rows ? g_scroll = g_nflt - g_rows;
+    g_scroll < 0 ? g_scroll = 0;
+    mouse_wheel = 0;
+  );
+);
 
-gfx_setfont(3); g_col(0.45, 0.47, 0.5);
-g_at(g_pad, gfx_h - 38);
-gfx_drawstr("True-stereo uniform partitioned FFT convolution. Filters are 12 dB/oct, wet only.");
-g_at(g_pad, gfx_h - 21);
-gfx_drawstr("Latency 2048 spl (one partition), reported via PDC. Pre-delay is not latency.");
+// ---------------------------------------------------------------- help
+help_open ? gk_help_draw(10, 40, UI_W - 20, UI_H - 104, "Help  -  Convolution Reverb",
+                         HELP_BASE, help_lines);
+
+// ---------------------------------------------------------------- footer
+gk_strip(LOGO_IMG, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = count_missing_images(IMG_COUNT);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+gk_end();
