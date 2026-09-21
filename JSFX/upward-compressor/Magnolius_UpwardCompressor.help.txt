@@ -1,0 +1,116 @@
+UPWARD COMPRESSOR
+
+It raises what is BELOW the threshold and leaves what is above it
+alone - the mirror image of an ordinary compressor. A downward
+compressor turns the peaks down; this turns the quiet parts up. The
+loud parts keep their level and their transients, and only the
+low-level detail moves: breaths, room, the tail of a reverb, the
+quiet half of a performance.
+
+Zero latency. No lookahead, no PDC. Mix at 0% is an exact bypass.
+
+
+GETTING SET UP
+
+1. Set Range to about 6 dB first. It is the ceiling on the lift and
+   the one control that stops a silent bar being dragged all the way
+   up to the threshold.
+2. Put Threshold under the body of the performance and above the
+   noise. Everything below it gets lifted.
+3. Raise Noise Floor until the pauses stop breathing. Hiss and room
+   tone then stay where they are.
+4. Only then reach for Ratio, Attack and Release.
+
+
+ATTACK AND RELEASE ARE MIRRORED TOO
+
+This is the one thing that trips people up.
+
+  Attack   how fast the lift comes IN as the signal gets QUIETER
+  Release  how fast it backs OFF as the signal gets louder again
+
+So a fast attack here means quiet detail jumps up quickly, which is
+the setting that sounds pumpy. That is the opposite intuition from a
+downward compressor.
+
+
+COMPRESSION
+
+  Threshold    Everything below this gets lifted.
+  Ratio        How much of the distance below the threshold is made
+               up. 1:2 halves it. 1:1 is a bit-exact bypass.
+  Range        Hard ceiling on the lift, 0 to 12 dB. The single
+               most important safety control.
+  Knee         Width of the soft knee straddling the threshold.
+  Noise Floor  The lift fades to zero over the 6 dB below this.
+  Lift         Read-only: the lift being applied right now.
+
+DETECTOR
+
+  Attack       Lift in, as the signal drops. Fast = pumpy.
+  Release      Lift out, as the signal returns.
+  SC HPF       Detector-only high pass. Raise it so bass does not
+               govern how much lift the whole signal gets.
+  Stereo Link  100% keeps the stereo image locked; 0% lets each
+               channel act alone.
+  Detector     RMS (30 ms) follows loudness, Peak (20 ms release)
+               follows transients.
+  Det Level    Read-only: the level the curve is being fed.
+
+OUTPUT
+
+  Makeup       Output gain on the WET path only.
+  Mix          Wet/dry blend. 0% is an exact bypass, whatever
+               Makeup is set to.
+  History      Time span of the scrolling display. Cosmetic.
+  Out Peak     Read-only: peak level leaving the plugin.
+
+
+READING THE DISPLAY
+
+The scrolling plot is on a -78 dB scale, mirrored about the centre
+line, newest at the right edge.
+
+  grey     the input
+  cyan     the output - cyan standing outside grey is the lift
+  green    the lift itself, overlaid from the bottom of the plot
+           on a fixed 0 .. 12 dB scale - the top of the plot is
+           12 dB, the most Range will allow. The scale never moves,
+           so Range shows up as the height the green stops at
+  orange   the threshold
+  dotted   the noise floor
+
+Each drawn column is the MAXIMUM over every history slot it covers,
+so a transient cannot fall between pixels and make the display
+disagree with your ears.
+
+The CURVE panel is the live transfer curve, -80 .. 0 dB in. It plots
+what actually leaves the plugin, Mix and Makeup included, against the
+grey unity line. Watch it while you move Ratio and Knee.
+
+
+WHEN SOMETHING LOOKS WRONG
+
+Nothing happens at all
+  Check Range is not at 0, and Mix is not at 0%. Set Ratio to 1:1
+  and the plugin is meant to be completely silent - that is a
+  bit-exact bypass, not "close enough".
+
+The quiet parts breathe or pump
+  Slow the Attack down, or raise the Noise Floor until the pauses
+  stop moving. Range too high does this too.
+
+The lift meter sits at Range and never moves
+  The threshold is above the whole performance. Bring it down.
+
+Bass governs everything
+  Raise SC HPF so the detector stops hearing it.
+
+"images failed to load" in the header
+  The gui_kit folder is not next to the plugin as REAPER sees it.
+  If the .jsfx is symlinked into the Effects folder, gui_kit has to
+  be reachable there too.
+
+The interface is clipped
+  A JSFX cannot resize its own window. Pick Fit in the header
+  dropdown, or make the FX window bigger and pick 100%.

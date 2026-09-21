@@ -19,10 +19,19 @@ changes, and there is no warning anywhere in REAPER when it happens:
 ```
 ln -s "$PWD/Magnolius_UpwardCompressor.jsfx" \
       ~/.config/REAPER/Effects/Magnolius/"Magnolius_UpwardCompressor.jsfx"
+ln -s "$PWD/Magnolius_UpwardCompressor.help.txt" \
+      ~/.config/REAPER/Effects/Magnolius/"Magnolius_UpwardCompressor.help.txt"
 ```
 
 (macOS: `~/Library/Application Support/REAPER/Effects/`.) Then add
 **JS: Upward Compressor** to a track.
+
+The interface loads its artwork at runtime, so `gui_kit/` has to be reachable
+from the plugin **as REAPER sees it** — next to the symlink, not just next to
+this README. The Magnolius Effects folder is flat and every plugin there
+shares one `gui_kit/`, so if a sibling plugin is already installed the assets
+are already in place. If nothing draws and the header says *images failed to
+load*, that folder is what is missing.
 
 If a change to the source seems to have no effect, check the link first:
 
@@ -44,9 +53,10 @@ instance is visible at a glance.
 3. The static curve asks *how far below the threshold* the detector is and
    multiplies that by `1 − 1/ratio`. A quadratic **Knee** straddles the
    threshold, continuous in both value and slope.
-4. **Range** caps the result, so a silent bar cannot arrive at +40 dB, and
-   the **Noise Floor** control fades the lift out over the 6 dB below it, so
-   hiss, room tone and pauses stay where they are.
+4. **Range** caps the result at up to 12 dB, so a silent bar cannot be
+   dragged all the way up to the threshold, and the **Noise Floor** control
+   fades the lift out over the 6 dB below it, so hiss, room tone and pauses
+   stay where they are.
 5. The result is smoothed with the attack/release ballistics and applied as a
    gain.
 
@@ -67,7 +77,7 @@ compressor, and the sliders are labelled accordingly.
 | --- | --- | --- |
 | Threshold (dB) | −30 | Everything below this gets lifted. Set it under the body of the performance and above the noise. |
 | Ratio (1:N) | 2.00 | How much of the distance below the threshold is made up. 1:2 halves it, 1:∞ would flatten everything onto the threshold. |
-| Range / Max Lift (dB) | 12 | Hard ceiling on the lift. The single most important safety control. |
+| Range / Max Lift (dB) | 12 | Hard ceiling on the lift, 0–12 dB. The single most important safety control. |
 | Knee (dB) | 6 | Width of the soft knee around the threshold. |
 | Attack – lift in (ms) | 20 | Speed the lift comes in as the signal drops. Fast = pumpy. |
 | Release – lift out (ms) | 200 | Speed the lift backs off as the signal returns. |
@@ -79,16 +89,42 @@ compressor, and the sliders are labelled accordingly.
 | Mix (%) | 100 | Wet/dry blend. **0% is an exact bypass**, whatever Makeup is set to. |
 | Display History (s) | 6 | Time span of the scrolling display. Cosmetic. |
 
+## The interface
+
+Built on the Magnolius GUI kit. Every knob has a value field under it: drag it
+to scrub, click it to type. Ctrl-click a knob or a field resets it, Shift
+while dragging is fine adjustment.
+
+The header carries an interface scale dropdown and a **?** button that opens
+`Magnolius_UpwardCompressor.help.txt` in a scrollable panel. The scale is
+shared through `gmem` with every other `options:gmem=Magnolius` plugin, so
+setting it in one window sets it everywhere; it is session-scoped, plus a
+per-project copy in `@serialize`. A JSFX cannot resize its own window, so a
+scale larger than the window clips — `Fit` follows the window instead.
+
 ## The display
 
-- **Blue** waveform is the input, **green** is the output, both peak per
-  column on a −78 dB scale. Green standing outside blue is the lift.
+- **Grey** waveform is the input, **cyan** is the output, both peak per column
+  on a −78 dB scale, mirrored about the centre line, newest at the right edge.
+  Cyan standing outside grey is the lift.
+- **Green**, overlaid from the bottom of the same plot: the applied lift, on
+  a **fixed** 0…12 dB scale — the top of the plot is 12 dB, which is also the
+  most Range will allow. The scale deliberately does not follow Range: when it
+  did, raising Range made the same lift draw shorter, which reads as less lift
+  when it is the opposite. Range now shows up as the height the green stops
+  climbing at.
 - **Orange** horizontal lines: the threshold. **Dotted grey**: the noise
   floor.
-- **Lift strip** underneath: applied lift, scaled 0…Range.
-- **Inset, right**: the live transfer curve, −80…0 dB in. It plots what
-  actually leaves the plugin, Mix and Makeup included, against the grey
-  unity line. Watch it while you move Ratio and Knee.
+- **CURVE panel, right**: the live transfer curve, −80…0 dB in. It plots what
+  actually leaves the plugin, Mix and Makeup included, against the grey unity
+  line, with the threshold marked in orange and the noise floor dotted. Watch
+  it while you move Ratio and Knee.
+- **Lift**, **Det Level** and **Out Peak** are read-only fields: the lift being
+  applied, the level the curve is being fed, and the peak leaving the plugin.
+
+The waveform is drawn by the plugin rather than by the kit's `gk_wave_draw`,
+which plots linear amplitude. On a plugin whose whole subject is what happens
+40–70 dB down, a linear scale puts everything of interest on the centre line.
 
 Each drawn column is the **maximum** over every history slot it covers, so a
 transient cannot fall between pixels and make the display disagree with your
@@ -100,7 +136,7 @@ ears.
   bit-exact bypass, not a "close enough".
 - Set **Mix to 0%** with a big Makeup dialled in. Still silent. If you hear a
   level jump, you are running an old build.
-- Put it on a vocal, set **Range to 40** and **Threshold to −10**. It should
+- Put it on a vocal, set **Range to 12** and **Threshold to −10**. It should
   sound obviously, horribly wrong — everything crushed up to the threshold.
   If nothing happens, the plugin is not actually processing.
 - Bring Range back to about 6, Threshold under the body of the vocal, and
@@ -139,7 +175,9 @@ change, one of the two is wrong; do not loosen the tolerance.
 ## Files
 
 ```
-Magnolius_UpwardCompressor.jsfx    the plugin
+Magnolius_UpwardCompressor.jsfx       the plugin
+Magnolius_UpwardCompressor.help.txt   text shown by the ? button, read at runtime
+gui_kit/                  widget library + PNG artwork, loaded at runtime
 tools/model.py            pure-Python reference model of the DSP
 tools/render_test.py      headless render tests
 tools/render_harness.py   .rpp writer, render(), ReaScript probe, DFT probes
@@ -149,11 +187,27 @@ tools/wavio.py            stdlib WAV I/O
 ## Notes for the next person
 
 - **Threading.** Every `@gfx` variable is `g_`-prefixed and no name is used on
-  both sides. `@gfx` never calls a function defined in `@init`: EEL2 function
-  locals *and parameters* are static and shared between threads, so drawing
-  the transfer curve through `lift_db()` would stomp the audio thread's copy
-  of `x`/`hk`/`g` mid-sample. The curve maths is inlined in `@gfx` instead. It
-  looks like duplication. It is not — do not "clean it up".
+  both sides. The rule is not "`@gfx` calls no functions" — it is that *no
+  function is called from both threads*. EEL2 function locals *and parameters*
+  are static and shared, so drawing the transfer curve through `lift_db()`
+  would stomp the audio thread's copy of `x`/`hk`/`g` mid-sample. So
+  `db2lin`/`lin2db`/`lift_db`/`recalc` belong to the audio thread, and
+  `accent`/`ui_scale`/`count_missing_images`/every `gk_*` belong to `@gfx`.
+  The curve maths is inlined in `@gfx` instead. It looks like duplication. It
+  is not — do not "clean it up".
+- **Widget changes go through a flag, not a call.** A knob writes its slider
+  and calls `slider_automate`, then `@gfx` sets `need_recalc`; `@block` picks
+  it up and calls `recalc()` on the audio thread. Calling `recalc()` from
+  `@gfx` would enter `db2lin()` from the UI thread and stomp its parameter
+  underneath `@sample`, and relying on REAPER to re-run `@slider` after
+  `slider_automate` is not something to depend on.
+- **The display readouts are converted in `@block`.** `out_db` and `det_db`
+  are `lin2db()` of two envelopes, done once per block on the audio thread, so
+  `@gfx` only ever formats a number.
+- **The lift overlay's scale is fixed at 0…12 dB** (`LIFT_FULL_DB`), and the
+  Range slider's maximum is the same number. They are two halves of one
+  decision: change one without the other and the overlay either stops short of
+  the top of the plot or clips against it.
 - **`ext_noinit = 1`** stops `@init` re-running on transport start, so
   detector state and the display survive hitting play. `@init` still re-runs
   on a samplerate change, which is why every rate-dependent coefficient lives
