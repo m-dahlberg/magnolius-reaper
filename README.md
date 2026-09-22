@@ -41,7 +41,8 @@ Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
 | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. |
 | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. |
 | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. |
-| Variable Ratio Compressor | Solves for the ratio each passage needs. Single-band and 4-band. |
+| Variable Ratio Compressor | Solves for the ratio each passage needs, instead of being told one. |
+| Variable Ratio Compressor MB | The same core in four bands, with a ceiling that tilts across frequency. |
 | Vocal Rider | Automatic gain riding with sidechain ducking. |
 
 ### Scripts
