@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="b18f23b52f7c8d7a3b8aeecf66703617e2dfcae2">
+<index version="1" name="Magnolius" commit="7c52d51f94efc86cf78340b9d576f2068a6ba426">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -418,6 +418,33 @@ The DSP is unchanged, and every parameter still automates as before.]]></changel
         <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
       </version>
+      <version name="1.3" author="Magnolius" time="2026-09-21T15:02:14Z">
+        <changelog><![CDATA[New interface built on the Magnolius GUI kit: knobs with typed value
+fields, the scrolling display in a framed plot with the lift overlaid on
+it, the live transfer curve as a panel, a scale selector shared with the
+other Magnolius plugins, and a built-in help panel.
+
+Range now stops at 12 dB instead of 40, and the lift overlay is drawn on
+a fixed 0-12 dB scale rather than one that followed Range - on the old
+scale, raising Range made the same lift draw shorter. A project saved
+with Range above 12 loads clamped to 12.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/Magnolius_UpwardCompressor.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/knob_yellow_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/knob_yellow_bipolar_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/playhead_line_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/playhead_line_cyan.png</source>
+        <source file="gui_kit/playhead_marker_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/playhead_marker_cyan.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_UpwardCompressor.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/cf9e7c2e21d31b125a7177a8e9cef3f4622f56f9/JSFX/upward-compressor/Magnolius_UpwardCompressor.help.txt</source>
+      </version>
     </reapack>
   </category>
   <category name="JSFX/vari-mu-compressor">
@@ -457,7 +484,7 @@ The DSP is unchanged, and every parameter still automates as before.]]></changel
 
 {\pard \ql \f0 \sa180 \li0 \fi0 A compressor that solves for the ratio each passage needs instead of being told one. Lookahead finds the loudest upcoming peak, derives the exact ratio that lands it on the output ceiling, then holds that ratio across the passage.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Everything between threshold and ceiling is compressed at the same currently-valid ratio, so relative dynamics inside the passage survive instead of only the tips being flattened.\par}
-{\pard \ql \f0 \sa180 \li0 \fi0 A sliding-min plus double-boxcar smoother makes the ceiling a hard guarantee rather than a target: no overshoot, so the safety clip is a genuine last resort.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 A sliding-min plus double-boxcar smoother means the gain never overshoots, so the ceiling is held exactly whenever the ratio the passage needs is within Max Ratio. Past that the ratio is capped and peaks come through.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 A four-band version is available as Variable Ratio Compressor MB.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
 }
@@ -471,6 +498,91 @@ The DSP is unchanged, and every parameter still automates as before.]]></changel
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.jsfx</source>
+      </version>
+      <version name="1.2" author="Magnolius" time="2026-09-22T13:29:11Z">
+        <changelog><![CDATA[New interface built on the Magnolius GUI kit: knobs with typed value
+fields, the scrolling display in a framed plot, a live transfer curve that
+bends as the ratio solves, GR and ratio meters, a scale selector shared
+with the other Magnolius plugins, and a built-in help panel.
+
+The scrolling display now plots dB rather than linear amplitude, with the
+threshold and the ceiling drawn on it as real reference lines. On the old
+linear scale everything below about -30 dB was a hairline on the centre
+line, which is most of what a threshold down at -60 is actually working on.
+
+New Display History control (1-30 s) for the scroll window, which used to
+be hardwired to about 5 s.
+
+Max Ratio now runs 1:1 to 10:1 in steps of 0.1, instead of 2:1 to 1000:1
+in steps of 1. On the old range the musically useful part of the control
+lived in the first few per cent of its travel, which a knob makes far
+worse than a slider did, and the old floor of 2:1 ruled out the gentle
+ratios this compressor is often wanted for. 1:1 is a valid setting: it
+pins the solver at unity, so the compression is off while Blend and Output
+Gain still work.
+
+A project saved with Max Ratio above 10 loads clamped to 10, which will
+compress less than it used to - raise the threshold or lower the ceiling
+to compensate.
+
+The default moves from 200 to 3. The old default was chosen to be out of
+the way - at 200:1 the clamp effectively never engaged and the ceiling was
+always held by the ratio. 3:1 is a real setting rather than a disabled one,
+so a new instance now sounds like a compressor from the first note. Raise
+it towards 10:1 for the old behaviour. Existing projects keep their own
+saved value; only new instances see this.
+
+Simplified: the safety clipper, the Safety Clip switch, the Makeup Position
+switch and the Out Peak readout are all gone.
+
+The ratio trace and the RATIO meter are now on a FIXED 1:1 to 10:1 scale
+instead of one that followed Max Ratio. Following it meant the same ratio
+drew at a different height as Max Ratio moved, which reads as the ratio
+having changed when nothing about the audio did - the same reason the
+gain-reduction overlay has always been pinned to 0-24 dB.
+
+Their slider NUMBERS (6 and 10) are left as gaps rather than renumbering
+the rest down. A project stores slider values positionally by slider
+number, so this keeps every remaining control loading into itself. REAPER
+does however compact the PARAMETER indices it exposes to automation, so an
+existing envelope on Lookahead, Ratio Release, Max Ratio or Display History
+now points one parameter too high and needs re-pointing. That is
+unavoidable when a parameter is removed - the gaps do not change it.
+
+Output Gain (was Makeup Gain) is now ALWAYS applied last, after the blend,
+and is no longer part of the ratio solve. The old Pre position folded it
+into the solve so the compressor worked harder to hold the ceiling despite
+it; that behaviour no longer exists. A project saved in Pre will now be
+louder and less compressed than it was - it now behaves as if it had been
+saved in Post, which was the default.
+
+Without the clipper, Output Ceiling is no longer an absolute guarantee. It
+is hit exactly while the required ratio is within Max Ratio, and peaks pass
+once the ratio is capped - which the new 3:1 default makes an everyday
+case, not a rare one. Put a limiter after this if you need a true ceiling.
+
+Input Gain is unchanged, and remains a genuine pre-compressor drive: the
+detector, the curve and the dry half of the blend all see it.
+
+Alt-drag on Input Gain or Output Gain moves the other one the opposite way
+by the same number of dB, so you can change how hard the compressor works
+without changing the level. It works on the knob, the wheel and the value
+field, and each value still clamps to its own range.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_yellow_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/knob_yellow_bipolar_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/playhead_line_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/playhead_line_cyan.png</source>
+        <source file="gui_kit/playhead_marker_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/playhead_marker_cyan.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_VariableRatioCompressor.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.help.txt</source>
       </version>
     </reapack>
     <reapack name="Magnolius_VariableRatioCompressorMB.jsfx" type="effect" desc="Variable Ratio Compressor MB (Magnolius)">
