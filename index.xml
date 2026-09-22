@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="7c52d51f94efc86cf78340b9d576f2068a6ba426">
+<index version="1" name="Magnolius" commit="3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -585,6 +585,8 @@ field, and each value still clamps to its own range.]]></changelog>
         <source file="Magnolius_VariableRatioCompressor.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/899015dc77ab70973896003017a66021cc71ea63/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressor.help.txt</source>
       </version>
     </reapack>
+  </category>
+  <category name="JSFX/variable-ratio-compressor-mb">
     <reapack name="Magnolius_VariableRatioCompressorMB.jsfx" type="effect" desc="Variable Ratio Compressor MB (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
@@ -593,19 +595,103 @@ field, and each value still clamps to its own range.]]></changelog>
 
 {\pard \ql \f0 \sa180 \li0 \fi0 Four-band version of the Variable Ratio Compressor. Each band solves for the ratio that lands its loudest upcoming peak on the ceiling, then holds it across the passage.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 The crossover is a sequential LR4 tree with allpass compensation, so the four bands sum flat - flat magnitude, phase rotation only.\par}
-{\pard \ql \f0 \sa180 \li0 \fi0 Note that the ceiling is per band, and four bands each held at the ceiling can sum above it: the ceiling is a shaping control here, not the output level. Use Output Trim for level. A disabled band still runs its delay line, so toggling one never shifts the others in time.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Note that the ceiling is per band, and four bands each held at the ceiling can sum above it: the ceiling is a shaping control here, not the output level. Use Output Gain for level. A disabled band still runs its delay line, so toggling one never shifts the others in time.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
 }
 ]]></description>
         <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
       </metadata>
-      <version name="1.0" author="Magnolius" time="2026-09-15T12:09:51Z">
-        <changelog><![CDATA[Initial ReaPack release]]></changelog>
-        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6233e5a55c000ada3bdbaf2a25a3d9e8d99b1584/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressorMB.jsfx</source>
-      </version>
-      <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
-        <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
-        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/variable-ratio-compressor/Magnolius_VariableRatioCompressorMB.jsfx</source>
+      <version name="1.2" author="Magnolius" time="2026-09-22T14:05:59Z">
+        <changelog><![CDATA[New interface built on the Magnolius GUI kit, matching the single-band
+plugin: knobs with typed value fields, the scrolling display in a framed
+plot, four per-band lanes under it, live transfer curves for all four
+bands, GR and ratio meters, a scale selector shared with the other
+Magnolius plugins, and a built-in help panel.
+
+The scrolling display now plots dB rather than linear amplitude, with the
+ceiling drawn on it as a real reference line, and each band's enable, solo
+and gain reduction are on the band's own panel rather than in a list of
+sliders.
+
+The v1.2 simplifications from the single band are all here now:
+
+Max Ratio runs 1:1 to 10:1 in steps of 0.1, default 3, instead of 2:1 to
+1000:1 in steps of 1 defaulting to 200. A project saved above 10 loads
+clamped to 10 and will compress less than it used to - lower the
+thresholds or the ceiling to compensate. The ratio traces and the RATIO
+meter are on a fixed 1:1 to 10:1 scale, so a given ratio always draws at
+the same height.
+
+Safety Clip and Trim Position are gone. Output Trim is now Output Gain,
+always applied last, after the sum and outside every band's ratio solve.
+A project saved in Pre will be louder and less compressed than it was.
+Without the clipper the output is no longer bounded at 0 dBFS - put a
+limiter after this if you need one.
+
+New Ceiling Tilt (dB/oct). The ceiling is now a line across log frequency
+rather than one number: each band takes its value at the band's geometric
+centre, pivoted so the Ceiling knob stays the average of the four. At the
+default 0 it is exactly the old fixed ceiling. Tilt it down and the upper
+bands are held lower, which is what makes the top band do anything at all
+on material whose spectrum falls with frequency - with a flat ceiling its
+peaks rarely reach the target and the band sits idle. The curve panel
+draws the four ceilings in the bands' own tints as soon as tilt is not 0.
+
+Each band's threshold is now clamped to at least 0.1 dB below that band's
+ceiling, as the single-band plugin has always done. A steep tilt can drop
+a high band's ceiling past a threshold that was fine at tilt 0.
+
+New Display History parameter (1-30 s) for the scroll window, which used
+to be hardwired to about 5 s. It has no knob - the bottom row is three
+panels now, and the space went to Tilt - but it is still automatable and
+still reachable from REAPER's parameter list.
+
+The bottom row is three panels rather than four: CROSSOVER, a wider
+DYNAMICS holding Ceiling, Tilt, Max Ratio and Lookahead, and a wider GAIN
+that also carries the GR and RATIO meters.
+
+The B1-B4 labels under the curve plot are switches: clicking one hides or
+shows that band's curve, so two curves can be compared without the other
+two in the way. All four start shown, and the state is saved with the
+project rather than exposed as a parameter.
+
+Alt on any of the three per-band controls moves ALL FOUR bands by the same
+amount, so a balance you have already dialled in survives the move.
+Threshold and Gain step by a difference in dB; Release scales by a ratio,
+since what relates 400 ms to 80 ms is a factor rather than a number of
+milliseconds. The four move as one rigid body and stop when the first band
+reaches an end of its range, including the one under the mouse, so the
+offsets can never be flattened against a limit.
+
+Alt-drag on Input Gain or Output Gain moves the other one the opposite way
+by the same number of dB, so you can change how hard the bands work
+without changing the level. It works on the knob, the wheel and the value
+field, and each value still clamps to its own range.
+
+Slider numbers 8 and 9 are left as GAPS rather than renumbering the rest
+down, so every remaining control still loads into itself from an old
+project. REAPER does compact the PARAMETER indices it exposes to
+automation, so an existing envelope on Lookahead, Max Ratio, Listen or any
+band control now points two parameters too high and needs re-pointing.
+That is unavoidable when a parameter is removed.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/Magnolius_VariableRatioCompressorMB.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_orange_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/knob_orange_bipolar_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/knob_yellow_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/knob_yellow_bipolar_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/led_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/led_cyan.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/playhead_line_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/playhead_line_cyan.png</source>
+        <source file="gui_kit/playhead_marker_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/playhead_marker_cyan.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_VariableRatioCompressorMB.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89/JSFX/variable-ratio-compressor-mb/Magnolius_VariableRatioCompressorMB.help.txt</source>
       </version>
     </reapack>
   </category>
@@ -921,7 +1007,7 @@ ReaImGui
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 What's here\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 JSFX\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Each appears in REAPER's FX browser with a {\f1 (Magnolius)} suffix, so typing {\f1 magnolius} in the FX add dialog lists the whole set.\par}
-{\pard \ql \f0 \sa180 \li0 \fi0 | Plugin | What it does | | --- | --- | | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. | | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. | | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. | | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. | | DeNoise | Spectral noise reduction, ported from libspecbleach. | | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. | | LUFS Limiter | LUFS-S leveler into a true peak limiter. | | Match EQ | Pulls the input spectrum toward a pink-noise reference. | | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. | | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. | | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. | | Variable Ratio Compressor | Solves for the ratio each passage needs. Single-band and 4-band. | | Vocal Rider | Automatic gain riding with sidechain ducking. |\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 | Plugin | What it does | | --- | --- | | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. | | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. | | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. | | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. | | DeNoise | Spectral noise reduction, ported from libspecbleach. | | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. | | LUFS Limiter | LUFS-S leveler into a true peak limiter. | | Match EQ | Pulls the input spectrum toward a pink-noise reference. | | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. | | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. | | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. | | Variable Ratio Compressor | Solves for the ratio each passage needs, instead of being told one. | | Variable Ratio Compressor MB | The same core in four bands, with a ceiling that tilts across frequency. | | Vocal Rider | Automatic gain riding with sidechain ducking. |\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 Scripts\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 | Script | What it does | | --- | --- | | Auto Tilt | Matches one clip's spectral balance to another and renders a new take. | | DeClick | Click repair with the threshold derived from each file's own distribution. | | DeNoise | Offline denoising with the profile derived from the whole file. | | DeResonate | Finds room resonances using the singer's pitch to separate them from harmonics. | | Note Leveling | Levels a vocal per sung note, written as Pre-FX volume automation. | | Track Manager | Nine named track groups on a numpad-driven panel. | | Vocal Normalizer | Normalises through the melody's fundamental range, not K-weighted. | | Vocal Splitter | Segments a take into phrases, breaths, consonants and sibilance. |\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Four of these exist as both a plugin and a script \u8212- {\b Auto Tilt}, {\b DeClick}, {\b DeNoise} and {\b Vocal Splitter}. The plugin is real-time; the script is offline and can analyse the whole file before deciding anything, which usually means less tuning. ReaPack's Type column tells them apart.\par}
