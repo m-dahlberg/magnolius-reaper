@@ -1,8 +1,12 @@
 desc:Variable Ratio Compressor MB (Magnolius)
 // @description Variable Ratio Compressor MB (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_VariableRatioCompressorMB.help.txt
 // @about
 //   Four-band version of the Variable Ratio Compressor. Each band solves for
 //   the ratio that lands its loudest upcoming peak on the ceiling, then holds
@@ -13,12 +17,83 @@ desc:Variable Ratio Compressor MB (Magnolius)
 //
 //   Note that the ceiling is per band, and four bands each held at the ceiling
 //   can sum above it: the ceiling is a shaping control here, not the output
-//   level. Use Output Trim for level. A disabled band still runs its delay
+//   level. Use Output Gain for level. A disabled band still runs its delay
 //   line, so toggling one never shifts the others in time.
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   New interface built on the Magnolius GUI kit, matching the single-band
+//   plugin: knobs with typed value fields, the scrolling display in a framed
+//   plot, four per-band lanes under it, live transfer curves for all four
+//   bands, GR and ratio meters, a scale selector shared with the other
+//   Magnolius plugins, and a built-in help panel.
+//
+//   The scrolling display now plots dB rather than linear amplitude, with the
+//   ceiling drawn on it as a real reference line, and each band's enable, solo
+//   and gain reduction are on the band's own panel rather than in a list of
+//   sliders.
+//
+//   The v1.2 simplifications from the single band are all here now:
+//
+//   Max Ratio runs 1:1 to 10:1 in steps of 0.1, default 3, instead of 2:1 to
+//   1000:1 in steps of 1 defaulting to 200. A project saved above 10 loads
+//   clamped to 10 and will compress less than it used to - lower the
+//   thresholds or the ceiling to compensate. The ratio traces and the RATIO
+//   meter are on a fixed 1:1 to 10:1 scale, so a given ratio always draws at
+//   the same height.
+//
+//   Safety Clip and Trim Position are gone. Output Trim is now Output Gain,
+//   always applied last, after the sum and outside every band's ratio solve.
+//   A project saved in Pre will be louder and less compressed than it was.
+//   Without the clipper the output is no longer bounded at 0 dBFS - put a
+//   limiter after this if you need one.
+//
+//   New Ceiling Tilt (dB/oct). The ceiling is now a line across log frequency
+//   rather than one number: each band takes its value at the band's geometric
+//   centre, pivoted so the Ceiling knob stays the average of the four. At the
+//   default 0 it is exactly the old fixed ceiling. Tilt it down and the upper
+//   bands are held lower, which is what makes the top band do anything at all
+//   on material whose spectrum falls with frequency - with a flat ceiling its
+//   peaks rarely reach the target and the band sits idle. The curve panel
+//   draws the four ceilings in the bands' own tints as soon as tilt is not 0.
+//
+//   Each band's threshold is now clamped to at least 0.1 dB below that band's
+//   ceiling, as the single-band plugin has always done. A steep tilt can drop
+//   a high band's ceiling past a threshold that was fine at tilt 0.
+//
+//   New Display History parameter (1-30 s) for the scroll window, which used
+//   to be hardwired to about 5 s. It has no knob - the bottom row is three
+//   panels now, and the space went to Tilt - but it is still automatable and
+//   still reachable from REAPER's parameter list.
+//
+//   The bottom row is three panels rather than four: CROSSOVER, a wider
+//   DYNAMICS holding Ceiling, Tilt, Max Ratio and Lookahead, and a wider GAIN
+//   that also carries the GR and RATIO meters.
+//
+//   The B1-B4 labels under the curve plot are switches: clicking one hides or
+//   shows that band's curve, so two curves can be compared without the other
+//   two in the way. All four start shown, and the state is saved with the
+//   project rather than exposed as a parameter.
+//
+//   Alt on any of the three per-band controls moves ALL FOUR bands by the same
+//   amount, so a balance you have already dialled in survives the move.
+//   Threshold and Gain step by a difference in dB; Release scales by a ratio,
+//   since what relates 400 ms to 80 ms is a factor rather than a number of
+//   milliseconds. The four move as one rigid body and stop when the first band
+//   reaches an end of its range, including the one under the mouse, so the
+//   offsets can never be flattened against a limit.
+//
+//   Alt-drag on Input Gain or Output Gain moves the other one the opposite way
+//   by the same number of dB, so you can change how hard the bands work
+//   without changing the level. It works on the knob, the wheel and the value
+//   field, and each value still clamps to its own range.
+//
+//   Slider numbers 8 and 9 are left as GAPS rather than renumbering the rest
+//   down, so every remaining control still loads into itself from an old
+//   project. REAPER does compact the PARAMETER indices it exposes to
+//   automation, so an existing envelope on Lookahead, Max Ratio, Listen or any
+//   band control now points two parameters too high and needs re-pointing.
+//   That is unavoidable when a parameter is removed.
 
 // Four-band version of the adaptive-ratio compressor. Each band runs the same
 // core: lookahead sliding-max finds the loudest upcoming peak, solves for the
@@ -38,61 +113,146 @@ desc:Variable Ratio Compressor MB (Magnolius)
 // CEILING
 // Ceiling is the per-band target and is shared by all four bands. Four bands
 // each held at the ceiling can SUM above it, so the ceiling is a shaping
-// control, not the output level -- use Output Trim for that. The safety clip
-// sits at 0 dBFS as a last resort, not at the ceiling.
+// control, not the output level -- use Output Gain for that. As of 1.2 there
+// is no safety clipper behind any of this.
 //
 // A disabled band still runs its delay line, so bands stay sample-aligned and
 // toggling one never shifts the others in time.
+//
+// THREADING - do not undo this.  Every @gfx variable is g_-prefixed and no
+// name is used on both sides.  The rule is not "@gfx calls no functions": it
+// is that NO FUNCTION IS CALLED FROM BOTH THREADS.  EEL2 function locals AND
+// parameters are static and shared, so a function entered from @gfx while the
+// audio thread is inside it stomps the audio thread's copy of every local
+// mid-sample.  So:
+//   audio thread only:  bq, bq_*, split_*, band_*, lin2db, update_params
+//   @gfx only:          accent, ui_scale, count_missing_images, g_fknob,
+//                       g_curve, every gk_*
+// That is also why the transfer curves inline the compressor maths instead of
+// sharing a function with @sample, and why a widget change sets need_update
+// rather than calling update_params() from the UI thread - @block picks the
+// flag up on the audio thread, so the new coefficients do not depend on REAPER
+// re-running @slider after slider_automate (which it does not).
+//
+// The same reasoning runs the other way for DRAWING.  @block does not run on a
+// stopped track, so @gfx must not read the audio thread's derived values or
+// every reference line, every band header and the whole curve panel freeze
+// until the user presses play.  @gfx therefore derives g_ceil / g_blend and the
+// three ordered crossover frequencies from the raw slider variables itself, at
+// the top of the section.  Those lines duplicate update_params() on purpose -
+// keep them in step.  The meters are the exception: they are audio-thread
+// readouts by definition and do freeze when the transport stops.
+//
+// EEL2 identifiers are case-insensitive: W and w are ONE variable.  The
+// detector window length is the global W, so nothing in @gfx may use a bare
+// w - hence the g_ prefix on every last one of them.
+//
+// v1.2
 
-slider1:s_in=0<-12,24,0.1>Input Gain (dB)
+// Shared memory, namespaced to this vendor so it cannot collide with other
+// plugins' gmem. Slot map (keep in step across every options:gmem=Magnolius
+// plugin - they share the one map):
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
 
-slider2:s_x1=120<20,500,1>Crossover 1 (Hz)
-slider3:s_x2=800<200,3000,1>Crossover 2 (Hz)
-slider4:s_x3=5000<1500,16000,10>Crossover 3 (Hz)
+// Every slider name carries a leading '-' so REAPER's generic control panel
+// stays hidden behind the custom interface, while the parameters remain
+// automatable and visible to the render tests.
+slider1:s_in=0<-12,24,0.1>-Input Gain (dB)
 
-slider5:s_ceil=-6<-36,0,0.05>Ceiling (dB, per band)
-slider6:s_blend=100<0,100,0.1>Blend (% wet)
-slider7:s_trim=0<-20,20,0.1>Output Trim (dB)
-slider8:s_mkpos=1<0,1,1{Pre - ceiling holds,Post - ceiling is internal}>Trim Position
-slider9:s_clip=1<0,1,1{Off,On}>Safety Clip (0 dBFS)
+slider2:s_x1=120<20,500,1>-Crossover 1 (Hz)
+slider3:s_x2=800<200,3000,1>-Crossover 2 (Hz)
+slider4:s_x3=5000<1500,16000,10>-Crossover 3 (Hz)
 
-slider10:s_la=5<0.5,20,0.1>Lookahead (ms)
-slider11:s_maxr=200<2,1000,1>Max Ratio (:1)
-slider12:s_listen=0<0,4,1{All bands,Band 1 only,Band 2 only,Band 3 only,Band 4 only}>Listen
+slider5:s_ceil=-6<-36,0,0.05>-Ceiling (dB, per band)
+slider6:s_blend=100<0,100,0.1>-Blend (% wet)
+slider7:s_trim=0<-20,20,0.1>-Output Gain (dB)
+// slider8 was Trim Position and slider9 was Safety Clip. Both are gone, and
+// their NUMBERS ARE LEFT AS GAPS on purpose: a JSFX project stores slider
+// values positionally, so renumbering 10-12 down into the holes would load an
+// old project's Lookahead into Trim Position and so on, silently.
+slider10:s_la=5<0.5,20,0.1>-Lookahead (ms)
+slider11:s_maxr=3<1,10,0.1>-Max Ratio (:1)
+slider12:s_listen=0<0,4,1{All bands,Band 1 only,Band 2 only,Band 3 only,Band 4 only}>-Listen
+// Display History has no on-screen control - the panel space went to Ceiling
+// Tilt - but it stays a parameter, so a project that set it keeps its window
+// and it can still be reached from REAPER's parameter list.
+slider13:s_hist=6<1,30,0.5>-Display History (s)
 
-slider14:s_en1=1<0,1,1{Off,On}>Band 1 Enable
-slider15:s_th1=-18<-60,0,0.1>Band 1 Threshold (dB)
-slider16:s_rl1=400<10,2000,1>Band 1 Ratio Release (ms)
-slider17:s_gn1=0<-20,20,0.1>Band 1 Gain (dB)
+slider14:s_en1=1<0,1,1{Off,On}>-Band 1 Enable
+slider15:s_th1=-18<-60,0,0.1>-Band 1 Threshold (dB)
+slider16:s_rl1=400<10,2000,1>-Band 1 Ratio Release (ms)
+slider17:s_gn1=0<-20,20,0.1>-Band 1 Gain (dB)
 
-slider19:s_en2=1<0,1,1{Off,On}>Band 2 Enable
-slider20:s_th2=-18<-60,0,0.1>Band 2 Threshold (dB)
-slider21:s_rl2=250<10,2000,1>Band 2 Ratio Release (ms)
-slider22:s_gn2=0<-20,20,0.1>Band 2 Gain (dB)
+// Ceiling Tilt lives on 18 - a group separator no version of this plugin has
+// ever written - rather than in the 8/9 gaps, where an old project's Trim
+// Position or Safety Clip value would silently load as a tilt.
+slider18:s_tilt=0<-6,6,0.1>-Ceiling Tilt (dB/oct)
 
-slider24:s_en3=1<0,1,1{Off,On}>Band 3 Enable
-slider25:s_th3=-18<-60,0,0.1>Band 3 Threshold (dB)
-slider26:s_rl3=150<10,2000,1>Band 3 Ratio Release (ms)
-slider27:s_gn3=0<-20,20,0.1>Band 3 Gain (dB)
+slider19:s_en2=1<0,1,1{Off,On}>-Band 2 Enable
+slider20:s_th2=-18<-60,0,0.1>-Band 2 Threshold (dB)
+slider21:s_rl2=250<10,2000,1>-Band 2 Ratio Release (ms)
+slider22:s_gn2=0<-20,20,0.1>-Band 2 Gain (dB)
 
-slider29:s_en4=1<0,1,1{Off,On}>Band 4 Enable
-slider30:s_th4=-18<-60,0,0.1>Band 4 Threshold (dB)
-slider31:s_rl4=80<10,2000,1>Band 4 Ratio Release (ms)
-slider32:s_gn4=0<-20,20,0.1>Band 4 Gain (dB)
+slider24:s_en3=1<0,1,1{Off,On}>-Band 3 Enable
+slider25:s_th3=-18<-60,0,0.1>-Band 3 Threshold (dB)
+slider26:s_rl3=150<10,2000,1>-Band 3 Ratio Release (ms)
+slider27:s_gn3=0<-20,20,0.1>-Band 3 Gain (dB)
+
+slider29:s_en4=1<0,1,1{Off,On}>-Band 4 Enable
+slider30:s_th4=-18<-60,0,0.1>-Band 4 Threshold (dB)
+slider31:s_rl4=80<10,2000,1>-Band 4 Ratio Release (ms)
+slider32:s_gn4=0<-20,20,0.1>-Band 4 Gain (dB)
 
 in_pin:left
 in_pin:right
 out_pin:left
 out_pin:right
 
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 knob, band dynamics (cyan)      1 knob, gain (yellow)
+//   2 knob, gain bipolar (per-band Gain, Output Gain)
+//   13 knob, crossover and global dynamics (orange)
+//   14 knob, orange bipolar (Ceiling Tilt)
+//   12 band-enable LED                15 help text, last slot
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_yellow_grid.png
+filename:2,gui_kit/knob_yellow_bipolar_grid.png
+filename:3,gui_kit/value_field.png
+filename:4,gui_kit/header_bar.png
+filename:5,gui_kit/panel_tile.png
+filename:6,gui_kit/dropdown.png
+filename:7,gui_kit/button_cyan.png
+filename:8,gui_kit/wave_frame_9slice.png
+filename:9,gui_kit/playhead_line_cyan.png
+filename:10,gui_kit/playhead_marker_cyan.png
+filename:11,gui_kit/logo_magnolius_grey.png
+filename:12,gui_kit/led_cyan.png
+filename:13,gui_kit/knob_orange_grid.png
+filename:14,gui_kit/knob_orange_bipolar_grid.png
+filename:15,Magnolius_VariableRatioCompressorMB.help.txt
+
 @init
+
+// @init re-runs on samplerate change and on recompile.  ext_noinit stops the
+// other trigger - transport start - so the detector deques, the delay lines and
+// the scrolling history survive hitting play instead of being wiped every time.
+ext_noinit = 1;
 
 DMAX    = 4096;                  // power of two; 20 ms of lookahead up to 200 kHz
 MASK    = DMAX - 1;
 BANDSZ  = DMAX * 8;
-LN10_20 = 0.11512925464970229;
-DB20    = 8.6858896380650366;
+LN10_20 = 0.11512925464970229;   // ln(10)/20   dB -> linear exponent
+DB20    = 8.6858896380650366;    // 20/ln(10)   ln  -> dB
+TINY    = 10^(-30);              // EEL2 has no scientific notation: 1e-30 is a
+                                 // silent syntax error that kills the section
 BQQ     = 0.70710678118654752;   // Butterworth Q, for both LR4 and the allpasses
+
+function lin2db(l) ( log(max(l, TINY)) * DB20 );
 
 // ---------------------------------------------------------------- biquads --
 
@@ -186,7 +346,7 @@ function band_reset()
   rs = 1; gs = 1;
 );
 
-function band_run(l, r, en, thr_db, rc)
+function band_run(l, r, en, thr_db, rc, cl)
   instance(dlyL, dlyR, mxv, mxi, mnv, mni, ma1, ma2,
            wp, rp, n, mxh, mxt, mxc, mnh, mnt, mnc,
            b1p, b2p, sum1, sum2, rs, gs, outL, outR, inL, inR)
@@ -202,12 +362,15 @@ function band_run(l, r, en, thr_db, rc)
   while (mxi[mxh] <= n - W) ( mxh = (mxh + 1) & MASK; mxc -= 1; );
   pk = mxv[mxh];
 
-  // ratio that lands the upcoming peak exactly on the ceiling
+  // ratio that lands the upcoming peak exactly on THIS BAND'S ceiling (cl,
+  // linear - the tilted per-band value).  Blend is solved for, not bolted on
+  // afterwards; Output Gain is NOT, since it is applied once to the sum,
+  // after everything.
   rt = 1;
   (en && pk > 0.0000001) ? (
     pk_db = log(pk) * DB20;
     pk_db > thr_db ? (
-      greq = blend > 0.0001 ? (ceil_lin / pk - (1 - blend)) / (blend * mk_pre) : 2;
+      greq = blend > 0.0001 ? (cl / pk - (1 - blend)) / blend : 2;
       greq < 1 ? (
         greq < 0.000001 ? greq = 0.000001;
         gdb  = log(greq) * DB20;
@@ -248,8 +411,8 @@ function band_run(l, r, en, thr_db, rc)
   inR = dlyR[rp];
 
   en ? (
-    outL = inL * (1 - blend) + inL * gs * mk_pre * blend;
-    outR = inR * (1 - blend) + inR * gs * mk_pre * blend;
+    outL = inL * (1 - blend) + inL * gs * blend;
+    outR = inR * (1 - blend) + inR * gs * blend;
   ) : (
     outL = inL; outR = inR;          // bypassed, but still delayed
   );
@@ -266,105 +429,332 @@ bnd2.band_setup(1 * BANDSZ);
 bnd3.band_setup(2 * BANDSZ);
 bnd4.band_setup(3 * BANDSZ);
 
-HIST  = 1024;
-HMASK = HIST - 1;
-hIMIN = 4 * BANDSZ;
-hIMAX = hIMIN + HIST;
-hOMIN = hIMAX + HIST;
-hOMAX = hOMIN + HIST;
-hG    = hOMAX + HIST;            // 4 * HIST, band-major
-hR    = hG    + 4 * HIST;        // 4 * HIST
-binG  = hR    + 4 * HIST;        // 4
-binR  = binG  + 4;               // 4
-bthr  = binR  + 4;               // 4
-ben   = bthr  + 4;               // 4
-brelc = ben   + 4;               // 4
-bgain = brelc + 4;               // 4
+// ---- scrolling display history ----
+// One column per col_len samples: the peak dB of the (delayed, time-aligned)
+// summed input and of the output, plus each band's deepest gain reduction and
+// highest ratio in that column.  @gfx only reads; @sample only writes.
+// Power of two so the ring index is a mask, not a modulo.
+HIST_N   = 1024;
+HMASK    = HIST_N - 1;
+HIST_IN  = 4 * BANDSZ;
+HIST_OUT = HIST_IN  + HIST_N;
+HIST_GR  = HIST_OUT + HIST_N;        // 4 * HIST_N, band-major
+HIST_RT  = HIST_GR  + 4 * HIST_N;    // 4 * HIST_N
 
-binlen = max(1, floor(srate * 0.005));   // 5 ms per display column
+// Per-band scalars, band-indexed 0..3.
+ben   = HIST_RT + 4 * HIST_N;        // enable
+bthr  = ben   + 4;                   // threshold dB
+brelc = bthr  + 4;                   // ratio release coefficient
+bgain = brelc + 4;                   // band gain, linear
+bmtr  = bgain + 4;                   // GR meter, linear, audio thread
+brmt  = bmtr  + 4;                   // ratio meter, audio thread
+bgrdb = brmt  + 4;                   // GR meter in dB, written by @block
+accG  = bgrdb + 4;                   // column accumulator, min gain
+accR  = accG  + 4;                   // column accumulator, max ratio
+bcdb  = accR  + 4;                   // this band's ceiling in dB, after tilt
+bclin = bcdb  + 4;                   // the same, linear, for the solver
+fcb   = bclin + 4;                   // band centre frequency, geometric
+
+// Display scales.  All three are fixed on purpose: a scale that followed a
+// slider would make the same event draw a different size as the slider moved,
+// which reads as the event having changed when it has not.
+FLOORDB    = -66;            // waveform plot: centre line, 0 dB at the edges
+GR_FULL_DB = 24;             // gain-reduction overlays, lanes and meter
+RATIO_FULL = 10;             // ratio traces and meter (1:1 at the bottom).
+                             // This MUST match slider11's maximum or the trace
+                             // stops short of the top, or clips against it,
+                             // with no error anywhere.
+LN_RATIO   = log(RATIO_FULL);
+// Nominal outer edges of the audible range, used only to give bands 1 and 4 a
+// geometric centre frequency - they are open-ended in the DSP.
+FC_LO      = 20;
+FC_HI      = 20000;
+
+CURVE_LO   = -60;            // transfer-curve panel, dB in
+CURVE_HI   = 12;             // transfer-curve panel, dB out headroom
 
 lastla     = -1;
 need_reset = 1;
 mtr        = 1;
 rmtr       = 1;
 
+// Display readouts, converted once per block rather than per sample, so @gfx
+// never has to call lin2db (see the threading note).
+gr_db  = 0;
+rt_now = 1;
+
+// Set by @gfx when a widget moves a slider, consumed by @block on the audio
+// thread.  Never call update_params() from @gfx.
+need_update = 0;
+
+// Everything derived from the sliders lives here so @slider and @block cannot
+// disagree, and so behaviour never depends on REAPER re-running @slider after
+// slider_automate.  Idempotent, and audio thread only.
+function update_params()
+(
+  ig       = exp(s_in * LN10_20);
+  blend    = s_blend * 0.01;
+  maxr     = s_maxr;
+
+  // Output Gain is applied once, to the sum, after the bands and outside
+  // every ratio solve - so it moves the level and nothing else.
+  trim = exp(s_trim * LN10_20);
+
+  // keep the crossovers ordered and inside Nyquist.  @gfx repeats these six
+  // lines for its own display copies; keep the two in step.
+  f1 = s_x1;
+  f2 = max(s_x2, f1 * 1.1);
+  f3 = max(s_x3, f2 * 1.1);
+  f3 = min(f3, srate * 0.45);
+  f2 = min(f2, f3 / 1.1);
+  f1 = min(f1, f2 / 1.1);
+
+  L.split_setup(f1, f2, f3);
+  R.split_setup(f1, f2, f3);
+
+  // ---- ceiling tilt ----
+  // The ceiling is a line across log frequency, s_tilt dB per octave, and each
+  // band takes its value at the band's GEOMETRIC CENTRE. The pivot is the
+  // geometric mean of those four centres, so the Ceiling knob stays the
+  // average of the four and tilting only redistributes: the sum of the four
+  // offsets is exactly zero at any tilt. That is what makes tilt 0 identical
+  // to the old fixed ceiling, and why turning it does not move the overall
+  // level much. A band whose tilted ceiling would sit above 0 dBFS simply
+  // stops compressing, which is what a ceiling that high means anyway.
+  // @gfx repeats this maths for the display; keep the two in step.
+  fcb[0] = sqrt(FC_LO * f1);
+  fcb[1] = sqrt(f1 * f2);
+  fcb[2] = sqrt(f2 * f3);
+  fcb[3] = sqrt(f3 * min(FC_HI, srate * 0.5));
+  fpiv = exp((log(fcb[0]) + log(fcb[1]) + log(fcb[2]) + log(fcb[3])) * 0.25);
+
+  bi = 0;
+  loop(4,
+    bcdb[bi]  = s_ceil + s_tilt * log(fcb[bi] / fpiv) / log(2);
+    bclin[bi] = exp(bcdb[bi] * LN10_20);
+    bi += 1;
+  );
+
+  la = floor(s_la * 0.001 * srate + 0.5);
+  la < 1 ? la = 1;
+  la > DMAX - 8 ? la = DMAX - 8;
+  W   = la + 1;                        // detector window length
+  box = max(1, floor(la * 0.5));       // two cascaded boxcars, total span ~la
+
+  ben[0]  = s_en1; ben[1]  = s_en2; ben[2]  = s_en3; ben[3]  = s_en4;
+  // A threshold must stay below its band's ceiling, or the solve is asked for
+  // a gain that makes no sense (the single-band plugin clamps the same way).
+  // With a steep tilt a high band's ceiling can drop past a threshold that was
+  // fine at tilt 0, so this is not a corner case.
+  bthr[0] = min(s_th1, bcdb[0] - 0.1); bthr[1] = min(s_th2, bcdb[1] - 0.1);
+  bthr[2] = min(s_th3, bcdb[2] - 0.1); bthr[3] = min(s_th4, bcdb[3] - 0.1);
+  brelc[0] = exp(-1 / max(1, s_rl1 * 0.001 * srate));
+  brelc[1] = exp(-1 / max(1, s_rl2 * 0.001 * srate));
+  brelc[2] = exp(-1 / max(1, s_rl3 * 0.001 * srate));
+  brelc[3] = exp(-1 / max(1, s_rl4 * 0.001 * srate));
+
+  // Per-band gain, applied to the band output after compression and before the
+  // sum. Like Output Gain it deliberately sits outside the ratio solve, so it
+  // lifts the band past the ceiling rather than driving the compressor harder.
+  bgain[0] = exp(s_gn1 * LN10_20);
+  bgain[1] = exp(s_gn2 * LN10_20);
+  bgain[2] = exp(s_gn3 * LN10_20);
+  bgain[3] = exp(s_gn4 * LN10_20);
+
+  pdc_delay  = la;
+  pdc_bot_ch = 0;
+  pdc_top_ch = 2;
+  ext_tail_size = la + srate * 0.5;
+
+  col_len = max(1, floor(srate * s_hist / HIST_N));
+
+  la != lastla ? ( lastla = la; need_reset = 1; );
+
+  need_reset ? (
+    bnd1.band_reset(); bnd2.band_reset();
+    bnd3.band_reset(); bnd4.band_reset();
+
+    memset(HIST_IN, FLOORDB - 200, HIST_N * 2);   // IN and OUT are contiguous
+    memset(HIST_GR, 0, HIST_N * 4);
+    memset(HIST_RT, 1, HIST_N * 4);
+    memset(bmtr, 1, 4); memset(brmt, 1, 4); memset(bgrdb, 0, 4);
+    memset(accG, 1, 4); memset(accR, 1, 4);
+    mtr = 1; rmtr = 1;
+    hpos = 0; acc_in = 0; acc_out = 0; acc_n = 0;
+
+    need_reset = 0;
+  );
+);
+
+update_params();
+
+// ==========================================================================
+//  Interface
+// ==========================================================================
+gk_init();
+gk_img_field = 3; gk_img_header = 4; gk_img_panel = 5;
+gk_img_dropdown = 6; gk_img_button = 7;
+gk_img_wave_frame = 8; gk_img_playhead_line = 9; gk_img_playhead_marker = 10;
+IMG_LED = 12; IMG_KNOB_ORANGE = 13; IMG_KNOB_ORANGE_BI = 14;
+
+// REAPER refuses to load an image taller than somewhere between 6144 and 7680
+// px, and returns a zero-size image rather than an error - a filmstrip widget
+// then draws nothing while still responding to the mouse.  Width is not
+// affected.  So the knob strips are packed as grids: 64 frames in 8 columns
+// (1024 x 1024).  The count lives in two places, here and in the PNG; change
+// one without the other and the knob draws the wrong frame, silently.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+// Counts image slots REAPER would not load.  It reports a zero-size image and
+// no error, and every filmstrip widget then falls back to vector drawing, so
+// without this a failed load is completely silent and passes for working art.
+// By far the most likely cause is a bad path - and note that a filename: line
+// takes the whole rest of the line, so a trailing comment silently breaks it.
+// @gfx only.
+function count_missing_images(cnt) local(i, iw, ih, bad)
+(
+  i = 0; bad = 0;
+  loop(cnt, gfx_getimgdim(i, iw, ih); iw <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// Section accent, applied to everything the kit draws with primitives.  It
+// persists between frames, so each section sets it before drawing.  @gfx only.
+function accent(ar, ag, ab) ( gk_ac_r = ar; gk_ac_g = ag; gk_ac_b = ab; );
+
+// ---- help viewer ----
+// The panel is drawn by the widget library; the plugin only owns the state.
+// The help file is the last filename: slot, after the images, so the
+// missing-image count is not thrown off by it.
+HELP_FILE = 15;
+HELP_BASE = 300;          // first string slot used for help text
+HELP_MAX  = 600;          // most lines kept
+help_open = 0; help_lines = 0;
+
+// ---- curve visibility ----
+// One bit per band, all four shown by default. Clicking a B1..B4 legend label
+// toggles its bit. GUI-only state: it is serialised, never automated.
+curve_mask = 15;
+
+// ---- interface scale ----
+// The layout is authored at UI_W x UI_H logical px and every coordinate runs
+// through gk_S, so scaling the whole interface - drawing, blits, hit-testing
+// and drag deltas alike - is a matter of setting gk_S.  JSFX cannot resize its
+// own window (@gfx W H is a compile-time literal and gfx_w/gfx_h are
+// read-only), so this scales the content inside whatever window REAPER gives
+// us; "Fit" tracks the window, a fixed percentage does not.  Keep UI_W/UI_H in
+// step with the @gfx line: 986x668 is 100%, so 125% wants 1233x835 of window
+// and 150% wants 1479x1002.
+UI_W = 986; UI_H = 668;
+LOGO_ASPECT = 512/101;    // logo_magnolius_grey.png
+GM_UI_SCALE = 0;          // gmem slot holding the shared scale
+
+// The scale is global: every instance reads it from gmem each frame, so
+// changing it in one window changes all open windows and any instance added
+// later in this session.  Each instance also serialises its own copy, which
+// seeds the global when the first one loads in a fresh REAPER session.
+// gmem is session-scoped: REAPER frees it once the last instance is removed,
+// and a JSFX cannot write a settings file, so the scale cannot be persisted
+// from in here.  100%, not Fit: the @gfx line already asks for exactly the
+// design size, so 100% is pixel-exact on a fresh window and the artwork is
+// blitted 1:1, where Fit softens everything by a fractional factor as soon as
+// REAPER restores the window at some other size.  Keep this in step across
+// every options:gmem=Magnolius plugin - whichever opens first in a session
+// seeds the shared slot.
+UI_SCALE_DEFAULT = 1;
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- layout grid ----
+// Four columns of 234 on a 10 px margin and a 10 px gutter, used by the band
+// panels, the bottom row and the curve panel alike.  COL(i) = 10 + i*244.
+COL_W  = 234;
+COL_DX = 244;
+// The bottom row is three panels rather than four columns: four knobs do not
+// fit a 234 column, so DYNAMICS is 322 wide and GAIN 390, which also gives the
+// GR and RATIO meters a home beside the gains. The two outer panels still
+// start on band 1's and band 4's grid lines.
+DYN_W  = 322;
+GAIN_W = 390;
+BAND_Y = 326;             // band panel row
+BOT_Y  = 496;             // crossover / dynamics / gain / display row
+
+// Per-band tint, used for the lane labels and the four transfer curves so the
+// two read as the same band.  Gain reduction stays orange and the ratio stays
+// green everywhere, as in the single-band plugin - the tint identifies the
+// band, never the quantity.
+BTINT = fcb + 4;         // 4 * 3 floats, r,g,b per band
+BTINT[0]  = 0.25; BTINT[1]  = 0.55; BTINT[2]  = 0.96;
+BTINT[3]  = 0.20; BTINT[4]  = 0.78; BTINT[5]  = 0.90;
+BTINT[6]  = 0.35; BTINT[7]  = 0.88; BTINT[8]  = 0.70;
+BTINT[9]  = 0.65; BTINT[10] = 0.92; BTINT[11] = 0.45;
+
+// @gfx only.  Knob on a LOG frequency scale: a linear knob spends 90% of its
+// travel above 2 kHz on the top crossover, which makes the useful part of the
+// control unusable.  The value field beside it stays linear and in plain Hz,
+// so typing a number still does what it says.
+function g_fknob(id, img, x, y, sidx, fmin, fmax, fdef) local(lv, nv)
+(
+  lv = log(slider(sidx));
+  nv = gk_knob(id, img, x, y, 64, lv, log(fmin), log(fmax), log(fdef));
+  nv != lv ? ( slider(sidx) = exp(nv); slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// @gfx only.  One band's curve: its threshold, the ratio it is holding right
+// now, its band gain, and the global Output Gain on top.
+function g_curve(thr, rsol, gdb, on)
+  local(i, ld, gg, fac, ov, xx, yy)
+(
+  on ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.95) : gfx_set(0.34,0.35,0.38,0.8);
+  i = 0;
+  loop(121,
+    ld = CURVE_LO + i*0.5;
+    gg = (on && ld > thr) ? exp(-(ld - thr)*(1 - 1/max(rsol,1))*LN10_20) : 1;
+    // plot what actually leaves the band: blend, then band gain and Output Gain
+    fac = (1 - g_blend) + g_blend*gg;
+    ov  = ld + log(max(fac, TINY))*DB20 + gdb + s_trim;
+    xx  = g_qx + (ld - CURVE_LO)*g_qw/(-CURVE_LO);
+    yy  = max(g_qy, min(g_qy+g_qh, g_qy + g_qh - (ov - CURVE_LO)*g_qh/g_span));
+    i == 0 ? ( gfx_x = xx; gfx_y = yy; ) : gfx_lineto(xx, yy, 1);
+    i += 1;
+  );
+);
+
 @slider
 
-ig       = exp(s_in * LN10_20);
-blend    = s_blend * 0.01;
-maxr     = s_maxr;
-ceil_lin = exp(s_ceil * LN10_20);
+update_params();
 
-trim = exp(s_trim * LN10_20);
-// Pre folds the trim into every band's ratio solve, so the band ceilings still
-// hold after it. Post applies it once to the summed output instead.
-s_mkpos == 0 ? ( mk_pre = trim; mk_post = 1; ) : ( mk_pre = 1; mk_post = trim; );
+@block
 
-// keep the crossovers ordered and inside Nyquist
-f1 = s_x1;
-f2 = max(s_x2, f1 * 1.1);
-f3 = max(s_x3, f2 * 1.1);
-f3 = min(f3, srate * 0.45);
-f2 = min(f2, f3 / 1.1);
-f1 = min(f1, f2 / 1.1);
+// The UI thread only ever raises this flag; the derived values are rebuilt
+// here, on the audio thread, so a widget change never enters update_params()
+// underneath @sample.  See the threading note at the top of the file.
+need_update ? ( need_update = 0; update_params(); );
 
-L.split_setup(f1, f2, f3);
-R.split_setup(f1, f2, f3);
-
-la = floor(s_la * 0.001 * srate + 0.5);
-la < 1 ? la = 1;
-la > DMAX - 8 ? la = DMAX - 8;
-W   = la + 1;
-box = max(1, floor(la * 0.5));
-
-ben[0]  = s_en1; ben[1]  = s_en2; ben[2]  = s_en3; ben[3]  = s_en4;
-bthr[0] = s_th1; bthr[1] = s_th2; bthr[2] = s_th3; bthr[3] = s_th4;
-brelc[0] = exp(-1 / max(1, s_rl1 * 0.001 * srate));
-brelc[1] = exp(-1 / max(1, s_rl2 * 0.001 * srate));
-brelc[2] = exp(-1 / max(1, s_rl3 * 0.001 * srate));
-brelc[3] = exp(-1 / max(1, s_rl4 * 0.001 * srate));
-
-// Per-band gain compensation, applied to the band output after compression and
-// before the sum. Like the global Post trim, it deliberately sits outside the
-// ratio solve, so it lifts the band past the ceiling rather than driving the
-// compressor harder.
-bgain[0] = exp(s_gn1 * LN10_20);
-bgain[1] = exp(s_gn2 * LN10_20);
-bgain[2] = exp(s_gn3 * LN10_20);
-bgain[3] = exp(s_gn4 * LN10_20);
-
-pdc_delay  = la;
-pdc_bot_ch = 0;
-pdc_top_ch = 2;
-ext_tail_size = la + srate * 0.5;
-
-la != lastla ? ( lastla = la; need_reset = 1; );
-
-need_reset ? (
-  bnd1.band_reset(); bnd2.band_reset();
-  bnd3.band_reset(); bnd4.band_reset();
-
-  memset(hIMIN, 0, HIST * 4);        // hIMIN..hOMAX are contiguous
-  memset(hG, 1, HIST * 8);           // hG and hR are contiguous
-  memset(binG, 1, 8);
-  hw = 0; binN = 0;
-  binIMin = 0; binIMax = 0; binOMin = 0; binOMax = 0;
-
-  need_reset = 0;
-);
+// Display readouts, converted once per block rather than per sample.  @gfx
+// reads these numbers and never calls lin2db itself.
+gr_db  = -lin2db(mtr);
+rt_now = rmtr;
+bgrdb[0] = -lin2db(bmtr[0]);
+bgrdb[1] = -lin2db(bmtr[1]);
+bgrdb[2] = -lin2db(bmtr[2]);
+bgrdb[3] = -lin2db(bmtr[3]);
 
 @sample
 
+// Input gain drives the entire plugin. The detectors, the curves and the dry
+// side of the blend all see the boosted signal, so this pushes density, not
+// level.
 l = spl0 * ig;
 r = spl1 * ig;
 
 L.split_run(l);
 R.split_run(r);
 
-bnd1.band_run(L.b1, R.b1, ben[0], bthr[0], brelc[0]);
-bnd2.band_run(L.b2, R.b2, ben[1], bthr[1], brelc[1]);
-bnd3.band_run(L.b3, R.b3, ben[2], bthr[2], brelc[2]);
-bnd4.band_run(L.b4, R.b4, ben[3], bthr[3], brelc[3]);
+bnd1.band_run(L.b1, R.b1, ben[0], bthr[0], brelc[0], bclin[0]);
+bnd2.band_run(L.b2, R.b2, ben[1], bthr[1], brelc[1], bclin[1]);
+bnd3.band_run(L.b3, R.b3, ben[2], bthr[2], brelc[2], bclin[2]);
+bnd4.band_run(L.b4, R.b4, ben[3], bthr[3], brelc[3], bclin[3]);
 
 s_listen == 0 ? (
   ol  = bnd1.outL * bgain[0] + bnd2.outL * bgain[1]
@@ -376,13 +766,9 @@ s_listen == 0 ? (
   : s_listen == 3 ? ( ol = bnd3.outL * bgain[2]; orr = bnd3.outR * bgain[2]; )
   : ( ol = bnd4.outL * bgain[3]; orr = bnd4.outR * bgain[3]; );
 
-ol  *= mk_post;
-orr *= mk_post;
-
-s_clip ? (
-  ol  = max(-1, min(1, ol));
-  orr = max(-1, min(1, orr));
-);
+// Output Gain, once, on the sum, after everything.
+ol  *= trim;
+orr *= trim;
 
 spl0 = ol;
 spl1 = orr;
@@ -394,175 +780,731 @@ rmax = max(max(bnd1.rs, bnd2.rs), max(bnd3.rs, bnd4.rs));
 gmin < mtr  ? mtr  = gmin : mtr  = gmin + (mtr  - gmin) * 0.9995;
 rmax > rmtr ? rmtr = rmax : rmtr = rmax + (rmtr - rmax) * 0.9995;
 
-// summed pre-compression input, rebuilt from the delayed band inputs so it
-// lines up sample for sample with the output on the scope
+bnd1.gs < bmtr[0] ? bmtr[0] = bnd1.gs : bmtr[0] = bnd1.gs + (bmtr[0] - bnd1.gs) * 0.9995;
+bnd2.gs < bmtr[1] ? bmtr[1] = bnd2.gs : bmtr[1] = bnd2.gs + (bmtr[1] - bnd2.gs) * 0.9995;
+bnd3.gs < bmtr[2] ? bmtr[2] = bnd3.gs : bmtr[2] = bnd3.gs + (bmtr[2] - bnd3.gs) * 0.9995;
+bnd4.gs < bmtr[3] ? bmtr[3] = bnd4.gs : bmtr[3] = bnd4.gs + (bmtr[3] - bnd4.gs) * 0.9995;
+bnd1.rs > brmt[0] ? brmt[0] = bnd1.rs : brmt[0] = bnd1.rs + (brmt[0] - bnd1.rs) * 0.9995;
+bnd2.rs > brmt[1] ? brmt[1] = bnd2.rs : brmt[1] = bnd2.rs + (brmt[1] - bnd2.rs) * 0.9995;
+bnd3.rs > brmt[2] ? brmt[2] = bnd3.rs : brmt[2] = bnd3.rs + (brmt[2] - bnd3.rs) * 0.9995;
+bnd4.rs > brmt[3] ? brmt[3] = bnd4.rs : brmt[3] = bnd4.rs + (brmt[3] - bnd4.rs) * 0.9995;
+
+// ---- display history ----
+// The summed pre-compression input is rebuilt from the delayed band inputs, so
+// it lines up sample for sample with the output and the scope shows cause and
+// effect on the same column.  Converted to dB here, on the audio thread, so
+// @gfx only ever reads numbers.
 dinL = bnd1.inL + bnd2.inL + bnd3.inL + bnd4.inL;
 dinR = bnd1.inR + bnd2.inR + bnd3.inR + bnd4.inR;
 
-dhi = max(dinL, dinR); dlo = min(dinL, dinR);
-dhi > binIMax ? binIMax = dhi;
-dlo < binIMin ? binIMin = dlo;
+acc_in  = max(acc_in,  max(abs(dinL), abs(dinR)));
+acc_out = max(acc_out, max(abs(ol),   abs(orr)));
 
-dhi = max(ol, orr); dlo = min(ol, orr);
-dhi > binOMax ? binOMax = dhi;
-dlo < binOMin ? binOMin = dlo;
+bnd1.gs < accG[0] ? accG[0] = bnd1.gs;
+bnd2.gs < accG[1] ? accG[1] = bnd2.gs;
+bnd3.gs < accG[2] ? accG[2] = bnd3.gs;
+bnd4.gs < accG[3] ? accG[3] = bnd4.gs;
+bnd1.rs > accR[0] ? accR[0] = bnd1.rs;
+bnd2.rs > accR[1] ? accR[1] = bnd2.rs;
+bnd3.rs > accR[2] ? accR[2] = bnd3.rs;
+bnd4.rs > accR[3] ? accR[3] = bnd4.rs;
 
-bnd1.gs < binG[0] ? binG[0] = bnd1.gs;
-bnd2.gs < binG[1] ? binG[1] = bnd2.gs;
-bnd3.gs < binG[2] ? binG[2] = bnd3.gs;
-bnd4.gs < binG[3] ? binG[3] = bnd4.gs;
-bnd1.rs > binR[0] ? binR[0] = bnd1.rs;
-bnd2.rs > binR[1] ? binR[1] = bnd2.rs;
-bnd3.rs > binR[2] ? binR[2] = bnd3.rs;
-bnd4.rs > binR[3] ? binR[3] = bnd4.rs;
-
-binN += 1;
-binN >= binlen ? (
-  hIMIN[hw] = binIMin; hIMAX[hw] = binIMax;
-  hOMIN[hw] = binOMin; hOMAX[hw] = binOMax;
-  hG[hw] = binG[0]; hG[HIST + hw] = binG[1];
-  hG[HIST * 2 + hw] = binG[2]; hG[HIST * 3 + hw] = binG[3];
-  hR[hw] = binR[0]; hR[HIST + hw] = binR[1];
-  hR[HIST * 2 + hw] = binR[2]; hR[HIST * 3 + hw] = binR[3];
-  hw = (hw + 1) & HMASK;
-  binN = 0;
-  binIMin = 0; binIMax = 0; binOMin = 0; binOMax = 0;
-  memset(binG, 1, 8);
+acc_n += 1;
+acc_n >= col_len ? (
+  HIST_IN[hpos]  = lin2db(acc_in);
+  HIST_OUT[hpos] = lin2db(acc_out);
+  HIST_GR[hpos]                = -lin2db(accG[0]);   // positive dB of reduction
+  HIST_GR[HIST_N + hpos]       = -lin2db(accG[1]);
+  HIST_GR[HIST_N * 2 + hpos]   = -lin2db(accG[2]);
+  HIST_GR[HIST_N * 3 + hpos]   = -lin2db(accG[3]);
+  HIST_RT[hpos]                = accR[0];
+  HIST_RT[HIST_N + hpos]       = accR[1];
+  HIST_RT[HIST_N * 2 + hpos]   = accR[2];
+  HIST_RT[HIST_N * 3 + hpos]   = accR[3];
+  hpos = (hpos + 1) & HMASK;
+  acc_in = 0; acc_out = 0; acc_n = 0;
+  memset(accG, 1, 4); memset(accR, 1, 4);
 );
 
-@gfx 760 420
+@gfx 986 668
 
-gfx_set(0.07, 0.07, 0.08, 1);
-gfx_rect(0, 0, gfx_w, gfx_h);
+// Reminder: every local here is g_-prefixed, nothing calls a function the
+// audio thread also calls, and the transfer-curve maths is a deliberate copy
+// of the @sample curve.  See the threading note at the top of the file.
+// EEL2 is case-insensitive, so a bare w, n, a, g, l, r, f1 or box here would
+// silently overwrite an audio-thread global mid-sample.
 
-padl = 8; padr = 8; padt = 22; padb = 18;
-plotx  = padl;
-plotw  = max(32, gfx_w - padl - padr);
-totalh = max(140, gfx_h - padt - padb);
-wavh   = floor(totalh * 0.40);
-laneh  = floor((totalh - wavh) / 4);
+gk_begin();
+g_chg = 0;
 
-GRRANGE = 24;
-lmaxr = log(max(maxr, 2));
-cols  = min(plotw, HIST - 2);
+// Take the scale from the shared global, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
 
-// ------------------------------------------------- summed waveform panel --
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). Fixed percentages are taken
+// relative to that, so 100% stays pixel-exact on a HiDPI display; Fit divides
+// the physical window by the design size, which already includes it.
+g_ret = gk_S;
+g_scl = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_scl > 0 ? g_ret * g_scl : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(1);
 
-ploty = padt;
-cy = ploty + wavh * 0.5;
+// Display values, derived HERE from the raw slider variables rather than read
+// from the audio thread's copies.  This matters: slider_automate() does not
+// re-run @slider, so a widget change reaches update_params() only through the
+// need_update flag that @block picks up - and @BLOCK DOES NOT RUN ON A STOPPED
+// TRACK.  Reading ceil_db / blend / f1..f3 here would leave the ceiling line,
+// the band headers and the whole curve panel frozen at their old values while
+// the knob visibly moved, until the user pressed play.  These lines are a
+// deliberate duplicate of the corresponding lines in update_params(); keep the
+// two in step.  The audio thread is unaffected - @block always runs before the
+// @sample calls it precedes, so the DSP never processes a sample with stale
+// coefficients.
+g_ceil  = s_ceil;
+g_blend = s_blend * 0.01;
+g_f1 = s_x1;
+g_f2 = max(s_x2, g_f1 * 1.1);
+g_f3 = max(s_x3, g_f2 * 1.1);
+g_f3 = min(g_f3, srate * 0.45);
+g_f2 = min(g_f2, g_f3 / 1.1);
+g_f1 = min(g_f1, g_f2 / 1.1);
 
-gfx_set(0.11, 0.11, 0.13, 1);
-gfx_rect(plotx, ploty, plotw, wavh);
-gfx_set(0.18, 0.18, 0.21, 1);
-gfx_line(plotx, cy, plotx + plotw, cy);
+// Per-band ceilings, from the same tilt line update_params() builds: s_tilt dB
+// per octave across log frequency, sampled at each band's geometric centre,
+// pivoted on the geometric mean of those centres so the Ceiling knob stays the
+// average of the four. Another deliberate duplicate - keep it in step with
+// update_params(), and note the thresholds are clamped under their own band's
+// ceiling here too, or a tilted curve would bend at the wrong place.
+g_fc1 = sqrt(FC_LO * g_f1);
+g_fc2 = sqrt(g_f1 * g_f2);
+g_fc3 = sqrt(g_f2 * g_f3);
+g_fc4 = sqrt(g_f3 * min(FC_HI, srate * 0.5));
+g_fpiv = exp((log(g_fc1) + log(g_fc2) + log(g_fc3) + log(g_fc4)) * 0.25);
+g_bc1 = g_ceil + s_tilt * log(g_fc1/g_fpiv)/log(2);
+g_bc2 = g_ceil + s_tilt * log(g_fc2/g_fpiv)/log(2);
+g_bc3 = g_ceil + s_tilt * log(g_fc3/g_fpiv)/log(2);
+g_bc4 = g_ceil + s_tilt * log(g_fc4/g_fpiv)/log(2);
 
-i = 0;
-while (i < cols) (
-  ci = (hw - 1 - i) & HMASK;
-  px = plotx + plotw - 1 - i;
+gk_header(0, 10, 10, 966, 22, "VARIABLE RATIO COMPRESSOR MB", -1, 0);
 
-  y0 = max(ploty, min(ploty + wavh, cy - hIMAX[ci] * wavh * 0.5));
-  y1 = max(ploty, min(ploty + wavh, cy - hIMIN[ci] * wavh * 0.5));
-  gfx_set(0.26, 0.30, 0.38, 1);
-  gfx_line(px, y0, px, y1);
+// Scale selector and help button, far right of the header. Their x is pinned
+// to the right edge of what is actually on screen, so a scale too large for
+// the window can never push these controls out of reach.
+g_rr = min(UI_W - 20, gfx_w/gk_S - 10);
+g_dx = g_rr - 86;
+g_i = gk_dropdown(40, g_dx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
 
-  y0 = max(ploty, min(ploty + wavh, cy - hOMAX[ci] * wavh * 0.5));
-  y1 = max(ploty, min(ploty + wavh, cy - hOMIN[ci] * wavh * 0.5));
-  gfx_set(0.52, 0.70, 0.92, 1);
-  gfx_line(px, y0, px, y1);
-
-  i += 1;
+gk_button(41, g_rr - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
 );
 
-// ------------------------------------------------------------ band lanes --
+// Freeze the controls underneath while the help is open, keeping the two
+// header controls live so the help can be closed again.
+help_open ? gk_help_input(40, 41);
 
-b = 0;
-while (b < 4) (
-  lany  = padt + wavh + b * laneh;
-  onoff = ben[b];
+// ================= summed scrolling display =================
+// Plotted in dB, FLOORDB at the centre line and 0 dB at the edges, exactly as
+// the single-band plugin plots it. The gain-reduction overlay and the ratio
+// trace here are the AGGREGATE across the four bands - deepest reduction,
+// highest ratio - which is what the GR and RATIO meters show. The per-band
+// detail is in the lanes underneath.
+accent(0.149, 0.784, 0.902);   // cyan
+gk_nine(gk_img_wave_frame, 16, 8, 10, 40, 722, 150);
+gk_wave_geom(10, 40, 722, 150);
+g_ix = gk_wv_ix; g_iy = gk_wv_iy; g_iw = gk_wv_iw; g_ih = gk_wv_ih;
+g_cy = gk_wv_cy; g_half = gk_wv_half;
+g_yscale = g_half/(-FLOORDB);          // device px per dB, from the centre out
 
-  gfx_set(0.10, 0.10, 0.12, 1);
-  gfx_rect(plotx, lany + 1, plotw, laneh - 2);
-  gfx_set(0.17, 0.17, 0.20, 1);
-  gfx_line(plotx, lany, plotx + plotw, lany);
+// One pass, and each drawn column takes the MAX over every history slot it
+// covers. 1024 slots into ~700 pixels means point-sampling would silently
+// drop transients, which made the display disagree with the ear.
+g_iwi = floor(g_iw);
+g_i = 0;
+g_have = 0;
+loop(g_iwi,
+  g_a = floor(g_i*HIST_N/g_iwi);
+  g_b2 = floor((g_i+1)*HIST_N/g_iwi);
+  g_b2 <= g_a ? ( g_b2 = g_a + 1; );
 
-  // gain reduction, hanging from the lane top
-  onoff ? gfx_set(0.98, 0.58, 0.18, 1) : gfx_set(0.30, 0.30, 0.32, 1);
-  i = 0; havep = 0;
-  while (i < cols) (
-    ci = (hw - 1 - i) & HMASK;
-    px = plotx + plotw - 1 - i;
-    v = -log(max(hG[b * HIST + ci], 0.000001)) * DB20;
-    v > GRRANGE ? v = GRRANGE;
-    py = lany + 1 + v / GRRANGE * (laneh - 2);
-    havep ? gfx_line(px, py, ppx, ppy);
-    ppx = px; ppy = py; havep = 1;
-    i += 1;
+  g_din = FLOORDB - 200; g_dout = FLOORDB - 200; g_dgr = 0; g_drt = 1;
+  g_k = g_a;
+  while (g_k < g_b2) (
+    g_p = (hpos + g_k) & HMASK;
+    g_din  = max(g_din,  HIST_IN[g_p]);
+    g_dout = max(g_dout, HIST_OUT[g_p]);
+    g_dgr  = max(g_dgr, max(max(HIST_GR[g_p], HIST_GR[HIST_N + g_p]),
+                            max(HIST_GR[HIST_N*2 + g_p], HIST_GR[HIST_N*3 + g_p])));
+    g_drt  = max(g_drt, max(max(HIST_RT[g_p], HIST_RT[HIST_N + g_p]),
+                            max(HIST_RT[HIST_N*2 + g_p], HIST_RT[HIST_N*3 + g_p])));
+    g_k += 1;
   );
 
-  // ratio, rising from the lane bottom on a log scale
-  onoff ? gfx_set(0.34, 0.86, 0.62, 1) : gfx_set(0.26, 0.28, 0.27, 1);
-  i = 0; havep = 0;
-  while (i < cols) (
-    ci = (hw - 1 - i) & HMASK;
-    px = plotx + plotw - 1 - i;
-    v = log(max(hR[b * HIST + ci], 1)) / lmaxr;
-    v > 1 ? v = 1;
-    py = lany + laneh - 1 - v * (laneh - 2);
-    havep ? gfx_line(px, py, ppx, ppy);
-    ppx = px; ppy = py; havep = 1;
-    i += 1;
+  g_hin  = min(g_half, max(0, (g_din  - FLOORDB)*g_yscale));
+  g_hout = min(g_half, max(0, (g_dout - FLOORDB)*g_yscale));
+  g_x = g_ix + g_i;
+  // older columns fade out, the same gesture gk_wave_draw makes
+  g_fade = 0.4 + 0.6*g_i/g_iwi;
+  // draw the shorter trace last so it stays visible inside the taller one.
+  // The input is the translucent one: where the two overlap it tints the
+  // output rather than hiding it, so the grey standing outside the cyan - the
+  // gain reduction - is the thing the eye lands on.
+  g_hout >= g_hin ? (
+    g_hout > 0 ? ( gfx_set(0.20,0.78,0.90,0.90*g_fade); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+    g_hin  > 0 ? ( gfx_set(0.45,0.52,0.62,0.55*g_fade); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+  ) : (
+    g_hin  > 0 ? ( gfx_set(0.45,0.52,0.62,0.55*g_fade); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+    g_hout > 0 ? ( gfx_set(0.20,0.78,0.90,0.90*g_fade); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
   );
 
-  // lane label
-  onoff ? gfx_set(0.72, 0.72, 0.78, 0.9) : gfx_set(0.36, 0.36, 0.40, 0.9);
-  gfx_x = plotx + 5; gfx_y = lany + 3;
-  gfx_drawstr("B");
-  gfx_drawnumber(b + 1, 0);
-  onoff == 0 ? gfx_drawstr(" off");
-  gd = log(bgain[b]) * DB20;
-  abs(gd) > 0.05 ? (
-    gfx_drawstr("  ");
-    gd > 0 ? gfx_drawstr("+");
-    gfx_drawnumber(gd, 1);
-    gfx_drawstr(" dB");
+  // Gain reduction, hanging from the top edge: translucent fill with a solid
+  // bottom edge, so it reads over the waveform rather than hiding it. The
+  // scale is FIXED at 0..GR_FULL_DB and does not follow any slider.
+  g_hh = min(g_dgr/GR_FULL_DB, 1)*g_ih;
+  g_hh > 0 ? (
+    gfx_set(0.941,0.588,0.157,0.22*g_fade);
+    gfx_line(g_x, g_iy, g_x, g_iy+g_hh);
+    gfx_set(0.980,0.640,0.200,0.95*g_fade);
+    gfx_rect(g_x, g_iy+g_hh, 1, max(1, gk_S));
   );
 
-  b += 1;
+  // Ratio, as a line rising from the bottom edge on a fixed log scale. A line
+  // rather than a fill: two filled overlays on one plot and neither is
+  // readable.
+  g_ry = g_iy + g_ih - min(log(max(g_drt,1))/LN_RATIO, 1)*g_ih;
+  gfx_set(0.42,0.95,0.62,0.85*g_fade);
+  g_have ? gfx_line(g_x, g_ry, g_px, g_py);
+  g_px = g_x; g_py = g_ry; g_have = 1;
+
+  g_i += 1;
 );
 
-// ---------------------------------------------------------------- header --
+// centre line, then the ceiling mirrored about it.  There is no threshold line
+// on this plot: there are four thresholds and they live on the bands' own
+// curves in the CURVE panel.
+gfx_set(0.30,0.30,0.34,1); gfx_line(g_ix, g_cy, g_ix+g_iw, g_cy);
 
-gfx_set(0.52, 0.70, 0.92, 1);
-gfx_x = padl; gfx_y = 5; gfx_drawstr("out");
-gfx_set(0.26, 0.30, 0.38, 1); gfx_drawstr(" / in");
+g_hc = min(g_half, max(0,(g_ceil - FLOORDB)*g_yscale));
+gfx_set(0.941,0.784,0.235,0.9);
+gfx_line(g_ix, g_cy-g_hc, g_ix+g_iw, g_cy-g_hc);
+gfx_line(g_ix, g_cy+g_hc, g_ix+g_iw, g_cy+g_hc);
 
-gfx_set(0.98, 0.58, 0.18, 1);
-gfx_x = padl + 70; gfx_y = 5;
-gfx_drawstr("GR ");
-gfx_drawnumber(-log(max(mtr, 0.000001)) * DB20, 1);
-gfx_drawstr(" dB");
+// "now" edge, from the kit, so this display matches the other Magnolius plots
+gfx_getimgdim(gk_img_playhead_line, g_sw, g_sh);
+g_sw > 0 ? gfx_blit(gk_img_playhead_line,1,0, 0,0,g_sw,g_sh, g_ix+g_iw-3*gk_S, g_iy, 6*gk_S, g_ih);
+gfx_getimgdim(gk_img_playhead_marker, g_sw, g_sh);
+g_sw > 0 ? gfx_blit(gk_img_playhead_marker,1,0, 0,0,g_sw,g_sh, g_ix+g_iw-7*gk_S, g_iy+g_ih-6*gk_S, 14*gk_S, 10*gk_S);
 
-gfx_set(0.34, 0.86, 0.62, 1);
-gfx_x = padl + 190; gfx_y = 5;
-gfx_drawstr("ratio ");
-gfx_drawnumber(rmtr, 1);
-gfx_drawstr(":1");
+// Legend, inside the frame: each word in the colour of the thing it names,
+// which is the only thing that says which trace is which. Placed as the
+// single-band plugin places its own - absolute logical coordinates off the
+// window, font 1, y = 45, first word at x = 18 - so the two read the same in
+// a chain. It gets a backdrop because the gain-reduction overlay hangs from
+// the TOP and prints straight through the words whenever the compressor is
+// working hard, which is exactly when someone is reading them.
+gfx_setfont(1);
+gfx_set(0.04,0.045,0.05,0.72);
+gfx_rect(14*gk_S, 43*gk_S, 150*gk_S, 15*gk_S);
+gfx_set(0.45,0.52,0.62,1);    gfx_x =  18*gk_S; gfx_y = 45*gk_S; gfx_drawstr("IN");
+gfx_set(0.20,0.78,0.90,1);    gfx_x =  38*gk_S; gfx_y = 45*gk_S; gfx_drawstr("OUT");
+gfx_set(0.980,0.640,0.200,1); gfx_x =  68*gk_S; gfx_y = 45*gk_S; gfx_drawstr("GR");
+gfx_set(0.42,0.95,0.62,1);    gfx_x =  91*gk_S; gfx_y = 45*gk_S; gfx_drawstr("RATIO");
+gfx_set(0.941,0.784,0.235,1); gfx_x = 133*gk_S; gfx_y = 45*gk_S; gfx_drawstr("CEIL");
 
-gfx_set(0.45, 0.45, 0.50, 1);
-gfx_x = padl + 530; gfx_y = 5;
-gfx_drawnumber(f1, 0); gfx_drawstr(" / ");
-gfx_drawnumber(f2, 0); gfx_drawstr(" / ");
-gfx_drawnumber(f3, 0); gfx_drawstr(" Hz");
+// ================= per-band lanes =================
+// Four slim lanes on the same time axis as the plot above: each band's gain
+// reduction hanging from its lane top (orange, 0..GR_FULL_DB) and its solved
+// ratio rising from the lane bottom (green, 1..RATIO_FULL on a log scale).
+// A disabled band draws grey, so "off" is visible without reading the header.
+gk_nine(gk_img_wave_frame, 16, 8, 10, 196, 722, 120);
+gk_wave_geom(10, 196, 722, 120);
+g_lx = gk_wv_ix; g_ly = gk_wv_iy; g_lw = gk_wv_iw; g_lh = gk_wv_ih;
+g_lane = g_lh/4;
+g_lwi = floor(g_lw);
 
-s_listen > 0 ? (
-  gfx_set(0.95, 0.80, 0.30, 1);
-  gfx_x = padl + 470; gfx_y = 5;
-  gfx_drawstr("LISTEN B");
-  gfx_drawnumber(s_listen, 0);
+g_b = 0;
+loop(4,
+  g_ly0 = g_ly + g_b*g_lane;
+  g_on  = slider(14 + g_b*5);
+  g_bas = g_b*HIST_N;
+
+  g_b > 0 ? ( gfx_set(0.19,0.19,0.22,1); gfx_line(g_lx, g_ly0, g_lx+g_lw, g_ly0); );
+
+  g_have = 0;
+  g_i = 0;
+  loop(g_lwi,
+    g_a = floor(g_i*HIST_N/g_lwi);
+    g_b2 = floor((g_i+1)*HIST_N/g_lwi);
+    g_b2 <= g_a ? ( g_b2 = g_a + 1; );
+
+    g_dgr = 0; g_drt = 1;
+    g_k = g_a;
+    while (g_k < g_b2) (
+      g_p = (hpos + g_k) & HMASK;
+      g_dgr = max(g_dgr, HIST_GR[g_bas + g_p]);
+      g_drt = max(g_drt, HIST_RT[g_bas + g_p]);
+      g_k += 1;
+    );
+
+    g_x = g_lx + g_i;
+    g_fade = 0.4 + 0.6*g_i/g_lwi;
+
+    g_hh = min(g_dgr/GR_FULL_DB, 1)*(g_lane - 2);
+    (g_on && g_hh > 0) ? (
+      gfx_set(0.941,0.588,0.157,0.22*g_fade);
+      gfx_line(g_x, g_ly0+1, g_x, g_ly0+1+g_hh);
+      gfx_set(0.980,0.640,0.200,0.95*g_fade);
+      gfx_rect(g_x, g_ly0+1+g_hh, 1, max(1, gk_S));
+    );
+
+    g_ry = g_ly0 + g_lane - 1 - min(log(max(g_drt,1))/LN_RATIO, 1)*(g_lane - 2);
+    g_on ? gfx_set(0.42,0.95,0.62,0.85*g_fade) : gfx_set(0.26,0.28,0.27,0.85);
+    g_have ? gfx_line(g_x, g_ry, g_px, g_py);
+    g_px = g_x; g_py = g_ry; g_have = 1;
+
+    g_i += 1;
+  );
+
+  // lane label, in the band's tint so the lane and its curve agree
+  g_on ? gfx_set(BTINT[g_b*3], BTINT[g_b*3+1], BTINT[g_b*3+2], 1)
+       : gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = g_lx + 4*gk_S; gfx_y = g_ly0 + 2*gk_S;
+  gfx_drawstr("B"); gfx_drawnumber(g_b + 1, 0);
+  g_on ? 0 : gfx_drawstr("  off");
+
+  g_b += 1;
 );
 
-gfx_set(0.45, 0.45, 0.50, 1);
-gfx_x = padl; gfx_y = padt + totalh + 3;
-gfx_drawnumber(cols * binlen / srate, 1);
-gfx_drawstr(" s");
+// ================= transfer curves =================
+// One curve per band, in the band's tint, each drawn from the LIVE solved
+// ratio of that band - so they bend as the plugin works, which is the whole
+// point of a compressor that derives its own ratio. The maths is deliberately
+// a copy of the @sample curve: @gfx must not share a function with the audio
+// thread. Keep the two in step.
+gk_panel(742, 40, 234, 276);
+gk_header(0, 742, 40, 234, 22, "CURVE", -1, 0);
+g_qx = 750*gk_S; g_qy = 70*gk_S; g_qw = 218*gk_S; g_qh = 220*gk_S;
+g_span = CURVE_HI - CURVE_LO;                 // dB spanned vertically
+
+gfx_set(0.08,0.085,0.095,1); gfx_rect(g_qx,g_qy,g_qw,g_qh);
+gfx_set(0.20,0.20,0.23,1);
+g_i = 0; loop(5,
+  gfx_line(g_qx, g_qy+g_qh*g_i*0.25, g_qx+g_qw, g_qy+g_qh*g_i*0.25);
+  gfx_line(g_qx+g_qw*g_i*0.25, g_qy, g_qx+g_qw*g_i*0.25, g_qy+g_qh);
+  g_i += 1;
+);
+
+// unity reference: what the input would do untouched
+gfx_set(0.40,0.40,0.44,1);
+gfx_line(g_qx, g_qy+g_qh, g_qx+g_qw, g_qy+g_qh - (-CURVE_LO)*g_qh/g_span);
+
+// Ceiling, as a horizontal marker on the output axis. It is the per-band
+// target, so Output Gain is not folded into it - four bands each held here
+// still sum above it.
+//
+// At Tilt 0 the four bands share one ceiling and it draws as one yellow dashed
+// line, exactly as it always has. Tilted, each band gets its own line in its
+// own tint at its own height, and the spread between them IS the tilt: that is
+// the whole picture of what the control does. Hidden curves are left out, so
+// the panel does not fill up with lines for traces that are not there.
+s_tilt == 0 ? (
+  g_cl = g_qy + g_qh - (g_ceil - CURVE_LO)*g_qh/g_span;
+  gfx_set(0.941,0.784,0.235,0.65);
+  g_i = 0; loop(floor(g_qw/8),
+    gfx_line(g_qx+g_i*8, g_cl, g_qx+g_i*8+4, g_cl);
+    g_i += 1;
+  );
+) : (
+  g_b = 0;
+  loop(4,
+    (curve_mask & 2^g_b) ? (
+      g_cl = g_qy + g_qh -
+             ((g_b == 0 ? g_bc1 : g_b == 1 ? g_bc2 : g_b == 2 ? g_bc3 : g_bc4)
+              - CURVE_LO)*g_qh/g_span;
+      g_cl = max(g_qy, min(g_qy + g_qh, g_cl));
+      gfx_set(BTINT[g_b*3], BTINT[g_b*3+1], BTINT[g_b*3+2], 0.55);
+      g_i = 0; loop(floor(g_qw/8),
+        gfx_line(g_qx+g_i*8, g_cl, g_qx+g_i*8+4, g_cl);
+        g_i += 1;
+      );
+    );
+    g_b += 1;
+  );
+);
+
+// Legend, and the only control for which curves are drawn: clicking B1..B4
+// toggles that band's curve. Four curves on one plot is the readable limit,
+// and comparing two of them means being able to put the other two away.
+// Hit-tested BEFORE the curves are drawn so a click takes effect on the frame
+// it happens, and it uses the same gk_clicked / gk_hit pattern as the kit's
+// own widgets, so the help overlay suppresses it along with everything else.
+// The state is GUI-only, so it is serialised rather than made a slider.
+gfx_setfont(1);
+g_b = 0;
+loop(4,
+  g_lgx = 752 + g_b*26;
+  g_bit = 2^g_b;
+  gk_clicked && gk_hit(g_lgx - 3, 294, 24, 15) ? (
+    curve_mask = (curve_mask & g_bit) ? curve_mask - g_bit : curve_mask + g_bit;
+  );
+  g_vis = (curve_mask & g_bit) > 0;
+
+  // three states, in descending prominence: shown on a live band, shown on a
+  // disabled band (grey, matching the grey curve), hidden.
+  g_vis ? (
+    slider(14 + g_b*5) ? gfx_set(BTINT[g_b*3], BTINT[g_b*3+1], BTINT[g_b*3+2], 1)
+                       : gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  ) : gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 0.45);
+  gfx_x = g_lgx*gk_S; gfx_y = 296*gk_S;
+  gfx_drawstr("B"); gfx_drawnumber(g_b + 1, 0);
+  // underline in the band's tint while the curve is shown - without it
+  // "greyed out" is the only cue that the label is a switch at all
+  g_vis ? (
+    gfx_set(BTINT[g_b*3], BTINT[g_b*3+1], BTINT[g_b*3+2], 0.8);
+    gfx_rect(g_lgx*gk_S, 308*gk_S, 15*gk_S, max(1, gk_S));
+  );
+  g_b += 1;
+);
+
+(curve_mask & 1) ? ( accent(BTINT[0], BTINT[1],  BTINT[2]);  g_curve(min(s_th1, g_bc1 - 0.1), bnd1.rs, s_gn1, s_en1); );
+(curve_mask & 2) ? ( accent(BTINT[3], BTINT[4],  BTINT[5]);  g_curve(min(s_th2, g_bc2 - 0.1), bnd2.rs, s_gn2, s_en2); );
+(curve_mask & 4) ? ( accent(BTINT[6], BTINT[7],  BTINT[8]);  g_curve(min(s_th3, g_bc3 - 0.1), bnd3.rs, s_gn3, s_en3); );
+(curve_mask & 8) ? ( accent(BTINT[9], BTINT[10], BTINT[11]); g_curve(min(s_th4, g_bc4 - 0.1), bnd4.rs, s_gn4, s_en4); );
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = 894*gk_S; gfx_y = 296*gk_S; gfx_drawstr("dB in / out");
+
+// ================= band panels =================
+// One panel per band, all four on the same grid: the LED in the header is the
+// band's Enable, SOLO is the Listen control, and the bar beside it is that
+// band's live gain reduction on the same 0..GR_FULL_DB scale as everything
+// else. Sliders run 14+5b (enable), +1 threshold, +2 release, +3 gain.
+//
+// Alt on any of the three per-band controls moves ALL FOUR bands together -
+// see the block after the loop. The loop only records which control moved and
+// by how much, because the group move needs every band's value from BEFORE
+// this frame and the bands after this one have not been drawn yet.
+g_gk = 0;
+
+g_b = 0;
+loop(4,
+  g_bx = 10 + g_b*COL_DX;
+  g_si = 14 + g_b*5;
+  g_on = slider(g_si);
+
+  // header title carries the band's frequency range, from the ordered
+  // crossovers - which is the only place the ordering clamp is visible
+  g_b == 0 ? sprintf(#ttl, "BAND 1         to %.0f Hz", g_f1) :
+  g_b == 1 ? sprintf(#ttl, "BAND 2   %.0f - %.0f Hz", g_f1, g_f2) :
+  g_b == 2 ? sprintf(#ttl, "BAND 3   %.0f - %.0f Hz", g_f2, g_f3) :
+             sprintf(#ttl, "BAND 4      %.0f Hz up", g_f3);
+
+  gk_panel(g_bx, BAND_Y, COL_W, 160);
+  g_v = gk_header(0, g_bx, BAND_Y, COL_W, 22, #ttl, IMG_LED, g_on);
+  g_v != g_on ? (
+    slider(g_si) = g_v; slider_automate(2^(g_si-1));
+    g_on = g_v; g_chg = 1;
+  );
+
+  // Cyan for the two dynamics controls, yellow for the gain. The band panels
+  // keep cyan while the global CROSSOVER and DYNAMICS panels are orange, so
+  // the per-band controls stay visually separate from the ones that apply to
+  // all four at once.
+  g_on ? accent(0.149, 0.784, 0.902) : accent(0.42, 0.44, 0.47);
+
+  g_t0 = slider(g_si + 1); g_r0 = slider(g_si + 2); g_n0 = slider(g_si + 3);
+
+  g_ct = gk_knob_slider(10 + g_b*3, 0, g_bx +  10, BAND_Y + 30, 64, g_si + 1, -60, 0, -18);
+  g_cr = gk_knob_slider(11 + g_b*3, 0, g_bx +  85, BAND_Y + 30, 64, g_si + 2, 10, 2000,
+                        g_b == 0 ? 400 : g_b == 1 ? 250 : g_b == 2 ? 150 : 80);
+  g_cn = gk_knob_slider(12 + g_b*3, 2, g_bx + 160, BAND_Y + 30, 64, g_si + 3, -20, 20, 0);
+
+  gk_text_c(g_bx +  42, BAND_Y + 98, "Thresh", 1);
+  gk_text_c(g_bx + 117, BAND_Y + 98, "Release", 1);
+  gk_text_c(g_bx + 192, BAND_Y + 98, "Gain", 1);
+
+  sprintf(#s, "%.1f dB", slider(g_si + 1));
+  g_ct |= gk_field_edit_slider(50 + g_b*3, g_bx +  12, BAND_Y + 112, 60, 16, g_si + 1, -60, 0, -18, #s);
+  sprintf(#s, "%.0f ms", slider(g_si + 2));
+  g_cr |= gk_field_edit_slider(51 + g_b*3, g_bx +  87, BAND_Y + 112, 60, 16, g_si + 2, 10, 2000,
+                               g_b == 0 ? 400 : g_b == 1 ? 250 : g_b == 2 ? 150 : 80, #s);
+  sprintf(#s, "%+.1f dB", slider(g_si + 3));
+  g_cn |= gk_field_edit_slider(52 + g_b*3, g_bx + 162, BAND_Y + 112, 60, 16, g_si + 3, -20, 20, 0, #s);
+
+  g_chg |= g_ct | g_cr | g_cn;
+
+  // Alt held: remember what moved, what it was before, and by how much.
+  // Threshold and Gain carry a difference in dB; Release carries a RATIO,
+  // because what relates 400 ms to 80 ms is a factor, not a number of
+  // milliseconds - adding the same ms to both would collapse the fast band
+  // into its floor while the slow one barely moved.
+  (mouse_cap & 16) && !(mouse_cap & 4) ? (
+    g_ct ? ( g_gk = 1; g_gb = g_b; g_gbase = g_t0; g_gd = slider(g_si+1) - g_t0; ) :
+    g_cr ? ( g_gk = 2; g_gb = g_b; g_gbase = g_r0; g_gd = slider(g_si+2) / g_r0; ) :
+    g_cn ? ( g_gk = 3; g_gb = g_b; g_gbase = g_n0; g_gd = slider(g_si+3) - g_n0; );
+  );
+
+  // SOLO writes the Listen slider, so it stays one automatable parameter:
+  // clicking a soloed band returns to All bands.
+  gk_button(42 + g_b, g_bx + 10, BAND_Y + 134, 44, 16, s_listen == g_b + 1, "SOLO") ? (
+    s_listen = s_listen == g_b + 1 ? 0 : g_b + 1;
+    slider_automate(2^11);
+  );
+
+  // live gain reduction for this band, growing to the right
+  g_mx = (g_bx + 62)*gk_S; g_my = (BAND_Y + 134)*gk_S;
+  g_mw = 162*gk_S; g_mh = 16*gk_S;
+  gfx_set(0.08,0.085,0.095,1); gfx_rect(g_mx, g_my, g_mw, g_mh);
+  g_gv = g_on ? bgrdb[g_b] : 0;
+  g_bw = min(g_gv/GR_FULL_DB, 1)*g_mw;
+  g_bw > 0 ? (
+    gfx_set(0.980,0.640,0.200,0.80); gfx_rect(g_mx, g_my, g_bw, g_mh);
+    gfx_set(1.0,0.78,0.35,1); gfx_rect(g_mx + g_bw - max(1,gk_S), g_my, max(1,gk_S), g_mh);
+  );
+  gfx_set(0.28,0.28,0.32,1); gfx_rect(g_mx, g_my, g_mw, g_mh, 0);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = g_mx + 5*gk_S; gfx_y = g_my + 2*gk_S; gfx_drawstr("GR");
+  g_on ? sprintf(#s, "%.1f dB", g_gv) : sprintf(#s, "off");
+  gfx_measurestr(#s, g_tw, g_th);
+  gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = g_mx + g_mw - 5*gk_S - g_tw; gfx_y = g_my + 2*gk_S; gfx_drawstr(#s);
+
+  g_b += 1;
+);
+
+// ---- alt on a band control: move every band by the same amount ----
+// The point is to keep a balance you have already dialled in. The four bands
+// move as ONE rigid body: every band starts from the value it had before this
+// frame and takes the same step, so the offsets between them come out
+// untouched. That also means the group stops when the FIRST band reaches an
+// end of its range, including the one under the mouse - the knob you are
+// dragging goes still rather than letting the others fall out of formation.
+//
+// Threshold and Gain step by a difference in dB. Release scales by a ratio,
+// so the bands keep their relationship to each other; on an additive step the
+// 80 ms band would hit its 10 ms floor after a 70 ms drag and take the whole
+// group with it.
+g_gk > 0 ? (
+  g_off = g_gk;                                     // 1 thresh, 2 rel, 3 gain
+  g_lo = g_gk == 1 ? -60 : g_gk == 2 ? 10   : -20;
+  g_hi = g_gk == 1 ?   0 : g_gk == 2 ? 2000 :  20;
+
+  // how far the group may move before any band leaves its range
+  g_gk == 2 ? ( g_pmax = g_hi/g_lo;  g_pmin = g_lo/g_hi;  )
+            : ( g_pmax = g_hi-g_lo;  g_pmin = g_lo-g_hi;  );
+  g_b = 0;
+  loop(4,
+    g_v = g_b == g_gb ? g_gbase : slider(14 + g_b*5 + g_off);
+    g_gk == 2 ? ( g_pmax = min(g_pmax, g_hi/g_v);  g_pmin = max(g_pmin, g_lo/g_v);  )
+              : ( g_pmax = min(g_pmax, g_hi-g_v);  g_pmin = max(g_pmin, g_lo-g_v);  );
+    g_b += 1;
+  );
+  g_gm = max(g_pmin, min(g_pmax, g_gd));
+
+  // one automate call for the four sliders, so the host sees one gesture
+  g_mask = 0;
+  g_b = 0;
+  loop(4,
+    g_sj = 14 + g_b*5 + g_off;
+    g_v = g_b == g_gb ? g_gbase : slider(g_sj);
+    slider(g_sj) = g_gk == 2 ? g_v * g_gm : g_v + g_gm;
+    g_mask += 2^(g_sj - 1);
+    g_b += 1;
+  );
+  slider_automate(g_mask);
+  g_chg = 1;
+);
+
+// ================= crossover =================
+// Log-scaled knobs, plain-Hz fields. The three frequencies are kept ordered
+// and inside Nyquist by update_params(), so a knob pushed past its neighbour
+// stops having an effect rather than scrambling the tree - the band headers
+// show what the DSP actually used.
+gk_panel(10, BOT_Y, COL_W, 138);
+gk_header(0, 10, BOT_Y, COL_W, 22, "CROSSOVER", -1, 0);
+accent(0.941, 0.588, 0.157);   // orange
+
+g_chg |= g_fknob(22, IMG_KNOB_ORANGE,  20, BOT_Y + 30, 2, 20, 500, 120);
+g_chg |= g_fknob(23, IMG_KNOB_ORANGE,  95, BOT_Y + 30, 3, 200, 3000, 800);
+g_chg |= g_fknob(24, IMG_KNOB_ORANGE, 170, BOT_Y + 30, 4, 1500, 16000, 5000);
+gk_text_c( 52, BOT_Y + 98, "Low", 1);
+gk_text_c(127, BOT_Y + 98, "Mid", 1);
+gk_text_c(202, BOT_Y + 98, "High", 1);
+sprintf(#s, "%.0f Hz", s_x1);
+g_chg |= gk_field_edit_slider(62,  22, BOT_Y + 112, 60, 16, 2, 20, 500, 120, #s);
+sprintf(#s, "%.0f Hz", s_x2);
+g_chg |= gk_field_edit_slider(63,  97, BOT_Y + 112, 60, 16, 3, 200, 3000, 800, #s);
+sprintf(#s, "%.0f Hz", s_x3);
+g_chg |= gk_field_edit_slider(64, 172, BOT_Y + 112, 60, 16, 4, 1500, 16000, 5000, #s);
+
+// ================= dynamics =================
+// The controls every band shares. Ceiling is per band and shared by all four,
+// which is why it is here and not on the band panels - and Tilt is what turns
+// that one number into four. This panel is 322 wide rather than a 234 column:
+// four knobs do not fit one, and these four are the plugin's core.
+gk_panel(254, BOT_Y, DYN_W, 138);
+gk_header(0, 254, BOT_Y, DYN_W, 22, "DYNAMICS", -1, 0);
+accent(0.941, 0.588, 0.157);   // orange
+
+g_chg |= gk_knob_slider(25, IMG_KNOB_ORANGE,    264, BOT_Y + 30, 64,  5, -36, 0, -6);
+g_chg |= gk_knob_slider(32, IMG_KNOB_ORANGE_BI, 343, BOT_Y + 30, 64, 18, -6, 6, 0);
+g_chg |= gk_knob_slider(26, IMG_KNOB_ORANGE,    422, BOT_Y + 30, 64, 11, 1, 10, 3);
+g_chg |= gk_knob_slider(27, IMG_KNOB_ORANGE,    501, BOT_Y + 30, 64, 10, 0.5, 20, 5);
+gk_text_c(296, BOT_Y + 98, "Ceiling", 1);
+gk_text_c(375, BOT_Y + 98, "Tilt", 1);
+gk_text_c(454, BOT_Y + 98, "Max Ratio", 1);
+gk_text_c(533, BOT_Y + 98, "Lookahead", 1);
+sprintf(#s, "%.2f dB", s_ceil);
+g_chg |= gk_field_edit_slider(65, 266, BOT_Y + 112, 60, 16,  5, -36, 0, -6, #s);
+sprintf(#s, "%+.1f /oct", s_tilt);
+g_chg |= gk_field_edit_slider(71, 345, BOT_Y + 112, 60, 16, 18, -6, 6, 0, #s);
+sprintf(#s, "%.1f:1", s_maxr);
+g_chg |= gk_field_edit_slider(66, 424, BOT_Y + 112, 60, 16, 11, 1, 10, 3, #s);
+sprintf(#s, "%.1f ms", s_la);
+g_chg |= gk_field_edit_slider(67, 503, BOT_Y + 112, 60, 16, 10, 0.5, 20, 5, #s);
+
+// ================= gain =================
+// Signal order, left to right: drive in, how much of the compressed signal to
+// keep, level out. Input Gain is a genuine pre-compressor drive - the
+// detectors, the curves and the dry half of the blend all see it - while
+// Output Gain is a plain trim on the sum.
+gk_panel(586, BOT_Y, GAIN_W, 138);
+gk_header(0, 586, BOT_Y, GAIN_W, 22, "GAIN", -1, 0);
+accent(0.941, 0.784, 0.235);   // yellow
+
+// Alt-drag links the two gains in opposite directions - see the block after
+// the fields. Both values are captured before any widget can move them.
+g_in0 = s_in; g_out0 = s_trim;
+
+g_cin   = gk_knob_slider(28, 1, 596, BOT_Y + 30, 64, 1, -12, 24, 0);
+g_chg |= gk_knob_slider(29, 1, 671, BOT_Y + 30, 64, 6, 0, 100, 100);
+g_cout  = gk_knob_slider(30, 2, 746, BOT_Y + 30, 64, 7, -20, 20, 0);
+gk_text_c(628, BOT_Y + 98, "Input Gain", 1);
+gk_text_c(703, BOT_Y + 98, "Blend", 1);
+gk_text_c(778, BOT_Y + 98, "Output Gain", 1);
+sprintf(#s, "%+.1f dB", s_in);
+g_cin  |= gk_field_edit_slider(68, 598, BOT_Y + 112, 60, 16, 1, -12, 24, 0, #s);
+sprintf(#s, "%.0f %%", s_blend);
+g_chg |= gk_field_edit_slider(69, 673, BOT_Y + 112, 60, 16, 6, 0, 100, 100, #s);
+sprintf(#s, "%+.1f dB", s_trim);
+g_cout |= gk_field_edit_slider(70, 748, BOT_Y + 112, 60, 16, 7, -20, 20, 0, #s);
+
+// Alt-drag on either gain moves the other one the opposite way by the same
+// number of dB: drive harder into the bands and take the same amount back out,
+// so what changes is how hard the plugin works and not the level. It reads the
+// delta the widgets just produced rather than duplicating their drag maths, so
+// it covers the knob, the wheel and the value field alike - and it is gated on
+// those widgets' own change flags, so an automation write landing mid-frame
+// cannot be mistaken for a drag. Ctrl is excluded
+// because a reset is a jump to a default, not a gesture with a delta worth
+// mirroring. Each value still clamps to its own range, so the link goes
+// one-sided once either end runs out of travel.
+g_chg |= g_cin | g_cout;
+(mouse_cap & 16) && !(mouse_cap & 4) ? (
+  g_cin ? (
+    s_trim = gk_clamp(g_out0 - (s_in - g_in0), -20, 20);
+    slider_automate(2^6);
+  ) : g_cout ? (
+    s_in = gk_clamp(g_in0 - (s_trim - g_out0), -12, 24);
+    slider_automate(2^0);
+  );
+);
+
+// ---- meters, in the right-hand third of the GAIN panel ----
+// The aggregate of the four bands - deepest gain reduction, highest ratio -
+// matching the overlays on the summed plot above. They sit with the gains
+// because that is where you look while setting level. Live data, so both are
+// drawn with primitives rather than blitted.
+g_my = (BOT_Y + 30)*gk_S; g_mh = 64*gk_S;
+g_g1 = 856*gk_S; g_g2 = 916*gk_S; g_mw = 40*gk_S;
+
+gfx_set(0.08,0.085,0.095,1);
+gfx_rect(g_g1, g_my, g_mw, g_mh);
+gfx_rect(g_g2, g_my, g_mw, g_mh);
+
+gfx_set(0.22,0.22,0.25,1);
+g_i = 1; loop(3,
+  gfx_line(g_g1, g_my+g_mh*g_i*0.25, g_g1+g_mw, g_my+g_mh*g_i*0.25);
+  gfx_line(g_g2, g_my+g_mh*g_i*0.25, g_g2+g_mw, g_my+g_mh*g_i*0.25);
+  g_i += 1;
+);
+
+// gain reduction: grows DOWNWARD from the top, the same direction as the
+// overlays on the plot and in the lanes, so the three read as one gesture
+g_bh = min(gr_db/GR_FULL_DB, 1)*g_mh;
+g_bh > 0 ? (
+  gfx_set(0.980,0.640,0.200,0.85); gfx_rect(g_g1, g_my, g_mw, g_bh);
+  gfx_set(1.0,0.78,0.35,1); gfx_rect(g_g1, g_my+g_bh-max(1,gk_S), g_mw, max(1,gk_S));
+);
+
+// ratio: grows UPWARD from 1:1 at the bottom to RATIO_FULL at the top, on a
+// log scale that does NOT follow Max Ratio - see the constant.
+g_bh = min(log(max(rt_now,1))/LN_RATIO, 1)*g_mh;
+g_bh > 0 ? (
+  gfx_set(0.42,0.95,0.62,0.85); gfx_rect(g_g2, g_my+g_mh-g_bh, g_mw, g_bh);
+  gfx_set(0.62,1.0,0.78,1); gfx_rect(g_g2, g_my+g_mh-g_bh, g_mw, max(1,gk_S));
+);
+
+// frames last, so the fills sit inside them
+gfx_set(0.28,0.28,0.32,1);
+gfx_rect(g_g1, g_my, g_mw, g_mh, 0);
+gfx_rect(g_g2, g_my, g_mw, g_mh, 0);
+
+// End-of-scale captions, outside the bars: without them neither meter says
+// what "full" means. Both columns sit to the LEFT of their bar and are
+// RIGHT-aligned to it, so they grow into the gap instead of off the panel.
+gfx_setfont(1);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+sprintf(#s, "%d", GR_FULL_DB);
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g1 - 4*gk_S - g_tw; gfx_y = g_my; gfx_drawstr(#s);
+sprintf(#s, "0");
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g1 - 4*gk_S - g_tw; gfx_y = g_my + g_mh - g_th; gfx_drawstr(#s);
+sprintf(#s, "%d", RATIO_FULL);
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g2 - 4*gk_S - g_tw; gfx_y = g_my; gfx_drawstr(#s);
+sprintf(#s, "1");
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g2 - 4*gk_S - g_tw; gfx_y = g_my + g_mh - g_th; gfx_drawstr(#s);
+
+gk_text_c(876, BOT_Y + 98, "GR", 1);
+gk_text_c(936, BOT_Y + 98, "RATIO", 1);
+sprintf(#s, "%.1f dB", gr_db);
+gk_field(848, BOT_Y + 112, 56, 16, #s);
+sprintf(#s, "%.1f:1", rt_now);
+gk_field(908, BOT_Y + 112, 56, 16, #s);
+
+help_open ? gk_help_draw(10, 40, 966, 594, "Help  -  Variable Ratio Compressor MB", HELP_BASE, help_lines);
+
+// Wordmark, bottom right, its right edge on the same 10 px margin as the
+// panels. LOGO_ASPECT is the source's width/height; a 1-frame strip is just a
+// scaled blit that respects gk_S. The version sits opposite it, so a stale
+// compiled instance is visible at a glance - REAPER caches compiled JSFX per
+// FX instance.
+gk_strip(11, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+gk_text_c(30, UI_H - 22, "v1.2", 1);
+
+g_bad = count_missing_images(15);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 400*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+// One flag, picked up by @block on the audio thread.
+g_chg ? need_update = 1;
+gk_end();
+
+@serialize
+// GUI-only state, so it is serialised rather than made a slider. Append-only:
+// a new value goes AFTER the existing ones or every project saved with the
+// old order reads back wrong. A project saved before a field existed simply
+// runs out of data, and the variable keeps the default @init gave it.
+file_var(0, gui_scale_idx);
+file_var(0, curve_mask);
