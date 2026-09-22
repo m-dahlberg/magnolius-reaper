@@ -183,7 +183,7 @@ def t_mix_bypass():
     x = program(int(DUR * SR))
     H.write_input("mixby_in.wav", x)
     out, _ = H.render("mixby",
-                      S(mix_pct=0, makeup_db=12.0, range_db=24.0, ratio=8.0),
+                      S(mix_pct=0, makeup_db=12.0, range_db=12.0, ratio=8.0),
                       input_name="mixby_in.wav", length=DUR, in_len=DUR)
     d = max(maxdiff(out[0], x[0], 0, len(x[0])),
             maxdiff(out[1], x[1], 0, len(x[1])))
@@ -197,7 +197,7 @@ def t_model():
     apart. Fix whichever one is wrong -- do not raise the tolerance.
     """
     x = program(int(DUR * SR))
-    kw = dict(thresh_db=-28.0, ratio=3.0, range_db=15.0, knee_db=8.0,
+    kw = dict(thresh_db=-28.0, ratio=3.0, range_db=12.0, knee_db=8.0,
               atk_ms=12.0, rel_ms=150.0, makeup_db=2.0, mix_pct=80.0,
               link_pct=60.0, det_mode=1)
     ok, detail, _, _ = cmp_model("model", kw, x)
@@ -207,7 +207,7 @@ def t_model():
 def t_model_peak():
     """Same, with the Peak detector -- the other branch of @sample."""
     x = program(int(DUR * SR), seed=11)
-    kw = dict(det_mode=0, thresh_db=-32.0, ratio=4.0, range_db=18.0,
+    kw = dict(det_mode=0, thresh_db=-32.0, ratio=4.0, range_db=12.0,
               atk_ms=5.0, rel_ms=400.0, link_pct=0.0, sc_hz=120.0)
     ok, detail, _, _ = cmp_model("model_peak", kw, x)
     H.report("model_peak", ok, detail)
@@ -263,10 +263,10 @@ def t_gate():
         x, f = tone_at(int(DUR * SR), lvl)
         nm = "gate%d" % abs(int(lvl))
         H.write_input(nm + "_in.wav", [x, x])
-        out, _ = H.render(nm, S(range_db=40.0), input_name=nm + "_in.wav",
+        out, _ = H.render(nm, S(range_db=12.0, ratio=1.5), input_name=nm + "_in.wav",
                           length=DUR, in_len=DUR)
         got = gain_db(out[0], x, f)
-        exp = model.settled_lift_db(lvl, range_db=40.0)
+        exp = model.settled_lift_db(lvl, range_db=12.0, ratio=1.5)
         ok = ok and abs(got - exp) < DBTOL
         lines.append("    %+6.1f dBFS -> lift %+6.2f dB (want %+6.2f)"
                      % (lvl, got, exp))
@@ -287,10 +287,10 @@ def t_link():
     H.write_input("link_in.wav", [loud, quiet])
     res = {}
     for pct in (0, 100):
-        out, _ = H.render("link%d" % pct, S(link_pct=pct, range_db=40.0),
+        out, _ = H.render("link%d" % pct, S(link_pct=pct, range_db=12.0, ratio=1.5),
                           input_name="link_in.wav", length=DUR, in_len=DUR)
         res[pct] = (gain_db(out[0], loud, f), gain_db(out[1], quiet, f))
-    want_unlinked = model.settled_lift_db(-55.0, range_db=40.0)
+    want_unlinked = model.settled_lift_db(-55.0, range_db=12.0, ratio=1.5)
     ok = (abs(res[0][1] - want_unlinked) < DBTOL
           and res[100][1] < 0.5
           and abs(res[0][0]) < DBTOL and abs(res[100][0]) < DBTOL)

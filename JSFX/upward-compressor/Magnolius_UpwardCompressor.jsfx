@@ -1,8 +1,12 @@
 desc:Upward Compressor (Magnolius)
 // @description Upward Compressor (Magnolius)
 // @author Magnolius
-// @version 1.2
+// @version 1.3
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_UpwardCompressor.help.txt
 // @about
 //   A low-level lift: it raises what is below the threshold and leaves what is
 //   above it alone - the mirror image of an ordinary compressor.
@@ -15,7 +19,15 @@ desc:Upward Compressor (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Restore the tags: header, so the FX browser can search these by category again
+//   New interface built on the Magnolius GUI kit: knobs with typed value
+//   fields, the scrolling display in a framed plot with the lift overlaid on
+//   it, the live transfer curve as a panel, a scale selector shared with the
+//   other Magnolius plugins, and a built-in help panel.
+//
+//   Range now stops at 12 dB instead of 40, and the lift overlay is drawn on
+//   a fixed 0-12 dB scale rather than one that followed Range - on the old
+//   scale, raising Range made the same lift draw shorter. A project saved
+//   with Range above 12 loads clamped to 12.
 
 //tags: dynamics upward compression vocal
 // An upward compressor: it raises what is BELOW the threshold and leaves
@@ -29,8 +41,9 @@ desc:Upward Compressor (Magnolius)
 // the lift in dB.  A quadratic knee straddles the threshold so the curve is
 // continuous in value and slope.
 //
-// Two clamps keep it usable on real material.  Range caps the lift, so a
-// silent bar cannot arrive at +40 dB.  The Noise Floor control fades the
+// Two clamps keep it usable on real material.  Range caps the lift at up to
+// 12 dB, so a silent bar cannot be dragged all the way up to the threshold.
+// The Noise Floor control fades the
 // lift out below a level of your choosing, so hiss, room tone and pauses
 // stay where they are instead of being pumped up into the mix.
 //
@@ -43,41 +56,80 @@ desc:Upward Compressor (Magnolius)
 // pumpy - the opposite intuition from a downward compressor.
 //
 // THREADING - do not undo this.  Every @gfx variable is g_-prefixed and no
-// name is used on both sides.  @gfx never calls a function defined in @init:
-// EEL2 function locals AND parameters are static and shared between threads,
-// so drawing the transfer curve through lift_db() would stomp the audio
-// thread's copy of x/hk/g mid-sample.  The curve maths is inlined in @gfx
-// instead.  It looks like duplication; it is not.
+// name is used on both sides.  The rule is not "@gfx calls no functions": it
+// is that NO FUNCTION IS CALLED FROM BOTH THREADS.  EEL2 function locals AND
+// parameters are static and shared, so a function entered from @gfx while the
+// audio thread is inside it stomps the audio thread's copy of every local
+// mid-sample.  So:
+//   audio thread only:  db2lin, lin2db, lift_db, recalc
+//   @gfx only:          accent, ui_scale, count_missing_images, every gk_*
+// That is also why the transfer curve inlines the lift maths instead of
+// calling lift_db(), and why a widget change sets need_recalc rather than
+// calling recalc() from the UI thread - @block picks the flag up on the audio
+// thread, so the new coefficients do not depend on REAPER re-running @slider
+// after slider_automate.  It looks like duplication; it is not.
 //
-// v0.2
+// v1.3
+
+// Shared memory, namespaced to this vendor so it cannot collide with other
+// plugins' gmem. Slot map (keep in step across every options:gmem=Magnolius
+// plugin - they share the one map):
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
 
 in_pin:left input
 in_pin:right input
 out_pin:left output
 out_pin:right output
 
-slider1:thresh_db=-30<-80,0,0.1>Threshold (dB)
-slider2:ratio=2.0<1,20,0.01>Ratio (1:N)
-slider3:range_db=12<0,40,0.1>Range / Max Lift (dB)
-slider4:knee_db=6<0,24,0.1>Knee (dB)
-slider5:atk_ms=20<0.5,300,0.1>Attack - lift in (ms)
-slider6:rel_ms=200<5,2000,1>Release - lift out (ms)
-slider7:gate_db=-70<-100,-20,0.5>Noise Floor (dB)
-slider8:sc_hz=20<20,500,1>Sidechain HPF (Hz)
-slider9:det_mode=1<0,1,1{Peak,RMS}>Detector
-slider10:link_pct=100<0,100,1>Stereo Link (%)
-slider11:makeup_db=0<-24,24,0.1>Makeup (dB)
-slider12:mix_pct=100<0,100,1>Mix (%)
-slider13:hist_s=6<1,30,0.5>Display History (s)
+// Every slider name carries a leading '-' so REAPER's generic control panel
+// stays hidden behind the custom interface, while the parameters remain
+// automatable and visible to the render tests.
+slider1:thresh_db=-30<-80,0,0.1>-Threshold (dB)
+slider2:ratio=2.0<1,20,0.01>-Ratio (1:N)
+slider3:range_db=12<0,12,0.1>-Range / Max Lift (dB)
+slider4:knee_db=6<0,24,0.1>-Knee (dB)
+slider5:atk_ms=20<0.5,300,0.1>-Attack - lift in (ms)
+slider6:rel_ms=200<5,2000,1>-Release - lift out (ms)
+slider7:gate_db=-70<-100,-20,0.5>-Noise Floor (dB)
+slider8:sc_hz=20<20,500,1>-Sidechain HPF (Hz)
+slider9:det_mode=1<0,1,1{Peak,RMS}>-Detector
+slider10:link_pct=100<0,100,1>-Stereo Link (%)
+slider11:makeup_db=0<-24,24,0.1>-Makeup (dB)
+slider12:mix_pct=100<0,100,1>-Mix (%)
+slider13:hist_s=6<1,30,0.5>-Display History (s)
+
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 knob, Compression   1 knob, Detector   2 knob, Output
+//   3 knob, Output bipolar (Makeup)          13 help text, last slot
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/knob_yellow_grid.png
+filename:3,gui_kit/knob_yellow_bipolar_grid.png
+filename:4,gui_kit/value_field.png
+filename:5,gui_kit/header_bar.png
+filename:6,gui_kit/panel_tile.png
+filename:7,gui_kit/dropdown.png
+filename:8,gui_kit/button_cyan.png
+filename:9,gui_kit/wave_frame_9slice.png
+filename:10,gui_kit/playhead_line_cyan.png
+filename:11,gui_kit/playhead_marker_cyan.png
+filename:12,gui_kit/logo_magnolius_grey.png
+filename:13,Magnolius_UpwardCompressor.help.txt
 
 @init
 
 // @init re-runs on samplerate change and on recompile.  ext_noinit stops the
 // other trigger - transport start - so held detector state and the display
 // history survive hitting play.  There is nothing expensive or irreplaceable
-// built here, so no initdone guard and no @serialize is needed: on a real
-// samplerate change every coefficient below genuinely has to be rebuilt and
-// the detectors genuinely should reset.
+// built here, so no initdone guard is needed: on a real samplerate change
+// every coefficient below genuinely has to be rebuilt and the detectors
+// genuinely should reset.  (@serialize exists, but only for the interface
+// scale, which is GUI state and not touched here.)
 ext_noinit = 1;
 
 // No ext_tail_size.  Silence in gives silence out at every setting (the
@@ -91,8 +143,14 @@ TINY   = 10^(-30);          // EEL2 has no scientific notation: 1e-30 is a
 DENORM = 10^(-20);          // sign-flipped each sample, so no DC survives
 GATE_WIDTH = 6;             // dB over which the noise floor fades the lift in
 FLOORDB    = -78;           // bottom of the waveform display scale
-CURVE_LO   = -80;           // transfer-curve inset, dB in
-CURVE_HI   = 10;            // transfer-curve inset, dB out headroom
+CURVE_LO   = -80;           // transfer-curve panel, dB in
+CURVE_HI   = 10;            // transfer-curve panel, dB out headroom
+// Top of the lift overlay, and the maximum of the Range slider - the two are
+// the same number on purpose. The overlay scale is FIXED: if it followed
+// Range, raising Range would make the same lift draw shorter, which reads as
+// "less lift" when the opposite is true. Change this and the slider3 maximum
+// together, or the overlay stops reaching the top of the plot.
+LIFT_FULL_DB = 12;
 
 gdb0 = gdb1 = 0;
 det0 = det1 = 0;
@@ -100,6 +158,15 @@ rms0 = rms1 = 0;
 hp0  = hp1  = 0;
 adn  = DENORM;
 meter = 0;
+
+// Display-only envelopes.  Both are fed per sample and converted to dB once
+// per block, so @gfx never has to call lin2db (see the threading note).
+opk = 0; out_db = FLOORDB;    // output peak, for the Out Peak readout
+dlvl = 0; det_db = FLOORDB;   // detector level, for the Det Level readout
+
+// Set by @gfx when a widget moves a slider, consumed by @block on the audio
+// thread.  Never call recalc() from @gfx.
+need_recalc = 0;
 
 // ---- scrolling history ---------------------------------------------------
 // Power of two so the ring index is a mask, not a modulo (EEL2's % on a
@@ -133,7 +200,7 @@ function lift_db(ldb) local(x, hk, g) (
 // Everything samplerate-dependent lives here so @init and @slider cannot
 // disagree.  @init runs before the first @slider on a samplerate change, and
 // @slider also fires spuriously (transport, undo, automation touch); this is
-// idempotent, so it is safe from both.
+// idempotent, so it is safe from both.  Audio thread only.
 function recalc() (
   slope     = 1 - 1/max(ratio,1);
   knee_half = max(knee_db,0.01)*0.5;
@@ -154,9 +221,92 @@ function recalc() (
 
 recalc();
 
+// ==========================================================================
+//  Interface
+// ==========================================================================
+gk_init();
+gk_img_field = 4; gk_img_header = 5; gk_img_panel = 6;
+gk_img_dropdown = 7; gk_img_button = 8;
+gk_img_wave_frame = 9; gk_img_playhead_line = 10; gk_img_playhead_marker = 11;
+
+// REAPER refuses to load an image taller than somewhere between 6144 and 7680
+// px, and returns a zero-size image rather than an error - a filmstrip widget
+// then draws nothing while still responding to the mouse.  Width is not
+// affected.  So the knob strips are packed as grids: 64 frames in 8 columns
+// (1024 x 1024).  The count lives in two places, here and in the PNG; change
+// one without the other and the knob draws the wrong frame, silently.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+// Counts image slots REAPER would not load.  It reports a zero-size image and
+// no error, and every filmstrip widget then falls back to vector drawing, so
+// without this a failed load is completely silent and passes for working art.
+// By far the most likely cause is a bad path - and note that a filename: line
+// takes the whole rest of the line, so a trailing comment silently breaks it.
+// @gfx only.
+function count_missing_images(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// Section accent, applied to everything the kit draws with primitives.  It
+// persists between frames, so each section sets it before drawing.  @gfx only.
+function accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+
+// ---- help viewer ----
+// The panel is drawn by the widget library; the plugin only owns the state.
+// The help file is the last filename: slot, after the images, so the
+// missing-image count is not thrown off by it.
+HELP_FILE = 13;
+HELP_BASE = 300;          // first string slot used for help text
+HELP_MAX  = 600;          // most lines kept
+help_open = 0; help_lines = 0;
+
+// ---- interface scale ----
+// The layout is authored at UI_W x UI_H logical px and every coordinate runs
+// through gk_S, so scaling the whole interface - drawing, blits, hit-testing
+// and drag deltas alike - is a matter of setting gk_S.  JSFX cannot resize its
+// own window (@gfx W H is a compile-time literal and gfx_w/gfx_h are
+// read-only), so this scales the content inside whatever window REAPER gives
+// us; "Fit" tracks the window, a fixed percentage does not.  Keep UI_W/UI_H in
+// step with the @gfx line: 720x488 is 100%, so 125% wants 900x610 of window
+// and 150% wants 1080x732.
+UI_W = 720; UI_H = 488;
+LOGO_ASPECT = 512/101;    // logo_magnolius_grey.png
+GM_UI_SCALE = 0;          // gmem slot holding the shared scale
+
+// The scale is global: every instance reads it from gmem each frame, so
+// changing it in one window changes all open windows and any instance added
+// later in this session.  Each instance also serialises its own copy, which
+// seeds the global when the first one loads in a fresh REAPER session.
+// gmem is session-scoped: REAPER frees it once the last instance is removed,
+// and a JSFX cannot write a settings file, so the scale cannot be persisted
+// from in here.  100%, not Fit: the @gfx line already asks for exactly the
+// design size, so 100% is pixel-exact on a fresh window and the artwork is
+// blitted 1:1, where Fit softens everything by a fractional factor as soon as
+// REAPER restores the window at some other size.  Keep this in step across
+// every options:gmem=Magnolius plugin - whichever opens first in a session
+// seeds the shared slot.
+UI_SCALE_DEFAULT = 1;
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
 @slider
 
 recalc();
+
+@block
+
+// The UI thread only ever raises this flag; the coefficients are rebuilt here,
+// on the audio thread, so a widget change never enters recalc() underneath
+// @sample.  See the threading note at the top of the file.
+need_recalc ? ( need_recalc = 0; recalc(); );
+
+// Display readouts, converted once per block rather than per sample.  @gfx
+// reads these two numbers and never calls lin2db itself.
+out_db = lin2db(opk);
+det_db = lin2db(dlvl);
 
 @sample
 
@@ -214,6 +364,8 @@ meter = ( m > meter ? m : m + (meter-m)*meter_coef );
 // ---- feed the scrolling display ----
 pkin  = max(abs(in0),  abs(in1));
 pkout = max(abs(spl0), abs(spl1));
+opk  = ( pkout > opk  ? pkout : pkout + (opk-pkout)*meter_coef  );
+dlvl = ( dmax  > dlvl ? dmax  : dmax  + (dlvl-dmax)*meter_coef );
 acc_in   = max(acc_in,  pkin);
 acc_out  = max(acc_out, pkout);
 acc_lift = max(acc_lift, m);
@@ -227,149 +379,323 @@ acc_n >= col_len ? (
   acc_n = 0;
 );
 
-@gfx 760 340
+@gfx 720 488
 
-// Reminder: every local here is g_-prefixed and nothing calls into @init's
-// functions.  See the threading note at the top of the file.
+// Reminder: every local here is g_-prefixed, nothing calls a function the
+// audio thread also calls, and the transfer-curve maths is a deliberate copy
+// of lift_db().  See the threading note at the top of the file.
 
-gfx_set(0.07,0.07,0.08,1); gfx_rect(0,0,gfx_w,gfx_h);
+gk_begin();
+g_chg = 0;
 
-g_pad    = 10;
-g_info_h = 20;
-g_curve_w = ( gfx_w >= 640 ? 150 : 0 );
-g_sx = g_pad;
-g_sy = g_pad + g_info_h;
-g_sw = gfx_w - g_pad*2 - ( g_curve_w > 0 ? g_curve_w + g_pad : 0 );
-g_lift_h = 44;
-g_sh = max(60, gfx_h - g_sy - g_pad - g_lift_h - 20);
-g_cy = g_sy + g_sh*0.5;
-g_yscale = g_sh*0.5/(-FLOORDB);
-g_ly = g_sy + g_sh + 6;
+// Take the scale from the shared global, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
 
-gfx_set(0.11,0.11,0.13,1);
-gfx_rect(g_sx,g_sy,g_sw,g_sh);
-gfx_rect(g_sx,g_ly,g_sw,g_lift_h);
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). Fixed percentages are taken
+// relative to that, so 100% stays pixel-exact on a HiDPI display; Fit divides
+// the physical window by the design size, which already includes it.
+g_ret = gk_S;
+g_scl = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_scl > 0 ? g_ret * g_scl : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(1);
 
-// ================= scrolling waveform + lift strip =================
-// One pass, and each drawn column takes the MAX over every history slot it
-// covers.  1024 slots into ~580 pixels means point-sampling would silently
-// drop every other transient, which made the display disagree with the ear.
-g_sw > 0 ? (
-  g_i = 0;
-  loop(g_sw,
-    g_a = floor(g_i*HIST_N/g_sw);
-    g_b = floor((g_i+1)*HIST_N/g_sw);
-    g_b <= g_a ? ( g_b = g_a + 1; );
+gk_header(0, 10, 10, 700, 22, "UPWARD COMPRESSOR", -1, 0);
 
-    g_din = FLOORDB - 200; g_dout = FLOORDB - 200; g_dlift = 0;
-    g_k = g_a;
-    while (g_k < g_b) (
-      g_p = (hpos + g_k) & HMASK;
-      g_din   = max(g_din,  HIST_IN[g_p]);
-      g_dout  = max(g_dout, HIST_OUT[g_p]);
-      g_dlift = max(g_dlift, HIST_LIFT[g_p]);
-      g_k += 1;
-    );
+// Scale selector and help button, far right of the header. Their x is pinned
+// to the right edge of what is actually on screen, so a scale too large for
+// the window can never push these controls out of reach.
+g_rr = min(UI_W - 20, gfx_w/gk_S - 10);
+g_dx = g_rr - 86;
+g_i = gk_dropdown(40, g_dx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
 
-    g_hin  = min(g_sh*0.5, max(0, (g_din  - FLOORDB)*g_yscale));
-    g_hout = min(g_sh*0.5, max(0, (g_dout - FLOORDB)*g_yscale));
-    g_x = g_sx + g_i;
-    // draw the shorter trace last so it stays visible inside the taller one
-    g_hout >= g_hin ? (
-      g_hout > 0 ? ( gfx_set(0.24,0.72,0.46,1); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
-      g_hin  > 0 ? ( gfx_set(0.38,0.70,1.00,1); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
-    ) : (
-      g_hin  > 0 ? ( gfx_set(0.38,0.70,1.00,1); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
-      g_hout > 0 ? ( gfx_set(0.24,0.72,0.46,1); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
-    );
-
-    g_hh = ( range_db > 0 ? min(g_dlift/range_db,1)*g_lift_h : 0 );
-    g_hh > 0 ? (
-      gfx_set(0.35,0.85,0.55,0.9);
-      gfx_line(g_x, g_ly+g_lift_h-g_hh, g_x, g_ly+g_lift_h);
-    );
-
-    g_i += 1;
-  );
+gk_button(41, g_rr - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
 );
 
-// centre line
-gfx_set(0.30,0.30,0.34,1); gfx_line(g_sx, g_cy, g_sx+g_sw, g_cy);
+// Freeze the controls underneath while the help is open, keeping the two
+// header controls live so the help can be closed again.
+help_open ? gk_help_input(40, 41);
+
+// ================= scrolling display =================
+// The kit's gk_wave_draw plots linear amplitude, which is the wrong scale for
+// a plugin whose whole subject is what happens 40-70 dB down: everything of
+// interest would sit on the centre line. So the frame and the plot geometry
+// come from the kit and the traces are drawn here on a dB scale, FLOORDB at
+// the centre line and 0 dB at the edges.
+accent(0.149, 0.784, 0.902);   // cyan
+gk_nine(gk_img_wave_frame, 16, 8, 10, 40, 530, 160);
+gk_wave_geom(10, 40, 530, 160);
+g_ix = gk_wv_ix; g_iy = gk_wv_iy; g_iw = gk_wv_iw; g_ih = gk_wv_ih;
+g_cy = gk_wv_cy; g_half = gk_wv_half;
+g_yscale = g_half/(-FLOORDB);          // device px per dB, from the centre out
+g_lbase  = g_iy + g_ih;                // lift grows from the bottom edge
+g_lh     = g_ih;                       // up the full plot at LIFT_FULL_DB
+
+// One pass, and each drawn column takes the MAX over every history slot it
+// covers. 1024 slots into ~500 pixels means point-sampling would silently
+// drop every other transient, which made the display disagree with the ear.
+g_iwi = floor(g_iw);
+g_i = 0;
+loop(g_iwi,
+  g_a = floor(g_i*HIST_N/g_iwi);
+  g_b = floor((g_i+1)*HIST_N/g_iwi);
+  g_b <= g_a ? ( g_b = g_a + 1; );
+
+  g_din = FLOORDB - 200; g_dout = FLOORDB - 200; g_dlift = 0;
+  g_k = g_a;
+  while (g_k < g_b) (
+    g_p = (hpos + g_k) & HMASK;
+    g_din   = max(g_din,  HIST_IN[g_p]);
+    g_dout  = max(g_dout, HIST_OUT[g_p]);
+    g_dlift = max(g_dlift, HIST_LIFT[g_p]);
+    g_k += 1;
+  );
+
+  g_hin  = min(g_half, max(0, (g_din  - FLOORDB)*g_yscale));
+  g_hout = min(g_half, max(0, (g_dout - FLOORDB)*g_yscale));
+  g_x = g_ix + g_i;
+  // older columns fade out, the same gesture gk_wave_draw makes
+  g_fade = 0.4 + 0.6*g_i/g_iwi;
+  // draw the shorter trace last so it stays visible inside the taller one
+  // The input is the translucent one: where the two overlap it tints the
+  // output rather than hiding it, so the cyan standing outside the grey - the
+  // lift - is the thing the eye lands on.
+  g_hout >= g_hin ? (
+    g_hout > 0 ? ( gfx_set(0.20,0.78,0.90,0.90*g_fade); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+    g_hin  > 0 ? ( gfx_set(0.45,0.52,0.62,0.55*g_fade); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+  ) : (
+    g_hin  > 0 ? ( gfx_set(0.45,0.52,0.62,0.55*g_fade); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+    g_hout > 0 ? ( gfx_set(0.20,0.78,0.90,0.90*g_fade); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+  );
+
+  // Lift, overlaid from the bottom of the same plot: translucent fill with a
+  // solid top edge, so it reads over the waveform rather than hiding it. The
+  // scale is fixed at 0..LIFT_FULL_DB and does NOT follow Range - see the
+  // constant. Range shows up as the height the overlay stops climbing at.
+  g_hh = min(g_dlift/LIFT_FULL_DB,1)*g_lh;
+  g_hh > 0 ? (
+    gfx_set(0.35,0.85,0.55,0.30*g_fade);
+    gfx_line(g_x, g_lbase-g_hh, g_x, g_lbase);
+    gfx_set(0.42,0.95,0.62,0.95*g_fade);
+    gfx_rect(g_x, g_lbase-g_hh, 1, max(1, gk_S));
+  );
+
+  g_i += 1;
+);
+
+// centre line, then the two level references mirrored about it
+gfx_set(0.30,0.30,0.34,1); gfx_line(g_ix, g_cy, g_ix+g_iw, g_cy);
 
 // noise floor (dotted)
-g_hg = min(g_sh*0.5, max(0,(gate_db - FLOORDB)*g_yscale));
+g_hg = min(g_half, max(0,(gate_db - FLOORDB)*g_yscale));
 gfx_set(0.55,0.55,0.60,0.8);
-g_i = 0; loop(floor(g_sw/8),
-  gfx_line(g_sx+g_i*8, g_cy-g_hg, g_sx+g_i*8+3, g_cy-g_hg);
-  gfx_line(g_sx+g_i*8, g_cy+g_hg, g_sx+g_i*8+3, g_cy+g_hg);
+g_i = 0; loop(floor(g_iw/8),
+  gfx_line(g_ix+g_i*8, g_cy-g_hg, g_ix+g_i*8+3, g_cy-g_hg);
+  gfx_line(g_ix+g_i*8, g_cy+g_hg, g_ix+g_i*8+3, g_cy+g_hg);
   g_i += 1;
 );
 
 // threshold
-g_ht = min(g_sh*0.5, max(0,(thresh_db - FLOORDB)*g_yscale));
-gfx_set(0.95,0.62,0.22,0.95);
-gfx_line(g_sx, g_cy-g_ht, g_sx+g_sw, g_cy-g_ht);
-gfx_line(g_sx, g_cy+g_ht, g_sx+g_sw, g_cy+g_ht);
-gfx_set(0.95,0.62,0.22,0.7);
-gfx_x = g_sx+4; gfx_y = g_cy-g_ht-14; gfx_printf("THR %.1f", thresh_db);
+g_ht = min(g_half, max(0,(thresh_db - FLOORDB)*g_yscale));
+gfx_set(0.941,0.588,0.157,0.95);
+gfx_line(g_ix, g_cy-g_ht, g_ix+g_iw, g_cy-g_ht);
+gfx_line(g_ix, g_cy+g_ht, g_ix+g_iw, g_cy+g_ht);
 
-gfx_set(0.30,0.30,0.34,1);
-gfx_rect(g_sx,g_sy,g_sw,1); gfx_rect(g_sx,g_sy+g_sh-1,g_sw,1);
-gfx_rect(g_sx,g_sy,1,g_sh); gfx_rect(g_sx+g_sw-1,g_sy,1,g_sh);
-gfx_rect(g_sx,g_ly,g_sw,1); gfx_rect(g_sx,g_ly+g_lift_h-1,g_sw,1);
-gfx_rect(g_sx,g_ly,1,g_lift_h); gfx_rect(g_sx+g_sw-1,g_ly,1,g_lift_h);
-gfx_set(0.55,0.85,0.65,0.9);
-gfx_x = g_sx+4; gfx_y = g_ly+3; gfx_printf("LIFT  0..%.0f dB", range_db);
+// "now" edge, from the kit, so this display matches the other Magnolius plots
+gfx_getimgdim(gk_img_playhead_line, g_sw, g_sh);
+g_sw > 0 ? gfx_blit(gk_img_playhead_line,1,0, 0,0,g_sw,g_sh, g_ix+g_iw-3*gk_S, g_iy, 6*gk_S, g_ih);
+gfx_getimgdim(gk_img_playhead_marker, g_sw, g_sh);
+g_sw > 0 ? gfx_blit(gk_img_playhead_marker,1,0, 0,0,g_sw,g_sh, g_ix+g_iw-7*gk_S, g_iy+g_ih-6*gk_S, 14*gk_S, 10*gk_S);
 
-// ================= transfer curve inset =================
+// Legend, inside the frame: each word in the colour of the thing it names,
+// which is the only thing that says which trace is which. No backdrop - the
+// four words are short enough to read over the waveform, and the scale,
+// history and range they used to be followed by are all readable off the
+// panels below.
+gfx_setfont(1);
+gfx_set(0.45,0.52,0.62,1);    gfx_x = 18*gk_S; gfx_y = 45*gk_S; gfx_drawstr("IN");
+gfx_set(0.20,0.78,0.90,1);    gfx_x = 38*gk_S; gfx_y = 45*gk_S; gfx_drawstr("OUT");
+gfx_set(0.42,0.95,0.62,1);    gfx_x = 64*gk_S; gfx_y = 45*gk_S; gfx_drawstr("LIFT");
+gfx_set(0.941,0.588,0.157,1); gfx_x = 92*gk_S; gfx_y = 45*gk_S; gfx_drawstr("THR");
+
+// ================= transfer curve =================
 // The lift maths below is deliberately a copy of lift_db(): @gfx must not
-// call it.  Keep the two in step.
-g_curve_w > 0 ? (
-  g_cx = gfx_w - g_pad - g_curve_w;
-  g_ch = min(g_curve_w, g_sh);
-  g_span = CURVE_HI - CURVE_LO;                 // dB spanned vertically
-  gfx_set(0.11,0.11,0.13,1); gfx_rect(g_cx,g_sy,g_curve_w,g_ch);
-  gfx_set(0.20,0.20,0.23,1);
-  g_i = 0; loop(5,
-    gfx_line(g_cx, g_sy+g_ch*g_i*0.25, g_cx+g_curve_w, g_sy+g_ch*g_i*0.25);
-    gfx_line(g_cx+g_curve_w*g_i*0.25, g_sy, g_cx+g_curve_w*g_i*0.25, g_sy+g_ch);
-    g_i += 1;
-  );
-  // unity reference
-  gfx_set(0.40,0.40,0.44,1);
-  gfx_line(g_cx, g_sy+g_ch, g_cx+g_curve_w, g_sy+g_ch - (-CURVE_LO)*g_ch/g_span);
-  g_tx = g_cx + (thresh_db-CURVE_LO)*g_curve_w/(-CURVE_LO);
-  gfx_set(0.95,0.62,0.22,0.8); gfx_line(g_tx, g_sy, g_tx, g_sy+g_ch);
+// call it. Keep the two in step.
+gk_panel(550, 40, 160, 160);
+gk_header(0, 550, 40, 160, 22, "CURVE", -1, 0);
+// The plot stops short of the panel's bottom edge so the axis caption has a
+// line of its own instead of sitting on top of the curve.
+g_qx = 558*gk_S; g_qy = 68*gk_S; g_qw = 144*gk_S; g_qh = 112*gk_S;
+g_span = CURVE_HI - CURVE_LO;                 // dB spanned vertically
 
-  gfx_set(0.38,0.78,1.0,1);
-  g_i = 0;
-  loop(161,
-    g_ld = CURVE_LO + g_i*0.5;
-
-    g_xx0 = thresh_db - g_ld;
-    g_hk  = knee_half;
-    g_xx0 <= -g_hk ? ( g_gg = 0; ) :
-    g_xx0 <   g_hk ? ( g_gg = slope * sqr(g_xx0 + g_hk) / (4*g_hk); ) :
-                     ( g_gg = slope * g_xx0; );
-    g_gg *= min(max((g_ld - gate_db)/GATE_WIDTH, 0), 1);
-    g_gg = min(g_gg, range_db);
-
-    // plot what actually leaves the plugin: Mix and Makeup included
-    g_ov = g_ld + log(max(dry + wet*exp(g_gg*DB2LOG)*makeup, TINY))*LOG2DB;
-
-    g_xx = g_cx + (g_ld-CURVE_LO)*g_curve_w/(-CURVE_LO);
-    g_yy = max(g_sy, min(g_sy+g_ch, g_sy + g_ch - (g_ov-CURVE_LO)*g_ch/g_span));
-    g_i == 0 ? ( gfx_x = g_xx; gfx_y = g_yy; ) : gfx_lineto(g_xx,g_yy,1);
-    g_i += 1;
-  );
-  gfx_set(0.55,0.55,0.60,1);
-  gfx_x = g_cx+4; gfx_y = g_sy+g_ch-14; gfx_printf("%.0f..0 in", CURVE_LO);
+gfx_set(0.08,0.085,0.095,1); gfx_rect(g_qx,g_qy,g_qw,g_qh);
+gfx_set(0.20,0.20,0.23,1);
+g_i = 0; loop(5,
+  gfx_line(g_qx, g_qy+g_qh*g_i*0.25, g_qx+g_qw, g_qy+g_qh*g_i*0.25);
+  gfx_line(g_qx+g_qw*g_i*0.25, g_qy, g_qx+g_qw*g_i*0.25, g_qy+g_qh);
+  g_i += 1;
 );
 
-// ================= readout =================
-// The version number is here so a stale compiled instance is visible at a
-// glance - REAPER caches compiled JSFX per FX instance.
-gfx_set(0.88,0.88,0.92,1);
-gfx_x = g_pad; gfx_y = g_pad;
-gfx_printf("v0.2   Lift %.1f dB    Thr %.1f    1:%.2f    Range %.0f    Floor %.0f    %.0f dB scale    %.1f s",
-           meter, thresh_db, ratio, range_db, gate_db, FLOORDB, hist_s);
+// unity reference: what the input would do untouched
+gfx_set(0.40,0.40,0.44,1);
+gfx_line(g_qx, g_qy+g_qh, g_qx+g_qw, g_qy+g_qh - (-CURVE_LO)*g_qh/g_span);
+
+// noise floor and threshold, as vertical markers on the input axis
+g_gx = g_qx + (gate_db-CURVE_LO)*g_qw/(-CURVE_LO);
+gfx_set(0.55,0.55,0.60,0.5);
+g_i = 0; loop(floor(g_qh/6),
+  gfx_line(g_gx, g_qy+g_i*6, g_gx, g_qy+g_i*6+3);
+  g_i += 1;
+);
+g_tx = g_qx + (thresh_db-CURVE_LO)*g_qw/(-CURVE_LO);
+gfx_set(0.941,0.588,0.157,0.8); gfx_line(g_tx, g_qy, g_tx, g_qy+g_qh);
+
+gfx_set(0.20,0.78,0.90,1);
+g_i = 0;
+loop(161,
+  g_ld = CURVE_LO + g_i*0.5;
+
+  g_xx0 = thresh_db - g_ld;
+  g_hk  = knee_half;
+  g_xx0 <= -g_hk ? ( g_gg = 0; ) :
+  g_xx0 <   g_hk ? ( g_gg = slope * sqr(g_xx0 + g_hk) / (4*g_hk); ) :
+                   ( g_gg = slope * g_xx0; );
+  g_gg *= min(max((g_ld - gate_db)/GATE_WIDTH, 0), 1);
+  g_gg = min(g_gg, range_db);
+
+  // plot what actually leaves the plugin: Mix and Makeup included
+  g_ov = g_ld + log(max(dry + wet*exp(g_gg*DB2LOG)*makeup, TINY))*LOG2DB;
+
+  g_xx = g_qx + (g_ld-CURVE_LO)*g_qw/(-CURVE_LO);
+  g_yy = max(g_qy, min(g_qy+g_qh, g_qy + g_qh - (g_ov-CURVE_LO)*g_qh/g_span));
+  g_i == 0 ? ( gfx_x = g_xx; gfx_y = g_yy; ) : gfx_lineto(g_xx,g_yy,1);
+  g_i += 1;
+);
+gk_text_c(630, 182, "-80 .. 0 dB in", 1);
+
+// ================= compression =================
+gk_panel(10, 210, 248, 246);
+gk_header(0, 10, 210, 248, 22, "COMPRESSION", -1, 0);
+accent(0.149, 0.784, 0.902);   // cyan
+
+g_chg |= gk_knob_slider(10, 0,  22, 240, 64,  1, -80, 0, -30);
+g_chg |= gk_knob_slider(11, 0,  98, 240, 64,  2, 1, 20, 2);
+g_chg |= gk_knob_slider(12, 0, 174, 240, 64,  3, 0, LIFT_FULL_DB, 12);
+gk_text_c( 54, 306, "Threshold", 1);
+gk_text_c(130, 306, "Ratio", 1);
+gk_text_c(206, 306, "Range", 1);
+sprintf(#s, "%.1f dB", thresh_db);
+g_chg |= gk_field_edit_slider(50,  24, 320, 60, 16,  1, -80, 0, -30, #s);
+sprintf(#s, "1:%.2f", ratio);
+g_chg |= gk_field_edit_slider(51, 100, 320, 60, 16,  2, 1, 20, 2, #s);
+sprintf(#s, "%.1f dB", range_db);
+g_chg |= gk_field_edit_slider(52, 176, 320, 60, 16,  3, 0, LIFT_FULL_DB, 12, #s);
+
+g_chg |= gk_knob_slider(13, 0,  22, 348, 64,  4, 0, 24, 6);
+g_chg |= gk_knob_slider(14, 0,  98, 348, 64,  7, -100, -20, -70);
+gk_text_c( 54, 414, "Knee", 1);
+gk_text_c(130, 414, "Noise Floor", 1);
+sprintf(#s, "%.1f dB", knee_db);
+g_chg |= gk_field_edit_slider(53,  24, 428, 60, 16,  4, 0, 24, 6, #s);
+sprintf(#s, "%.1f dB", gate_db);
+g_chg |= gk_field_edit_slider(54, 100, 428, 60, 16,  7, -100, -20, -70, #s);
+
+// the live value the whole plugin exists to produce
+gk_text_c(206, 356, "Lift", 1);
+sprintf(#s, "%+.1f dB", meter);
+gk_field(176, 372, 60, 18, #s);
+
+// ================= detector =================
+gk_panel(268, 210, 248, 246);
+gk_header(0, 268, 210, 248, 22, "DETECTOR", -1, 0);
+accent(0.941, 0.588, 0.157);   // orange
+
+g_chg |= gk_knob_slider(20, 1, 280, 240, 64,  5, 0.5, 300, 20);
+g_chg |= gk_knob_slider(21, 1, 356, 240, 64,  6, 5, 2000, 200);
+g_chg |= gk_knob_slider(22, 1, 432, 240, 64,  8, 20, 500, 20);
+gk_text_c(312, 306, "Attack", 1);
+gk_text_c(388, 306, "Release", 1);
+gk_text_c(464, 306, "SC HPF", 1);
+sprintf(#s, "%.1f ms", atk_ms);
+g_chg |= gk_field_edit_slider(55, 282, 320, 60, 16,  5, 0.5, 300, 20, #s);
+sprintf(#s, "%.0f ms", rel_ms);
+g_chg |= gk_field_edit_slider(56, 358, 320, 60, 16,  6, 5, 2000, 200, #s);
+sprintf(#s, "%.0f Hz", sc_hz);
+g_chg |= gk_field_edit_slider(57, 434, 320, 60, 16,  8, 20, 500, 20, #s);
+
+g_chg |= gk_knob_slider(23, 1, 280, 348, 64, 10, 0, 100, 100);
+gk_text_c(312, 414, "Stereo Link", 1);
+sprintf(#s, "%.0f %%", link_pct);
+g_chg |= gk_field_edit_slider(58, 282, 428, 60, 16, 10, 0, 100, 100, #s);
+
+// Detector mode. gk_dropdown has no _slider variant, so the automation call
+// is made here; det_mode is slider9 and the menu index is already 0-based.
+gk_text_c(388, 356, "Detector", 1);
+g_i = gk_dropdown(42, 358, 372, 60, 18, det_mode, "Peak|RMS",
+      det_mode < 0.5 ? "Peak" : "RMS");
+g_i != det_mode ? ( det_mode = g_i; slider_automate(det_mode); g_chg = 1; );
+
+gk_text_c(464, 356, "Det Level", 1);
+sprintf(#s, "%.1f dB", max(det_db, -99));
+gk_field(434, 372, 60, 18, #s);
+
+// ================= output =================
+gk_panel(526, 210, 184, 246);
+gk_header(0, 526, 210, 184, 22, "OUTPUT", -1, 0);
+accent(0.941, 0.784, 0.235);   // yellow
+
+// Makeup is bipolar, so it gets the knob whose arc grows from the top centre.
+g_chg |= gk_knob_slider(30, 3, 540, 240, 64, 11, -24, 24, 0);
+g_chg |= gk_knob_slider(31, 2, 632, 240, 64, 12, 0, 100, 100);
+gk_text_c(572, 306, "Makeup", 1);
+gk_text_c(664, 306, "Mix", 1);
+sprintf(#s, "%+.1f dB", makeup_db);
+g_chg |= gk_field_edit_slider(59, 542, 320, 60, 16, 11, -24, 24, 0, #s);
+sprintf(#s, "%.0f %%", mix_pct);
+g_chg |= gk_field_edit_slider(60, 634, 320, 60, 16, 12, 0, 100, 100, #s);
+
+// Display History is cosmetic, but giving it the second knob row keeps this
+// panel on the same grid as the two to its left instead of leaving a gap.
+g_chg |= gk_knob_slider(32, 2, 540, 348, 64, 13, 1, 30, 6);
+gk_text_c(572, 414, "History", 1);
+sprintf(#s, "%.1f s", hist_s);
+g_chg |= gk_field_edit_slider(61, 542, 428, 60, 16, 13, 1, 30, 6, #s);
+
+gk_text_c(664, 356, "Out Peak", 1);
+sprintf(#s, "%.1f dB", max(out_db, -99));
+gk_field(634, 372, 60, 18, #s);
+
+help_open ? gk_help_draw(10, 40, 700, 424, "Help  -  Upward Compressor", HELP_BASE, help_lines);
+
+// Wordmark, bottom right, its right edge on the same 10 px margin as the
+// panels. LOGO_ASPECT is the source's width/height; a 1-frame strip is just a
+// scaled blit that respects gk_S. The version sits opposite it, so a stale
+// compiled instance is visible at a glance - REAPER caches compiled JSFX per
+// FX instance.
+gk_strip(12, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+gk_text_c(30, UI_H - 22, "v1.3", 1);
+
+g_bad = count_missing_images(13);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+// One flag, picked up by @block on the audio thread.
+g_chg ? need_recalc = 1;
+gk_end();
+
+@serialize
+// GUI-only state, so it is serialised rather than made a slider. Append-only:
+// a new value goes AFTER this one or every project saved with the old order
+// reads back wrong.
+file_var(0, gui_scale_idx);

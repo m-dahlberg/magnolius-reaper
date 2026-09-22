@@ -1,0 +1,254 @@
+VARIABLE RATIO COMPRESSOR
+
+A compressor that solves for the ratio each passage needs instead
+of being told one.
+
+Set a ratio on an ordinary compressor and it is a constant: the
+same 4:1 applies to a peak 2 dB over threshold and one 20 dB
+over. The tips get flattened while everything underneath keeps
+its original dynamics, and the passage ends up squashed at the
+top and untouched below.
+
+Here the ratio is derived rather than dialled. Lookahead finds
+the loudest peak that is coming and the compressor solves for the
+exact ratio that lands THAT peak on the output ceiling, then
+holds that ratio across the whole passage. Everything between
+threshold and ceiling is compressed at the same currently-valid
+ratio, so relative dynamics inside the passage survive while the
+ceiling is still held.
+
+You set the ceiling and the threshold. The ratio is whatever it
+takes.
+
+The ceiling is hit exactly, not approached. A sliding minimum of
+the gain plus two cascaded boxcars means that at the output
+instant of any peak, every gain sample entering the smoother has
+already seen that peak - so the smoothed gain can never be higher
+than the gain that peak required, and there is no overshoot to
+clean up.
+
+That holds as long as the compressor is ALLOWED to reach the
+ceiling. Once the ratio a peak demands is more than Max Ratio,
+the ratio is capped and the peak comes through. There is no
+clipper behind it. Measured with the threshold at -6 and the
+ceiling at -5.5, where a full-scale peak asks for about 12:1:
+
+    Max Ratio  3:1   peak lands 1.5 dB over the ceiling
+    Max Ratio  5:1   peak lands 0.7 dB over
+    Max Ratio 10:1   peak lands 0.1 dB over
+
+So treat Output Ceiling as a target the compressor hits exactly
+until it runs out of ratio. If you need a true ceiling on the
+output, put a limiter after this.
+
+Lookahead is reported to REAPER as PDC, so the plugin stays in
+time with the rest of the project.
+
+A four-band version is available as Variable Ratio Compressor MB.
+
+
+SETTING IT UP
+
+1. Set the Ceiling first. It is the level peaks are solved onto.
+
+2. Bring the Threshold down until the gain reduction looks right
+   on the loudest passage. Watch the GR meter and the orange
+   overlay on the display.
+
+3. Set the Ratio Release. This is the main character control.
+   Short values follow the performance closely; long values hold
+   a consistent ratio across a whole section.
+
+4. Set Max Ratio last. It starts at 3:1. Raise it towards 10:1
+   if peaks are getting past the ceiling; lower it if a single
+   transient is dragging the ratio up for a whole phrase.
+
+   It only bites when the threshold and the ceiling are close
+   together. The ratio a peak demands is
+
+       (peak - threshold) / (ceiling - threshold)
+
+   so with the threshold at -24 and the ceiling at -0.3, even a
+   full-scale peak asks for barely 1.01:1 and Max Ratio does
+   nothing at any setting. Narrow that window - say -6 and -5.5 -
+   and the same peak asks for about 12:1, where the control
+   decides the whole character.
+
+If peaks are getting past the ceiling, the answer is a lower
+threshold or a higher Max Ratio, not a higher ceiling.
+
+
+DYNAMICS
+
+Threshold (dB)
+  Where compression begins. The span between here and the
+  ceiling is what receives the solved ratio. Forced to stay at
+  least 0.1 dB below the ceiling.
+
+Ceiling (dB)
+  The level peaks are solved onto, and hit exactly while the
+  ratio it takes is within Max Ratio.
+
+Max Ratio (:1)
+  Clamp on the solved ratio, so one extreme peak cannot demand a
+  limiter-like ratio for the whole passage. Runs from 1:1 to 10:1
+  in steps of 0.1. It does not change the display: the ratio
+  trace and the RATIO meter are on a fixed 1:1 to 10:1 scale, so
+  a given ratio always draws at the same height.
+
+  It starts at 3:1, which is a real setting rather than a
+  disabled one: on demanding material the solver will want more
+  than 3, and what it cannot take off comes through. Raise it
+  towards 10:1, where the clamp is effectively off for most
+  material, to have the ratio hold the ceiling on its own.
+
+  Bring it down when one transient is dragging the ratio up for a
+  whole phrase; the peaks it was holding down then come through,
+  so expect to lower the threshold or the ceiling to compensate.
+
+  Low settings are a sound, not just a safety limit. Held at 1.5
+  or 2 this stops being a peak-catcher and becomes a gentle
+  levelling compressor that still decides for itself when to act
+  - it simply never acts hard. Expect peaks past the ceiling at
+  these settings; that is the trade, not a fault.
+
+  1:1 is a valid setting and pins the solver at unity: the
+  compression is off, while Blend and Output Gain still do their
+  jobs. Both meters sit still, because there is no ratio left to
+  show.
+
+Ratio Release (ms)
+  How fast the solved ratio is allowed to fall back once the loud
+  passage ends. The ratio rises instantly - the lookahead has
+  already seen the peak - so this is the only ballistic control
+  and it is what gives the compressor its character.
+
+Lookahead (ms)
+  How far ahead peaks are found. Reported as PDC, so it costs
+  latency, not time alignment. It also sets the length of the
+  gain smoother.
+
+
+GAIN
+
+The top row is in signal order, left to right.
+
+ALT-DRAG either gain and the other one moves the opposite way by
+the same number of dB. Input Gain is part of the ratio solve and
+Output Gain is not, so the pair is the difference between "more
+compressed" and "louder": alt-drag changes the first without
+touching the second. It works on the knob, the wheel and the value
+field. Each value still clamps to its own range, so once either end
+runs out of travel the link goes one-sided.
+
+Input Gain (dB)
+  Drive into the compressor. This is not a trim: the detector,
+  the curve and the dry half of the blend all see the boosted
+  signal, so turning it up asks the compressor for more work and
+  pushes density. Driving 12 dB in and taking 12 dB back out at
+  Output Gain is measurably more compressed, not the same sound
+  at the same level.
+
+Blend (% wet)
+  Parallel blend. It is solved for rather than bolted on: at any
+  blend the compressor still lands the peak on the ceiling.
+
+Output Gain (dB)
+  Level out. Applied last, after the blend, and deliberately not
+  part of the ratio solve - so it moves the level and changes
+  nothing else. The output lands at ceiling + Output Gain. Being
+  post-blend, it scales the dry path too, so it still works at
+  Blend 0%.
+
+History (s)
+  Scroll window of the display. Cosmetic only; it changes nothing
+  about the sound, and it sits in this panel purely to keep the
+  layout even.
+
+
+METERS
+
+GR
+  Gain reduction in dB, growing downward from the top on a fixed
+  0 to 24 dB scale - the same direction and the same scale as the
+  orange overlay on the display.
+
+RATIO
+  The ratio the plugin is holding right now, growing upward on a
+  fixed log scale: 1:1 at the bottom edge, 10:1 at the top. It
+  does not follow Max Ratio, so the same ratio always draws at
+  the same height.
+
+
+READING THE DISPLAY
+
+The plot scrolls left, newest at the right-hand edge.
+
+  IN    (grey)    peak level in, time-aligned with the output
+  OUT   (cyan)    peak level out
+  GR    (orange)  gain reduction, hanging from the top edge
+  RATIO (green)   the solved ratio, rising from the bottom edge
+  THR   (dotted)  the threshold
+  CEIL  (yellow)  the ceiling
+
+The vertical scale is in dB, not linear amplitude: the centre
+line is -66 dB and the top and bottom edges are 0 dB. That is why
+quiet material still has visible height, and why the threshold
+and the ceiling can be drawn on the same scale as the waveform.
+
+Grey standing outside the cyan is gain reduction you can see. The
+input trace is the translucent one, so where they overlap it
+tints the output rather than hiding it.
+
+
+CURVE
+
+The live transfer curve: input level across, output level up,
+drawn at the ratio the plugin is holding at this instant. It
+bends as the compressor works, which is the whole point of a
+compressor that derives its own ratio.
+
+The input axis runs from -60 dB on the left to 0 dB on the right;
+the output axis from -60 dB at the bottom to +12 dB at the top.
+
+The grey diagonal is unity. The vertical dotted line is the
+threshold; the horizontal dashed line is the ceiling, and it
+moves with the curve as Output Gain changes, because the output
+really does land at ceiling + Output Gain.
+
+Blend and Output Gain are both included, so what you see is what
+actually leaves the plugin.
+
+
+INTERFACE
+
+The percentage box in the title bar scales the whole interface.
+It is shared with every other Magnolius plugin in the session,
+so setting it once sets it everywhere.
+
+A JSFX cannot resize its own window, so a scale larger than the
+window will clip. If that happens, drag the FX window bigger or
+pick a smaller percentage. Fit tracks whatever size the window
+happens to be; 100% is pixel-exact on a fresh window.
+
+
+WHEN SOMETHING LOOKS WRONG
+
+"images failed to load: N" across the title bar
+  The gui_kit folder is not beside the plugin as REAPER sees it.
+  If the .jsfx is a symlink into the Effects folder, gui_kit has
+  to be reachable from there too.
+
+The ratio trace sits pinned at the top
+  Max Ratio is being reached constantly, so the compressor is
+  being asked for more than it is allowed to give and peaks are
+  getting past the ceiling. Raise Max Ratio towards 10:1, or
+  lower the threshold so less is asked of any single peak.
+
+Gain reduction looks right but nothing sounds compressed
+  Check Blend, and check that Output Gain is not quietly putting
+  back the level the compressor just took out.
+
+The plugin seems to lag the rest of the project
+  Lookahead is reported as PDC. Make sure the track is not in a
+  context where PDC is disabled.

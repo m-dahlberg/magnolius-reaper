@@ -1,8 +1,12 @@
 desc:Variable Ratio Compressor (Magnolius)
 // @description Variable Ratio Compressor (Magnolius)
 // @author Magnolius
-// @version 1.1
+// @version 1.2
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_VariableRatioCompressor.help.txt
 // @about
 //   A compressor that solves for the ratio each passage needs instead of being
 //   told one. Lookahead finds the loudest upcoming peak, derives the exact
@@ -13,15 +17,82 @@ desc:Variable Ratio Compressor (Magnolius)
 //   currently-valid ratio, so relative dynamics inside the passage survive
 //   instead of only the tips being flattened.
 //
-//   A sliding-min plus double-boxcar smoother makes the ceiling a hard
-//   guarantee rather than a target: no overshoot, so the safety clip is a
-//   genuine last resort.
+//   A sliding-min plus double-boxcar smoother means the gain never overshoots,
+//   so the ceiling is held exactly whenever the ratio the passage needs is
+//   within Max Ratio. Past that the ratio is capped and peaks come through.
 //
 //   A four-band version is available as Variable Ratio Compressor MB.
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Name now ends with (Magnolius) so the plugins are easy to find in the FX browser
+//   New interface built on the Magnolius GUI kit: knobs with typed value
+//   fields, the scrolling display in a framed plot, a live transfer curve that
+//   bends as the ratio solves, GR and ratio meters, a scale selector shared
+//   with the other Magnolius plugins, and a built-in help panel.
+//
+//   The scrolling display now plots dB rather than linear amplitude, with the
+//   threshold and the ceiling drawn on it as real reference lines. On the old
+//   linear scale everything below about -30 dB was a hairline on the centre
+//   line, which is most of what a threshold down at -60 is actually working on.
+//
+//   New Display History control (1-30 s) for the scroll window, which used to
+//   be hardwired to about 5 s.
+//
+//   Max Ratio now runs 1:1 to 10:1 in steps of 0.1, instead of 2:1 to 1000:1
+//   in steps of 1. On the old range the musically useful part of the control
+//   lived in the first few per cent of its travel, which a knob makes far
+//   worse than a slider did, and the old floor of 2:1 ruled out the gentle
+//   ratios this compressor is often wanted for. 1:1 is a valid setting: it
+//   pins the solver at unity, so the compression is off while Blend and Output
+//   Gain still work.
+//
+//   A project saved with Max Ratio above 10 loads clamped to 10, which will
+//   compress less than it used to - raise the threshold or lower the ceiling
+//   to compensate.
+//
+//   The default moves from 200 to 3. The old default was chosen to be out of
+//   the way - at 200:1 the clamp effectively never engaged and the ceiling was
+//   always held by the ratio. 3:1 is a real setting rather than a disabled one,
+//   so a new instance now sounds like a compressor from the first note. Raise
+//   it towards 10:1 for the old behaviour. Existing projects keep their own
+//   saved value; only new instances see this.
+//
+//   Simplified: the safety clipper, the Safety Clip switch, the Makeup Position
+//   switch and the Out Peak readout are all gone.
+//
+//   The ratio trace and the RATIO meter are now on a FIXED 1:1 to 10:1 scale
+//   instead of one that followed Max Ratio. Following it meant the same ratio
+//   drew at a different height as Max Ratio moved, which reads as the ratio
+//   having changed when nothing about the audio did - the same reason the
+//   gain-reduction overlay has always been pinned to 0-24 dB.
+//
+//   Their slider NUMBERS (6 and 10) are left as gaps rather than renumbering
+//   the rest down. A project stores slider values positionally by slider
+//   number, so this keeps every remaining control loading into itself. REAPER
+//   does however compact the PARAMETER indices it exposes to automation, so an
+//   existing envelope on Lookahead, Ratio Release, Max Ratio or Display History
+//   now points one parameter too high and needs re-pointing. That is
+//   unavoidable when a parameter is removed - the gaps do not change it.
+//
+//   Output Gain (was Makeup Gain) is now ALWAYS applied last, after the blend,
+//   and is no longer part of the ratio solve. The old Pre position folded it
+//   into the solve so the compressor worked harder to hold the ceiling despite
+//   it; that behaviour no longer exists. A project saved in Pre will now be
+//   louder and less compressed than it was - it now behaves as if it had been
+//   saved in Post, which was the default.
+//
+//   Without the clipper, Output Ceiling is no longer an absolute guarantee. It
+//   is hit exactly while the required ratio is within Max Ratio, and peaks pass
+//   once the ratio is capped - which the new 3:1 default makes an everyday
+//   case, not a rare one. Put a limiter after this if you need a true ceiling.
+//
+//   Input Gain is unchanged, and remains a genuine pre-compressor drive: the
+//   detector, the curve and the dry half of the blend all see it.
+//
+//   Alt-drag on Input Gain or Output Gain moves the other one the opposite way
+//   by the same number of dB, so you can change how hard the compressor works
+//   without changing the level. It works on the knob, the wheel and the value
+//   field, and each value still clamps to its own range.
 
 // Program-dependent compressor: lookahead finds the loudest upcoming peak,
 // derives the exact ratio that lands that peak on the output ceiling, then
@@ -34,33 +105,106 @@ desc:Variable Ratio Compressor (Magnolius)
 //       -> static curve applied to instantaneous env -> gain
 //       -> sliding min (lookahead) -> 2x boxcar -> applied to delayed audio
 //
-// The sliding-min + double-boxcar pair is what makes the ceiling a hard
-// guarantee: at the output instant of any peak, every gain sample entering
-// the smoother has already "seen" that peak, so the smoothed gain can never
-// be higher than the gain that peak required.
+// The sliding-min + double-boxcar pair is what stops the gain overshooting: at
+// the output instant of any peak, every gain sample entering the smoother has
+// already "seen" that peak, so the smoothed gain can never be higher than the
+// gain that peak required. That makes the ceiling exact WHENEVER THE SOLVER IS
+// ALLOWED TO REACH IT - i.e. while the required ratio is within Max Ratio.
+// Once Max Ratio clamps, the gain is no longer the gain the peak asked for and
+// the peak comes through. There is no longer a clipper behind this to catch it
+// (removed in 1.2), so Output Ceiling is a target the compressor hits exactly
+// until it runs out of ratio, not an absolute guarantee.
+//
+// THREADING - do not undo this.  Every @gfx variable is g_-prefixed and no
+// name is used on both sides.  The rule is not "@gfx calls no functions": it
+// is that NO FUNCTION IS CALLED FROM BOTH THREADS.  EEL2 function locals AND
+// parameters are static and shared, so a function entered from @gfx while the
+// audio thread is inside it stomps the audio thread's copy of every local
+// mid-sample.  So:
+//   audio thread only:  lin2db, update_params
+//   @gfx only:          accent, ui_scale, count_missing_images, every gk_*
+// That is also why the transfer curve inlines the compressor maths instead of
+// sharing a function with @sample, and why a widget change sets need_update
+// rather than calling update_params() from the UI thread - @block picks the
+// flag up on the audio thread, so the new coefficients do not depend on REAPER
+// re-running @slider after slider_automate (which it does not).  It looks like
+// duplication; it is not.
+//
+// The same reasoning runs the other way for DRAWING.  @block does not run on a
+// stopped track, so @gfx must not read the audio thread's derived values or
+// every reference line and the whole transfer curve freeze until the user
+// presses play.  @gfx therefore derives g_thr / g_ceil / g_blend from the raw
+// slider variables itself, at the top of the section.  Those three lines
+// duplicate update_params() on purpose - keep them in step.
+//
+// EEL2 identifiers are case-insensitive: W and w are ONE variable.  The
+// detector window length is the global W, so nothing in @gfx may use a bare
+// w - hence the g_ prefix on every last one of them.
+//
+// v1.2
 
-slider1:s_in=0<-12,24,0.1>Input Gain (dB)
-slider2:s_ceil=-0.3<-24,0,0.05>Output Ceiling (dB)
-slider3:s_thr=-18<-60,0,0.1>Threshold (dB)
-slider4:s_blend=100<0,100,0.1>Blend (% wet)
-slider5:s_comp=0<-20,20,0.1>Makeup Gain (dB)
-slider6:s_mkpos=1<0,1,1{Pre - ceiling holds,Post - ceiling is internal}>Makeup Position
-slider7:s_la=5<0.5,20,0.1>Lookahead (ms)
-slider8:s_rel=200<10,2000,1>Ratio Release (ms)
-slider9:s_maxr=200<2,1000,1>Max Ratio (:1)
-slider10:s_clip=1<0,1,1{Off,On}>Safety Clip
+// Shared memory, namespaced to this vendor so it cannot collide with other
+// plugins' gmem. Slot map (keep in step across every options:gmem=Magnolius
+// plugin - they share the one map):
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
+
+// Every slider name carries a leading '-' so REAPER's generic control panel
+// stays hidden behind the custom interface, while the parameters remain
+// automatable and visible to the render tests.
+slider1:s_in=0<-12,24,0.1>-Input Gain (dB)
+slider2:s_ceil=-0.3<-24,0,0.05>-Output Ceiling (dB)
+slider3:s_thr=-18<-60,0,0.1>-Threshold (dB)
+slider4:s_blend=100<0,100,0.1>-Blend (% wet)
+slider5:s_comp=0<-20,20,0.1>-Output Gain (dB)
+// slider6 was Makeup Position and slider10 was Safety Clip. Both are gone,
+// and their NUMBERS ARE LEFT AS GAPS on purpose: a JSFX project stores slider
+// values positionally, so renumbering 7-11 down into the holes would load an
+// old project's Lookahead into Ratio Release and so on, silently.
+slider7:s_la=5<0.5,20,0.1>-Lookahead (ms)
+slider8:s_rel=200<10,2000,1>-Ratio Release (ms)
+slider9:s_maxr=3<1,10,0.1>-Max Ratio (:1)
+slider11:s_hist=6<1,30,0.5>-Display History (s)
 
 in_pin:left
 in_pin:right
 out_pin:left
 out_pin:right
 
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 knob, Dynamics (cyan)   1 knob, Gain (yellow)
+//   2 knob, Gain bipolar (Output Gain)      12 help text, last slot
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_yellow_grid.png
+filename:2,gui_kit/knob_yellow_bipolar_grid.png
+filename:3,gui_kit/value_field.png
+filename:4,gui_kit/header_bar.png
+filename:5,gui_kit/panel_tile.png
+filename:6,gui_kit/dropdown.png
+filename:7,gui_kit/button_cyan.png
+filename:8,gui_kit/wave_frame_9slice.png
+filename:9,gui_kit/playhead_line_cyan.png
+filename:10,gui_kit/playhead_marker_cyan.png
+filename:11,gui_kit/logo_magnolius_grey.png
+filename:12,Magnolius_VariableRatioCompressor.help.txt
+
 @init
+
+// @init re-runs on samplerate change and on recompile.  ext_noinit stops the
+// other trigger - transport start - so the detector deques, the delay line and
+// the scrolling history survive hitting play instead of being wiped every time.
+ext_noinit = 1;
 
 DMAX    = 8192;              // must be a power of two
 MASK    = DMAX - 1;
 LN10_20 = 0.11512925464970229;   // ln(10)/20   dB -> linear exponent
 DB20    = 8.6858896380650366;    // 20/ln(10)   ln  -> dB
+TINY    = 10^(-30);          // EEL2 has no scientific notation: 1e-30 is a
+                             // silent syntax error that kills the section
 
 dlyL = 0;
 dlyR = dlyL + DMAX;          // lookahead audio delay
@@ -72,20 +216,29 @@ ma1  = mni  + DMAX;          // boxcar stage 1
 ma2  = ma1  + DMAX;          // boxcar stage 2
 
 // ---- scrolling display history ----
-// One column per BIN samples. Each column stores the min/max of the (delayed,
-// time-aligned) input and of the output, plus the deepest gain and the highest
-// ratio seen in that bin. @gfx only reads; @sample only writes.
-HIST  = 1024;                // must be a power of two
-HMASK = HIST - 1;
+// One column per col_len samples, holding the peak dB of the (delayed,
+// time-aligned) input and of the output, the deepest gain reduction and the
+// highest ratio reached in that column.  @gfx only reads; @sample only writes.
+// Power of two so the ring index is a mask, not a modulo.
+HIST_N   = 1024;
+HMASK    = HIST_N - 1;
+HIST_IN  = ma2      + DMAX;
+HIST_OUT = HIST_IN  + HIST_N;
+HIST_GR  = HIST_OUT + HIST_N;
+HIST_RT  = HIST_GR  + HIST_N;
 
-hIMIN = ma2   + DMAX;
-hIMAX = hIMIN + HIST;
-hOMIN = hIMAX + HIST;
-hOMAX = hOMIN + HIST;
-hG    = hOMAX + HIST;
-hR    = hG    + HIST;
-
-binlen = max(1, floor(srate * 0.005));   // 5 ms per column -> ~5 s of history
+// Display scales.  All three are fixed on purpose: a scale that followed a
+// slider would make the same event draw a different size as the slider moved,
+// which reads as the event having changed when it has not.
+FLOORDB      = -66;          // waveform plot: centre line, 0 dB at the edges
+GR_FULL_DB   = 24;           // gain-reduction overlay and meter, full scale
+RATIO_FULL   = 10;           // ratio trace and meter, full scale (1:1 at the
+                             // bottom edge).  This MUST match slider9's maximum
+                             // or the trace stops short of the top, or clips
+                             // against it, with no error anywhere.
+LN_RATIO     = log(RATIO_FULL);
+CURVE_LO     = -60;          // transfer-curve panel, dB in
+CURVE_HI     = 12;           // transfer-curve panel, dB out headroom
 
 rs         = 1;
 lastla     = -1;
@@ -93,64 +246,161 @@ need_reset = 1;
 mtr        = 1;
 rmtr       = 1;
 
+// Display readouts, converted once per block rather than per sample, so @gfx
+// never has to call lin2db (see the threading note).
+gr_db  = 0;
+rt_now  = 1;
+
+// Set by @gfx when a widget moves a slider, consumed by @block on the audio
+// thread.  Never call update_params() from @gfx.
+need_update = 0;
+
+function lin2db(l) ( log(max(l, TINY)) * DB20 );
+
+// Everything derived from the sliders lives here so @slider and @block cannot
+// disagree, and so behaviour never depends on REAPER re-running @slider after
+// slider_automate.  Idempotent, and audio thread only.
+function update_params()
+(
+  ceil_db = s_ceil;
+  thr_db  = min(s_thr, s_ceil - 0.1);   // threshold must sit below the ceiling
+  blend   = s_blend * 0.01;
+  maxr    = s_maxr;
+
+  ceil_lin = exp(ceil_db * LN10_20);
+  ig       = exp(s_in * LN10_20);
+  mk       = exp(s_comp * LN10_20);
+
+  la = floor(s_la * 0.001 * srate + 0.5);
+  la < 1 ? la = 1;
+  la > DMAX - 8 ? la = DMAX - 8;
+  W = la + 1;                            // detector window length
+
+  box = floor(la * 0.5);
+  box < 1 ? box = 1;                     // two cascaded boxcars, total span ~la
+
+  relc = exp(-1 / max(1, s_rel * 0.001 * srate));
+
+  pdc_delay  = la;
+  pdc_bot_ch = 0;
+  pdc_top_ch = 2;
+  ext_tail_size = la + srate * 0.5;
+
+  col_len = max(1, floor(srate * s_hist / HIST_N));
+
+  la != lastla ? ( lastla = la; need_reset = 1; );
+
+  need_reset ? (
+    memset(dlyL, 0, DMAX * 2);           // dlyL and dlyR are contiguous
+    memset(ma1,  1, DMAX);
+    memset(ma2,  1, DMAX);
+    sum1 = box; sum2 = box;
+    b1p  = 0;   b2p  = 0;
+    mxh  = 0; mxt = 0; mxc = 0;
+    mnh  = 0; mnt = 0; mnc = 0;
+    n    = 0;
+    wp   = 0;
+    rp   = DMAX - la;
+    rs   = 1;
+
+    memset(HIST_IN, FLOORDB - 200, HIST_N * 2);   // IN and OUT are contiguous
+    memset(HIST_GR, 0, HIST_N);
+    memset(HIST_RT, 1, HIST_N);
+    hpos = 0;
+    acc_in = 0; acc_out = 0; acc_gr = 1; acc_rt = 1; acc_n = 0;
+
+    need_reset = 0;
+  );
+);
+
+update_params();
+
+// ==========================================================================
+//  Interface
+// ==========================================================================
+gk_init();
+gk_img_field = 3; gk_img_header = 4; gk_img_panel = 5;
+gk_img_dropdown = 6; gk_img_button = 7;
+gk_img_wave_frame = 8; gk_img_playhead_line = 9; gk_img_playhead_marker = 10;
+
+// REAPER refuses to load an image taller than somewhere between 6144 and 7680
+// px, and returns a zero-size image rather than an error - a filmstrip widget
+// then draws nothing while still responding to the mouse.  Width is not
+// affected.  So the knob strips are packed as grids: 64 frames in 8 columns
+// (1024 x 1024).  The count lives in two places, here and in the PNG; change
+// one without the other and the knob draws the wrong frame, silently.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+// Counts image slots REAPER would not load.  It reports a zero-size image and
+// no error, and every filmstrip widget then falls back to vector drawing, so
+// without this a failed load is completely silent and passes for working art.
+// By far the most likely cause is a bad path - and note that a filename: line
+// takes the whole rest of the line, so a trailing comment silently breaks it.
+// @gfx only.
+function count_missing_images(cnt) local(i, iw, ih, bad)
+(
+  i = 0; bad = 0;
+  loop(cnt, gfx_getimgdim(i, iw, ih); iw <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// Section accent, applied to everything the kit draws with primitives.  It
+// persists between frames, so each section sets it before drawing.  @gfx only.
+function accent(ar, ag, ab) ( gk_ac_r = ar; gk_ac_g = ag; gk_ac_b = ab; );
+
+// ---- help viewer ----
+// The panel is drawn by the widget library; the plugin only owns the state.
+// The help file is the last filename: slot, after the images, so the
+// missing-image count is not thrown off by it.
+HELP_FILE = 12;
+HELP_BASE = 300;          // first string slot used for help text
+HELP_MAX  = 600;          // most lines kept
+help_open = 0; help_lines = 0;
+
+// ---- interface scale ----
+// The layout is authored at UI_W x UI_H logical px and every coordinate runs
+// through gk_S, so scaling the whole interface - drawing, blits, hit-testing
+// and drag deltas alike - is a matter of setting gk_S.  JSFX cannot resize its
+// own window (@gfx W H is a compile-time literal and gfx_w/gfx_h are
+// read-only), so this scales the content inside whatever window REAPER gives
+// us; "Fit" tracks the window, a fixed percentage does not.  Keep UI_W/UI_H in
+// step with the @gfx line: 720x488 is 100%, so 125% wants 900x610 of window
+// and 150% wants 1080x732.
+UI_W = 720; UI_H = 488;
+LOGO_ASPECT = 512/101;    // logo_magnolius_grey.png
+GM_UI_SCALE = 0;          // gmem slot holding the shared scale
+
+// The scale is global: every instance reads it from gmem each frame, so
+// changing it in one window changes all open windows and any instance added
+// later in this session.  Each instance also serialises its own copy, which
+// seeds the global when the first one loads in a fresh REAPER session.
+// gmem is session-scoped: REAPER frees it once the last instance is removed,
+// and a JSFX cannot write a settings file, so the scale cannot be persisted
+// from in here.  100%, not Fit: the @gfx line already asks for exactly the
+// design size, so 100% is pixel-exact on a fresh window and the artwork is
+// blitted 1:1, where Fit softens everything by a fractional factor as soon as
+// REAPER restores the window at some other size.  Keep this in step across
+// every options:gmem=Magnolius plugin - whichever opens first in a session
+// seeds the shared slot.
+UI_SCALE_DEFAULT = 1;
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
 @slider
 
-ceil_db = s_ceil;
-thr_db  = min(s_thr, s_ceil - 0.1);   // threshold must sit below the ceiling
-blend   = s_blend * 0.01;
-maxr    = s_maxr;
+update_params();
 
-ceil_lin = exp(ceil_db * LN10_20);
-ig       = exp(s_in * LN10_20);
-mk = exp(s_comp * LN10_20);
+@block
 
-// Pre:  makeup is folded into the ratio solve. The ceiling is a real ceiling, and
-//       positive makeup makes the compressor work harder to hold it while
-//       negative makeup lets it work less, since attenuation does the job instead.
-// Post: makeup is a plain output trim after everything. The ceiling becomes an
-//       internal target and the actual output peak lands at (ceiling + makeup),
-//       which sits below the ceiling for negative values.
-s_mkpos == 0 ? ( mk_pre = mk; mk_post = 1; ) : ( mk_pre = 1; mk_post = mk; );
+// The UI thread only ever raises this flag; the derived values are rebuilt
+// here, on the audio thread, so a widget change never enters update_params()
+// underneath @sample.  See the threading note at the top of the file.
+need_update ? ( need_update = 0; update_params(); );
 
-la = floor(s_la * 0.001 * srate + 0.5);
-la < 1 ? la = 1;
-la > DMAX - 8 ? la = DMAX - 8;
-W = la + 1;                            // detector window length
-
-box = floor(la * 0.5);
-box < 1 ? box = 1;                     // two cascaded boxcars, total span ~la
-
-relc = exp(-1 / max(1, s_rel * 0.001 * srate));
-
-pdc_delay  = la;
-pdc_bot_ch = 0;
-pdc_top_ch = 2;
-ext_tail_size = la + srate * 0.5;
-
-la != lastla ? ( lastla = la; need_reset = 1; );
-
-need_reset ? (
-  memset(dlyL, 0, DMAX * 2);           // dlyL and dlyR are contiguous
-  memset(ma1,  1, DMAX);
-  memset(ma2,  1, DMAX);
-  sum1 = box; sum2 = box;
-  b1p  = 0;   b2p  = 0;
-  mxh  = 0; mxt = 0; mxc = 0;
-  mnh  = 0; mnt = 0; mnc = 0;
-  n    = 0;
-  wp   = 0;
-  rp   = DMAX - la;
-  rs   = 1;
-
-  memset(hIMIN, 0, HIST * 4);          // hIMIN..hOMAX are contiguous
-  memset(hG, 1, HIST);
-  memset(hR, 1, HIST);
-  hw = 0; binN = 0;
-  binIMin = 0; binIMax = 0; binOMin = 0; binOMax = 0;
-  binG = 1; binR = 1;
-
-  need_reset = 0;
-);
+// Display readouts, converted once per block rather than per sample.  @gfx
+// reads these numbers and never calls lin2db itself.
+gr_db  = -lin2db(mtr);
+rt_now  = rmtr;
 
 @sample
 
@@ -186,7 +436,7 @@ rt = 1;
 pk > 0.0000001 ? (
   pk_db = log(pk) * DB20;
   pk_db > thr_db ? (
-    greq = blend > 0.0001 ? (ceil_lin / pk - (1 - blend)) / (blend * mk_pre) : 2;
+    greq = blend > 0.0001 ? (ceil_lin / pk - (1 - blend)) / blend : 2;
     greq < 1 ? (
       greq < 0.000001 ? greq = 0.000001;
       gdb  = log(greq) * DB20;
@@ -240,18 +490,15 @@ gs < 0 ? gs = 0;
 xl = dlyL[rp];
 xr = dlyR[rp];
 
-ol  = xl * (1 - blend) + xl * gs * mk_pre * blend;
-orr = xr * (1 - blend) + xr * gs * mk_pre * blend;
+ol  = xl * (1 - blend) + xl * gs * blend;
+orr = xr * (1 - blend) + xr * gs * blend;
 
-// The clip guards the internal ceiling, so it sits BEFORE post makeup.
-// Clipping after post makeup would simply eat the makeup and make it pointless.
-s_clip ? (
-  ol  = max(-ceil_lin, min(ceil_lin, ol));
-  orr = max(-ceil_lin, min(ceil_lin, orr));
-);
-
-ol  *= mk_post;
-orr *= mk_post;
+// Output gain is always the last thing that happens, after the blend, and it
+// is NOT part of the ratio solve - so it moves the level and nothing else.
+// The compressor holds the peak on the ceiling internally and this trims the
+// result, which lands the output at (ceiling + output gain).
+ol  *= mk;
+orr *= mk;
 
 spl0 = ol;
 spl1 = orr;
@@ -263,132 +510,444 @@ n  += 1;
 gs   < mtr  ? mtr  = gs : mtr  = gs + (mtr  - gs)  * 0.9995;
 rs   > rmtr ? rmtr = rs : rmtr = rs + (rmtr - rs) * 0.9995;
 
-// ---- display history: xl/xr are the delayed input, so they line up exactly
-//      with ol/orr and the scope shows cause and effect on the same column ----
-dhi = max(xl, xr);  dlo = min(xl, xr);
-dhi > binIMax ? binIMax = dhi;
-dlo < binIMin ? binIMin = dlo;
+// ---- display history ----
+// xl/xr are the DELAYED input, so they line up exactly with ol/orr and the
+// scope shows cause and effect on the same column.  Converted to dB here, on
+// the audio thread, so @gfx only ever reads numbers.
+pkin  = max(abs(xl),  abs(xr));
+pkout = max(abs(ol),  abs(orr));
 
-dhi = max(ol, orr); dlo = min(ol, orr);
-dhi > binOMax ? binOMax = dhi;
-dlo < binOMin ? binOMin = dlo;
+acc_in  = max(acc_in,  pkin);
+acc_out = max(acc_out, pkout);
+acc_gr  = min(acc_gr,  gs);
+acc_rt  = max(acc_rt,  rs);
 
-gs < binG ? binG = gs;
-rs > binR ? binR = rs;
-
-binN += 1;
-binN >= binlen ? (
-  hIMIN[hw] = binIMin; hIMAX[hw] = binIMax;
-  hOMIN[hw] = binOMin; hOMAX[hw] = binOMax;
-  hG[hw]    = binG;    hR[hw]    = binR;
-  hw = (hw + 1) & HMASK;
-  binN = 0;
-  binIMin = 0; binIMax = 0; binOMin = 0; binOMax = 0;
-  binG = 1; binR = 1;
+acc_n += 1;
+acc_n >= col_len ? (
+  HIST_IN[hpos]  = lin2db(acc_in);
+  HIST_OUT[hpos] = lin2db(acc_out);
+  HIST_GR[hpos]  = -lin2db(acc_gr);     // positive dB of reduction
+  HIST_RT[hpos]  = acc_rt;
+  hpos = (hpos + 1) & HMASK;
+  acc_in = 0; acc_out = 0; acc_gr = 1; acc_rt = 1; acc_n = 0;
 );
 
-@gfx 680 300
+@gfx 720 488
 
-gfx_set(0.07, 0.07, 0.08, 1);
-gfx_rect(0, 0, gfx_w, gfx_h);
+// Reminder: every local here is g_-prefixed, nothing calls a function the
+// audio thread also calls, and the transfer-curve maths is a deliberate copy
+// of the @sample curve.  See the threading note at the top of the file.
+// EEL2 is case-insensitive, so a bare w, n, a, g or r here would silently
+// overwrite an audio-thread global mid-sample.
 
-padl = 8; padr = 8; padt = 22; padb = 18;
-plotx = padl;
-ploty = padt;
-plotw = max(32, gfx_w - padl - padr);
-ploth = max(60, gfx_h - padt - padb);
-cy    = ploty + ploth * 0.5;
+gk_begin();
+g_chg = 0;
 
-GRRANGE = 24;                        // dB of reduction across the full height
-lmaxr   = log(max(maxr, 2));
+// Take the scale from the shared global, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
 
-gfx_set(0.11, 0.11, 0.13, 1);
-gfx_rect(plotx, ploty, plotw, ploth);
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). Fixed percentages are taken
+// relative to that, so 100% stays pixel-exact on a HiDPI display; Fit divides
+// the physical window by the design size, which already includes it.
+g_ret = gk_S;
+g_scl = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_scl > 0 ? g_ret * g_scl : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(1);
 
-// horizontal guides at 0 and +/-0.5 amplitude
-gfx_set(0.18, 0.18, 0.21, 1);
-gfx_line(plotx, cy, plotx + plotw, cy);
-gfx_line(plotx, cy - ploth * 0.25, plotx + plotw, cy - ploth * 0.25);
-gfx_line(plotx, cy + ploth * 0.25, plotx + plotw, cy + ploth * 0.25);
+// Display values, derived HERE from the raw slider variables rather than read
+// from the audio thread's copies.  This matters: slider_automate() does not
+// re-run @slider, so a widget change reaches update_params() only through the
+// need_update flag that @block picks up - and @BLOCK DOES NOT RUN ON A STOPPED
+// TRACK.  Reading thr_db / ceil_db / blend here would leave the
+// threshold line, the ceiling line and the whole transfer curve frozen at their
+// old values while the knob visibly moved, until the user pressed play.  These
+// six lines are a deliberate duplicate of the corresponding lines in
+// update_params(); keep the two in step.  The audio thread is unaffected -
+// @block always runs before the @sample calls it precedes, so the DSP never
+// processes a sample with stale coefficients.
+g_thr   = min(s_thr, s_ceil - 0.1);
+g_ceil  = s_ceil;
+g_blend = s_blend * 0.01;
 
-cols = min(plotw, HIST - 2);
+gk_header(0, 10, 10, 700, 22, "VARIABLE RATIO COMPRESSOR", -1, 0);
 
-// ---- waveform: input behind, output in front ----
-i = 0;
-while (i < cols) (
-  ci = (hw - 1 - i) & HMASK;
-  px = plotx + plotw - 1 - i;
+// Scale selector and help button, far right of the header. Their x is pinned
+// to the right edge of what is actually on screen, so a scale too large for
+// the window can never push these controls out of reach.
+g_rr = min(UI_W - 20, gfx_w/gk_S - 10);
+g_dx = g_rr - 86;
+g_i = gk_dropdown(40, g_dx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
 
-  y0 = max(ploty, min(ploty + ploth, cy - hIMAX[ci] * ploth * 0.5));
-  y1 = max(ploty, min(ploty + ploth, cy - hIMIN[ci] * ploth * 0.5));
-  gfx_set(0.26, 0.30, 0.38, 1);
-  gfx_line(px, y0, px, y1);
-
-  y0 = max(ploty, min(ploty + ploth, cy - hOMAX[ci] * ploth * 0.5));
-  y1 = max(ploty, min(ploty + ploth, cy - hOMIN[ci] * ploth * 0.5));
-  gfx_set(0.52, 0.70, 0.92, 1);
-  gfx_line(px, y0, px, y1);
-
-  i += 1;
+gk_button(41, g_rr - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
 );
 
-// ---- gain reduction overlay: hangs down from the top edge ----
-gfx_set(0.98, 0.58, 0.18, 1);
-i = 0; havep = 0;
-while (i < cols) (
-  ci = (hw - 1 - i) & HMASK;
-  px = plotx + plotw - 1 - i;
-  v  = -log(max(hG[ci], 0.000001)) * DB20;
-  v > GRRANGE ? v = GRRANGE;
-  py = ploty + v / GRRANGE * ploth;
-  havep ? gfx_line(px, py, ppx, ppy);
-  ppx = px; ppy = py; havep = 1;
-  i += 1;
+// Freeze the controls underneath while the help is open, keeping the two
+// header controls live so the help can be closed again.
+help_open ? gk_help_input(40, 41);
+
+// ================= scrolling display =================
+// Plotted in dB, FLOORDB at the centre line and 0 dB at the edges. A linear
+// amplitude plot - which is what this used to be - collapses everything below
+// about -30 dB onto the centre line, and a threshold down at -60 spends its
+// whole life in that region. dB also means Threshold and Ceiling can be drawn
+// on the same scale as the waveform instead of being invisible.
+accent(0.149, 0.784, 0.902);   // cyan
+gk_nine(gk_img_wave_frame, 16, 8, 10, 40, 530, 160);
+gk_wave_geom(10, 40, 530, 160);
+g_ix = gk_wv_ix; g_iy = gk_wv_iy; g_iw = gk_wv_iw; g_ih = gk_wv_ih;
+g_cy = gk_wv_cy; g_half = gk_wv_half;
+g_yscale = g_half/(-FLOORDB);          // device px per dB, from the centre out
+
+// One pass, and each drawn column takes the MAX over every history slot it
+// covers. 1024 slots into ~500 pixels means point-sampling would silently
+// drop every other transient, which made the display disagree with the ear.
+g_iwi = floor(g_iw);
+g_i = 0;
+g_have = 0;
+loop(g_iwi,
+  g_a = floor(g_i*HIST_N/g_iwi);
+  g_b = floor((g_i+1)*HIST_N/g_iwi);
+  g_b <= g_a ? ( g_b = g_a + 1; );
+
+  g_din = FLOORDB - 200; g_dout = FLOORDB - 200; g_dgr = 0; g_drt = 1;
+  g_k = g_a;
+  while (g_k < g_b) (
+    g_p = (hpos + g_k) & HMASK;
+    g_din  = max(g_din,  HIST_IN[g_p]);
+    g_dout = max(g_dout, HIST_OUT[g_p]);
+    g_dgr  = max(g_dgr,  HIST_GR[g_p]);
+    g_drt  = max(g_drt,  HIST_RT[g_p]);
+    g_k += 1;
+  );
+
+  g_hin  = min(g_half, max(0, (g_din  - FLOORDB)*g_yscale));
+  g_hout = min(g_half, max(0, (g_dout - FLOORDB)*g_yscale));
+  g_x = g_ix + g_i;
+  // older columns fade out, the same gesture gk_wave_draw makes
+  g_fade = 0.4 + 0.6*g_i/g_iwi;
+  // draw the shorter trace last so it stays visible inside the taller one.
+  // The input is the translucent one: where the two overlap it tints the
+  // output rather than hiding it, so the grey standing outside the cyan - the
+  // gain reduction - is the thing the eye lands on.
+  g_hout >= g_hin ? (
+    g_hout > 0 ? ( gfx_set(0.20,0.78,0.90,0.90*g_fade); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+    g_hin  > 0 ? ( gfx_set(0.45,0.52,0.62,0.55*g_fade); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+  ) : (
+    g_hin  > 0 ? ( gfx_set(0.45,0.52,0.62,0.55*g_fade); gfx_line(g_x, g_cy-g_hin,  g_x, g_cy+g_hin);  );
+    g_hout > 0 ? ( gfx_set(0.20,0.78,0.90,0.90*g_fade); gfx_line(g_x, g_cy-g_hout, g_x, g_cy+g_hout); );
+  );
+
+  // Gain reduction, hanging from the top edge: translucent fill with a solid
+  // bottom edge, so it reads over the waveform rather than hiding it. The
+  // scale is FIXED at 0..GR_FULL_DB and does not follow any slider.
+  g_hh = min(g_dgr/GR_FULL_DB, 1)*g_ih;
+  g_hh > 0 ? (
+    gfx_set(0.941,0.588,0.157,0.22*g_fade);
+    gfx_line(g_x, g_iy, g_x, g_iy+g_hh);
+    gfx_set(0.980,0.640,0.200,0.95*g_fade);
+    gfx_rect(g_x, g_iy+g_hh, 1, max(1, gk_S));
+  );
+
+  // Ratio, as a line rising from the bottom edge, log-scaled to Max Ratio. A
+  // line rather than a fill: two filled overlays on one plot and neither is
+  // readable.
+  g_ry = g_iy + g_ih - min(log(max(g_drt,1))/LN_RATIO, 1)*g_ih;
+  gfx_set(0.42,0.95,0.62,0.85*g_fade);
+  g_have ? gfx_line(g_x, g_ry, g_px, g_py);
+  g_px = g_x; g_py = g_ry; g_have = 1;
+
+  g_i += 1;
 );
 
-// ---- ratio overlay: rises from the bottom edge, log scale to Max Ratio ----
-gfx_set(0.34, 0.86, 0.62, 1);
-i = 0; havep = 0;
-while (i < cols) (
-  ci = (hw - 1 - i) & HMASK;
-  px = plotx + plotw - 1 - i;
-  v  = log(max(hR[ci], 1)) / lmaxr;
-  v > 1 ? v = 1;
-  py = ploty + ploth - v * ploth;
-  havep ? gfx_line(px, py, ppx, ppy);
-  ppx = px; ppy = py; havep = 1;
-  i += 1;
+// centre line, then the two level references mirrored about it
+gfx_set(0.30,0.30,0.34,1); gfx_line(g_ix, g_cy, g_ix+g_iw, g_cy);
+
+// threshold (dotted) - where compression begins
+g_ht = min(g_half, max(0,(g_thr - FLOORDB)*g_yscale));
+gfx_set(0.70,0.70,0.76,0.85);
+g_i = 0; loop(floor(g_iw/8),
+  gfx_line(g_ix+g_i*8, g_cy-g_ht, g_ix+g_i*8+3, g_cy-g_ht);
+  gfx_line(g_ix+g_i*8, g_cy+g_ht, g_ix+g_i*8+3, g_cy+g_ht);
+  g_i += 1;
 );
 
-// ---- legend strip ----
-grdb = -log(max(mtr, 0.000001)) * DB20;
+// ceiling - the thing being guaranteed, so it gets the solid line
+g_hc = min(g_half, max(0,(g_ceil - FLOORDB)*g_yscale));
+gfx_set(0.941,0.784,0.235,0.9);
+gfx_line(g_ix, g_cy-g_hc, g_ix+g_iw, g_cy-g_hc);
+gfx_line(g_ix, g_cy+g_hc, g_ix+g_iw, g_cy+g_hc);
 
-gfx_set(0.52, 0.70, 0.92, 1);
-gfx_x = padl; gfx_y = 5; gfx_drawstr("out");
-gfx_set(0.26, 0.30, 0.38, 1);
-gfx_drawstr(" / in");
+// "now" edge, from the kit, so this display matches the other Magnolius plots
+gfx_getimgdim(gk_img_playhead_line, g_sw, g_sh);
+g_sw > 0 ? gfx_blit(gk_img_playhead_line,1,0, 0,0,g_sw,g_sh, g_ix+g_iw-3*gk_S, g_iy, 6*gk_S, g_ih);
+gfx_getimgdim(gk_img_playhead_marker, g_sw, g_sh);
+g_sw > 0 ? gfx_blit(gk_img_playhead_marker,1,0, 0,0,g_sw,g_sh, g_ix+g_iw-7*gk_S, g_iy+g_ih-6*gk_S, 14*gk_S, 10*gk_S);
 
-gfx_set(0.98, 0.58, 0.18, 1);
-gfx_x = padl + 70; gfx_y = 5;
-gfx_drawstr("GR ");  gfx_drawnumber(grdb, 1); gfx_drawstr(" dB");
+// Legend, inside the frame: each word in the colour of the thing it names,
+// which is the only thing that says which trace is which. Placed exactly as
+// Upward Compressor places its own - absolute logical coordinates off the
+// window, font 1, y = 45, first word at x = 18 - so the two plugins read the
+// same in a chain. The gaps between words are 6.5 to 9 px in 11 px Arial;
+// re-measure if gk_font ever changes.
+//
+// It does get a backdrop, which Upward does not need: there the LIFT overlay
+// grows from the BOTTOM edge, while the gain-reduction overlay here hangs from
+// the TOP and prints straight through the words whenever the compressor is
+// working hard - which is exactly when someone is reading them.
+gfx_setfont(1);
+gfx_set(0.04,0.045,0.05,0.72);
+gfx_rect(14*gk_S, 43*gk_S, 178*gk_S, 15*gk_S);
+gfx_set(0.45,0.52,0.62,1);    gfx_x =  18*gk_S; gfx_y = 45*gk_S; gfx_drawstr("IN");
+gfx_set(0.20,0.78,0.90,1);    gfx_x =  38*gk_S; gfx_y = 45*gk_S; gfx_drawstr("OUT");
+gfx_set(0.980,0.640,0.200,1); gfx_x =  68*gk_S; gfx_y = 45*gk_S; gfx_drawstr("GR");
+gfx_set(0.42,0.95,0.62,1);    gfx_x =  91*gk_S; gfx_y = 45*gk_S; gfx_drawstr("RATIO");
+gfx_set(0.70,0.70,0.76,1);    gfx_x = 133*gk_S; gfx_y = 45*gk_S; gfx_drawstr("THR");
+gfx_set(0.941,0.784,0.235,1); gfx_x = 163*gk_S; gfx_y = 45*gk_S; gfx_drawstr("CEIL");
 
-gfx_set(0.34, 0.86, 0.62, 1);
-gfx_x = padl + 190; gfx_y = 5;
-gfx_drawstr("ratio "); gfx_drawnumber(rmtr, 1); gfx_drawstr(":1");
+// ================= transfer curve =================
+// The maths below is deliberately a copy of the @sample curve: @gfx must not
+// share a function with the audio thread. Keep the two in step. It is drawn
+// from the LIVE solved ratio, so the curve bends as the plugin works - that
+// is the whole point of a compressor that derives its own ratio.
+gk_panel(550, 40, 160, 160);
+gk_header(0, 550, 40, 160, 22, "CURVE", -1, 0);
+// The plot fills the panel down to the same 8 px pad it has on either side.
+// It used to stop 12 px short to leave a line for an axis caption; with the
+// caption gone the plot takes that space rather than leaving the panel
+// bottom-heavy.
+g_qx = 558*gk_S; g_qy = 68*gk_S; g_qw = 144*gk_S; g_qh = 124*gk_S;
+g_span = CURVE_HI - CURVE_LO;                 // dB spanned vertically
 
-// ---- axis notes ----
-gfx_set(0.45, 0.45, 0.50, 1);
-gfx_x = padl; gfx_y = ploty + ploth + 4;
-gfx_drawnumber(cols * binlen / srate, 1); gfx_drawstr(" s");
+gfx_set(0.08,0.085,0.095,1); gfx_rect(g_qx,g_qy,g_qw,g_qh);
+gfx_set(0.20,0.20,0.23,1);
+g_i = 0; loop(5,
+  gfx_line(g_qx, g_qy+g_qh*g_i*0.25, g_qx+g_qw, g_qy+g_qh*g_i*0.25);
+  gfx_line(g_qx+g_qw*g_i*0.25, g_qy, g_qx+g_qw*g_i*0.25, g_qy+g_qh);
+  g_i += 1;
+);
 
-gfx_set(0.98, 0.58, 0.18, 0.55);
-gfx_x = plotx + plotw - 92; gfx_y = ploty + 3;
-gfx_drawstr("GR 0");
-gfx_x = plotx + plotw - 92; gfx_y = ploty + ploth - 13;
-gfx_drawnumber(GRRANGE, 0); gfx_drawstr(" dB");
+// unity reference: what the input would do untouched
+gfx_set(0.40,0.40,0.44,1);
+gfx_line(g_qx, g_qy+g_qh, g_qx+g_qw, g_qy+g_qh - (-CURVE_LO)*g_qh/g_span);
 
-gfx_set(0.34, 0.86, 0.62, 0.55);
-gfx_x = plotx + plotw - 44; gfx_y = ploty + 3;
-gfx_drawnumber(maxr, 0); gfx_drawstr(":1");
-gfx_x = plotx + plotw - 44; gfx_y = ploty + ploth - 13;
-gfx_drawstr("1:1");
+// threshold, as a vertical marker on the input axis
+g_tx = g_qx + (g_thr-CURVE_LO)*g_qw/(-CURVE_LO);
+gfx_set(0.70,0.70,0.76,0.8); gfx_line(g_tx, g_qy, g_tx, g_qy+g_qh);
+
+// ceiling, as a horizontal marker on the output axis. Output gain moves the
+// line with the curve, because the output really does land at ceiling + gain.
+g_cl = g_qy + g_qh - (g_ceil + s_comp - CURVE_LO)*g_qh/g_span;
+gfx_set(0.941,0.784,0.235,0.65);
+g_i = 0; loop(floor(g_qw/8),
+  gfx_line(g_qx+g_i*8, g_cl, g_qx+g_i*8+4, g_cl);
+  g_i += 1;
+);
+
+gfx_set(0.20,0.78,0.90,1);
+g_i = 0;
+loop(121,
+  g_ld = CURVE_LO + g_i*0.5;
+
+  // static curve at the ratio the plugin is holding right now
+  g_gg = g_ld > g_thr ? exp(-(g_ld - g_thr)*(1 - 1/max(rs,1))*LN10_20) : 1;
+
+  // plot what actually leaves the plugin: blend first, then output gain
+  g_fac = (1 - g_blend) + g_blend*g_gg;
+  g_ov  = g_ld + log(max(g_fac, TINY))*DB20 + s_comp;
+
+  g_xx = g_qx + (g_ld-CURVE_LO)*g_qw/(-CURVE_LO);
+  g_yy = max(g_qy, min(g_qy+g_qh, g_qy + g_qh - (g_ov-CURVE_LO)*g_qh/g_span));
+  g_i == 0 ? ( gfx_x = g_xx; gfx_y = g_yy; ) : gfx_lineto(g_xx,g_yy,1);
+  g_i += 1;
+);
+
+// ================= dynamics =================
+gk_panel(10, 210, 248, 246);
+gk_header(0, 10, 210, 248, 22, "DYNAMICS", -1, 0);
+accent(0.149, 0.784, 0.902);   // cyan
+
+g_chg |= gk_knob_slider(10, 0,  22, 240, 64,  3, -60, 0, -18);
+g_chg |= gk_knob_slider(11, 0,  98, 240, 64,  2, -24, 0, -0.3);
+g_chg |= gk_knob_slider(12, 0, 174, 240, 64,  9, 1, 10, 3);
+gk_text_c( 54, 306, "Threshold", 1);
+gk_text_c(130, 306, "Ceiling", 1);
+gk_text_c(206, 306, "Max Ratio", 1);
+sprintf(#s, "%.1f dB", s_thr);
+g_chg |= gk_field_edit_slider(50,  24, 320, 60, 16,  3, -60, 0, -18, #s);
+sprintf(#s, "%.2f dB", s_ceil);
+g_chg |= gk_field_edit_slider(51, 100, 320, 60, 16,  2, -24, 0, -0.3, #s);
+sprintf(#s, "%.1f:1", s_maxr);
+g_chg |= gk_field_edit_slider(52, 176, 320, 60, 16,  9, 1, 10, 3, #s);
+
+g_chg |= gk_knob_slider(13, 0,  22, 348, 64,  8, 10, 2000, 200);
+g_chg |= gk_knob_slider(14, 0,  98, 348, 64,  7, 0.5, 20, 5);
+gk_text_c( 54, 414, "Ratio Release", 1);
+gk_text_c(130, 414, "Lookahead", 1);
+sprintf(#s, "%.0f ms", s_rel);
+g_chg |= gk_field_edit_slider(53,  24, 428, 60, 16,  8, 10, 2000, 200, #s);
+sprintf(#s, "%.1f ms", s_la);
+g_chg |= gk_field_edit_slider(54, 100, 428, 60, 16,  7, 0.5, 20, 5, #s);
+
+// ================= gain =================
+// Signal order, left to right: drive in, how much of the compressed signal to
+// keep, level out. Input Gain is a genuine pre-compressor drive - the detector,
+// the curve and the dry half of the blend all see it - while Output Gain is a
+// plain trim after everything.
+gk_panel(268, 210, 248, 246);
+gk_header(0, 268, 210, 248, 22, "GAIN", -1, 0);
+accent(0.941, 0.784, 0.235);   // yellow
+
+// Alt-drag links the two gains in opposite directions - see the block after
+// the fields. Both values are captured before any widget can move them.
+g_in0 = s_in; g_out0 = s_comp;
+
+g_cin   = gk_knob_slider(20, 1, 280, 240, 64,  1, -12, 24, 0);
+g_chg |= gk_knob_slider(22, 1, 356, 240, 64,  4, 0, 100, 100);
+g_cout  = gk_knob_slider(21, 2, 432, 240, 64,  5, -20, 20, 0);
+gk_text_c(312, 306, "Input Gain", 1);
+gk_text_c(388, 306, "Blend", 1);
+gk_text_c(464, 306, "Output Gain", 1);
+sprintf(#s, "%+.1f dB", s_in);
+g_cin  |= gk_field_edit_slider(56, 282, 320, 60, 16,  1, -12, 24, 0, #s);
+sprintf(#s, "%.0f %%", s_blend);
+g_chg |= gk_field_edit_slider(58, 358, 320, 60, 16,  4, 0, 100, 100, #s);
+sprintf(#s, "%+.1f dB", s_comp);
+g_cout |= gk_field_edit_slider(57, 434, 320, 60, 16,  5, -20, 20, 0, #s);
+
+// Alt-drag on either gain moves the other one the opposite way by the same
+// number of dB: drive harder into the compressor and take the same amount
+// back out, so what changes is how hard it works and not the level. That is a
+// real difference here - Input Gain is part of the solve and Output Gain is
+// not - so the pair is worth one gesture. It reads the delta the widgets just
+// produced rather than duplicating their drag maths, so it covers the knob,
+// the wheel and the value field alike - and it is gated on those widgets' own
+// change flags, so an automation write landing mid-frame cannot be mistaken
+// for a drag. Ctrl is excluded because a reset is a jump to a default, not a
+// gesture with a delta worth mirroring. Each value
+// still clamps to its own range, so the link goes one-sided once either end
+// runs out of travel.
+g_chg |= g_cin | g_cout;
+(mouse_cap & 16) && !(mouse_cap & 4) ? (
+  g_cin ? (
+    s_comp = gk_clamp(g_out0 - (s_in - g_in0), -20, 20);
+    slider_automate(2^4);
+  ) : g_cout ? (
+    s_in = gk_clamp(g_in0 - (s_comp - g_out0), -12, 24);
+    slider_automate(2^0);
+  );
+);
+
+// Display History is a display control, not a gain one, and it sits here only
+// to give both panels the same two-row grid - GAIN had one row against
+// DYNAMICS' two and read as half empty. It takes the section's yellow so the
+// panel stays one accent, per the kit's rule.
+g_chg |= gk_knob_slider(15, 1, 280, 348, 64, 11, 1, 30, 6);
+gk_text_c(312, 414, "History", 1);
+sprintf(#s, "%.1f s", s_hist);
+g_chg |= gk_field_edit_slider(55, 282, 428, 60, 16, 11, 1, 30, 6, #s);
+
+// ================= meters =================
+// Live data, so both bars are drawn with primitives rather than blitted.
+gk_panel(526, 210, 184, 246);
+gk_header(0, 526, 210, 184, 22, "METERS", -1, 0);
+accent(0.941, 0.588, 0.157);   // orange
+
+g_my = 244*gk_S; g_mh = 160*gk_S;
+g_g1 = 559*gk_S; g_g2 = 643*gk_S; g_mw = 32*gk_S;
+
+// tracks
+gfx_set(0.08,0.085,0.095,1);
+gfx_rect(g_g1, g_my, g_mw, g_mh);
+gfx_rect(g_g2, g_my, g_mw, g_mh);
+
+// quarter ticks across both
+gfx_set(0.22,0.22,0.25,1);
+g_i = 1; loop(3,
+  gfx_line(g_g1, g_my+g_mh*g_i*0.25, g_g1+g_mw, g_my+g_mh*g_i*0.25);
+  gfx_line(g_g2, g_my+g_mh*g_i*0.25, g_g2+g_mw, g_my+g_mh*g_i*0.25);
+  g_i += 1;
+);
+
+// gain reduction: grows DOWNWARD from the top, the same direction as the
+// overlay on the plot above, so the two read as one gesture
+g_bh = min(gr_db/GR_FULL_DB, 1)*g_mh;
+g_bh > 0 ? (
+  gfx_set(0.980,0.640,0.200,0.85); gfx_rect(g_g1, g_my, g_mw, g_bh);
+  gfx_set(1.0,0.78,0.35,1); gfx_rect(g_g1, g_my+g_bh-max(1,gk_S), g_mw, max(1,gk_S));
+);
+
+// ratio: grows UPWARD from 1:1 at the bottom to RATIO_FULL at the top, on a
+// log scale that does NOT follow Max Ratio - see the constant.
+g_bh = min(log(max(rt_now,1))/LN_RATIO, 1)*g_mh;
+g_bh > 0 ? (
+  gfx_set(0.42,0.95,0.62,0.85); gfx_rect(g_g2, g_my+g_mh-g_bh, g_mw, g_bh);
+  gfx_set(0.62,1.0,0.78,1); gfx_rect(g_g2, g_my+g_mh-g_bh, g_mw, max(1,gk_S));
+);
+
+// frames last, so the fills sit inside them
+gfx_set(0.28,0.28,0.32,1);
+gfx_rect(g_g1, g_my, g_mw, g_mh, 0);
+gfx_rect(g_g2, g_my, g_mw, g_mh, 0);
+
+// End-of-scale captions, outside the bars: without them neither meter says
+// what "full" means, and Max Ratio changes what it means on the right-hand one.
+// Both columns sit to the LEFT of their bar and are RIGHT-aligned to it, so a
+// four-digit Max Ratio grows into the gap instead of off the panel - at 1000
+// a left-aligned caption on the right of the bar overran the panel edge.
+gfx_setfont(1);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+sprintf(#s, "0");
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g1 - 4*gk_S - g_tw; gfx_y = g_my; gfx_drawstr(#s);
+sprintf(#s, "%d", GR_FULL_DB);
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g1 - 4*gk_S - g_tw; gfx_y = g_my + g_mh - g_th; gfx_drawstr(#s);
+sprintf(#s, "%d", RATIO_FULL);
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g2 - 4*gk_S - g_tw; gfx_y = g_my; gfx_drawstr(#s);
+sprintf(#s, "1");
+gfx_measurestr(#s, g_tw, g_th);
+gfx_x = g_g2 - 4*gk_S - g_tw; gfx_y = g_my + g_mh - g_th; gfx_drawstr(#s);
+
+gk_text_c(575, 408, "GR", 1);
+gk_text_c(659, 408, "RATIO", 1);
+sprintf(#s, "%.1f dB", gr_db);
+gk_field(538, 424, 74, 18, #s);
+sprintf(#s, "%.1f:1", rt_now);
+gk_field(622, 424, 74, 18, #s);
+
+help_open ? gk_help_draw(10, 40, 700, 424, "Help  -  Variable Ratio Compressor", HELP_BASE, help_lines);
+
+// Wordmark, bottom right, its right edge on the same 10 px margin as the
+// panels. LOGO_ASPECT is the source's width/height; a 1-frame strip is just a
+// scaled blit that respects gk_S. The version sits opposite it, so a stale
+// compiled instance is visible at a glance - REAPER caches compiled JSFX per
+// FX instance.
+gk_strip(11, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+gk_text_c(30, UI_H - 22, "v1.2", 1);
+
+g_bad = count_missing_images(12);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+// One flag, picked up by @block on the audio thread.
+g_chg ? need_update = 1;
+gk_end();
+
+@serialize
+// GUI-only state, so it is serialised rather than made a slider. Append-only:
+// a new value goes AFTER this one or every project saved with the old order
+// reads back wrong.
+file_var(0, gui_scale_idx);

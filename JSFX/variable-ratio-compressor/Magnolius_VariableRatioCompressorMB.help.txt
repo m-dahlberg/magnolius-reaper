@@ -1,0 +1,362 @@
+VARIABLE RATIO COMPRESSOR MB
+
+Four bands of a compressor that solves for the ratio each passage
+needs instead of being told one.
+
+Set a ratio on an ordinary compressor and it is a constant: the
+same 4:1 applies to a peak 2 dB over threshold and one 20 dB
+over. The tips get flattened while everything underneath keeps
+its original dynamics.
+
+Here each band derives its own ratio. Lookahead finds the loudest
+peak coming in that band and the band solves for the exact ratio
+that lands THAT peak on the ceiling, then holds that ratio across
+the passage. Everything between the band's threshold and the
+ceiling is compressed at the same currently-valid ratio, so
+relative dynamics inside the passage survive.
+
+You set the ceiling and each band's threshold. The ratios are
+whatever it takes.
+
+THE CEILING IS PER BAND. Four bands each held at the ceiling can
+sum well above it, so the ceiling here is a shaping control, not
+the output level - use Output Gain for level. There is no safety
+clipper: if you need a true ceiling on the output, put a limiter
+after this.
+
+TILT makes that ceiling a line rather than one number. Most
+material has less energy the higher you go, so with a flat ceiling
+the top band's peaks never reach the target and the band sits
+there doing nothing. Tilt the ceiling down and the upper bands are
+held lower, which is what puts them to work. At the default 0 it
+behaves exactly like a single fixed ceiling.
+
+The crossover is a sequential LR4 tree with allpass compensation,
+so the four bands sum flat - flat magnitude, phase rotation only.
+A disabled band still runs its delay line, so bands stay sample
+aligned and toggling one never shifts the others in time.
+
+Lookahead is reported to REAPER as PDC, so the plugin stays in
+time with the rest of the project.
+
+A single-band version is available as Variable Ratio Compressor.
+
+
+SETTING IT UP
+
+1. Set the three crossovers so each band holds one thing: the
+   weight, the body, the presence, the air.
+
+2. Set the Ceiling. It is the level each band's peaks are solved
+   onto, and it is shared by all four.
+
+3. Solo one band at a time with SOLO and bring its Threshold down
+   until its gain reduction looks right on the loudest passage.
+   Watch the band's own GR bar and its lane in the display.
+
+4. Return to no solo and set each band's Ratio Release. This is
+   the main character control. The defaults get slower as the
+   band gets lower, because low frequencies modulate audibly on
+   fast ballistics.
+
+5. If the upper bands are barely moving, reach for Tilt before
+   their thresholds. A little goes a long way: at Ceiling -6 and
+   the default crossovers, -1 dB/oct puts the four ceilings at
+   -2.1, -4.7, -7.4 and -9.8 dB.
+
+6. Balance the bands with their Gain knobs, then set Output Gain
+   for the level you want. Expect the summed level to sit above
+   the per-band ceiling; that is expected, not a fault.
+
+Two things to know about Tilt, both worth watching for:
+
+  The low band's ceiling RISES as you tilt, because the Ceiling
+  knob stays the average of the four. Past about -1.5 dB/oct at
+  Ceiling -6 that band's ceiling climbs over 0 dBFS and it stops
+  compressing altogether. If you want a steep tilt, lower the
+  Ceiling to go with it.
+
+  The high band's ceiling falls towards its threshold, and a
+  narrow gap between the two asks for a very high ratio. At
+  -3 dB/oct band 4's ceiling is -17.3 against a threshold of -18,
+  which asks for 23:1 - Max Ratio clamps that at 3 and the peaks
+  come through anyway. If a tilted band is not reaching its new
+  ceiling, raise Max Ratio or its threshold.
+
+Max Ratio only bites when a threshold and the ceiling are close
+together. The ratio a peak demands is
+
+    (peak - threshold) / (ceiling - threshold)
+
+so with a threshold at -24 and the ceiling at -0.3 even a
+full-scale peak asks for barely 1.01:1 and Max Ratio does nothing
+at any setting. Narrow that window and the same peak asks for
+ten times as much, where the control decides the character.
+
+
+BANDS
+
+Each band panel carries everything that belongs to that band.
+The header shows the band's frequency range, taken from the
+crossovers after they have been ordered and clamped - so it is
+what the DSP is actually using, not what the knobs say.
+
+ALT-DRAG any of Thresh, Release or Gain and all four bands move
+together, keeping the balance you have already set. Threshold and
+Gain step by the same number of dB; Release scales by the same
+factor, because what relates 400 ms to 80 ms is a ratio and not a
+number of milliseconds.
+
+The four move as one: they stop as soon as the FIRST band reaches
+an end of its range, and the knob under the mouse goes still with
+them rather than letting the others fall out of formation. Let go,
+move that one band on its own, and the group picks up from the new
+spacing. It works on the knob, the wheel and the value field.
+
+LED in the header
+  Band enable. A disabled band passes through, still delayed, so
+  its timing does not change. Its lane and its curve go grey.
+
+Thresh (dB)
+  Where this band starts compressing. The span between here and
+  the ceiling is what receives the solved ratio.
+
+Release (ms)
+  How fast this band's solved ratio is allowed to fall back once
+  the loud passage ends. The ratio rises instantly - the
+  lookahead has already seen the peak - so this is the only
+  ballistic control in the band.
+
+Gain (dB)
+  This band's level, applied after compression and before the
+  sum. Like Output Gain it sits outside the ratio solve, so it
+  lifts the band past the ceiling rather than driving the
+  compressor harder.
+
+SOLO
+  Listens to this band alone, for setting its threshold. It is
+  one automatable parameter shared by the four buttons, so
+  soloing a band un-solos any other. Click a soloed band again to
+  hear everything.
+
+GR bar
+  This band's live gain reduction, on the same fixed 0 to 24 dB
+  scale as everything else in the plugin.
+
+
+CROSSOVER
+
+Low / Mid / High (Hz)
+  The three LR4 splits. The knobs are log-scaled, because a
+  linear knob spends most of its travel above 2 kHz on the top
+  split; the value fields underneath are plain Hz, so typing a
+  number does exactly what it says.
+
+  The three are kept in order and inside Nyquist: each is held at
+  least 10% below the next one up. Push one past its neighbour
+  and it simply stops moving the split - the band headers show
+  the frequencies that were actually used.
+
+
+DYNAMICS
+
+Ceiling (dB)
+  The level each band solves its peaks onto. Shared by all four
+  bands, and per band: the sum can and will sit above it. With
+  Tilt at anything but 0 this is the AVERAGE of the four bands'
+  ceilings rather than the value each one uses.
+
+Tilt (dB/oct)
+  Tips the ceiling across frequency. The ceiling becomes a
+  straight line on a log frequency axis with this slope, and each
+  band takes the value of that line at its own geometric centre
+  frequency - so the ceilings follow the crossovers when you move
+  them.
+
+  The line pivots on the geometric mean of those four centres, so
+  the four offsets always sum to zero: tilting redistributes the
+  ceiling between the bands rather than moving the whole thing.
+  That keeps the overall level roughly put as you turn the knob.
+
+  Negative tilts the ceiling DOWN as frequency rises, which is the
+  useful direction for almost all material and the reason the
+  control exists. Positive does the reverse.
+
+  The curve panel draws it: at Tilt 0 there is one yellow dashed
+  ceiling line, and at anything else one dashed line per band in
+  the band's own colour. The spread between those lines is the
+  tilt.
+
+Max Ratio (:1)
+  Clamp on every band's solved ratio, so one extreme peak cannot
+  demand a limiter-like ratio for a whole passage. Runs from 1:1
+  to 10:1 in steps of 0.1, starting at 3:1.
+
+  Raise it towards 10:1 to have the ratios hold the ceiling on
+  their own. Bring it down when one transient drags a band's
+  ratio up for a whole phrase - the peaks it was holding down
+  then come through, so expect to lower that band's threshold or
+  the ceiling to compensate. 1:1 pins every solver at unity:
+  compression off, Blend and the gains still live.
+
+  It does not change the display: the ratio traces and the RATIO
+  meter are on a fixed 1:1 to 10:1 scale, so a given ratio always
+  draws at the same height.
+
+Lookahead (ms)
+  How far ahead peaks are found, in every band. Reported as PDC,
+  so it costs latency, not time alignment. It also sets the
+  length of the gain smoother.
+
+
+GAIN
+
+In signal order, left to right.
+
+ALT-DRAG either gain and the other one moves the opposite way by
+the same number of dB. Input Gain is part of every band's ratio
+solve and Output Gain is not, so alt-drag changes how hard the bands
+work without changing the level. It works on the knob, the wheel and
+the value field, and each value still clamps to its own range.
+
+Input Gain (dB)
+  Drive into the plugin. This is not a trim: the detectors, the
+  curves and the dry half of the blend all see the boosted
+  signal, so turning it up asks every band for more work.
+
+Blend (% wet)
+  Parallel blend, per band. It is solved for rather than bolted
+  on: at any blend a band still lands its peak on the ceiling.
+
+Output Gain (dB)
+  Level out. Applied once, to the sum, after everything and
+  outside every ratio solve - so it moves the level and changes
+  nothing else. This is the control for the output level, since
+  the ceiling is per band.
+
+
+METERS
+
+The two bars at the right of the GAIN panel:
+
+GR
+  The deepest gain reduction across the four bands, growing
+  downward from the top on a fixed 0 to 24 dB scale - the same
+  direction and scale as the orange overlays.
+
+RATIO
+  The highest ratio across the four bands, growing upward on a
+  fixed log scale: 1:1 at the bottom, 10:1 at the top.
+
+Both meters are fed by the audio thread, so they sit still when
+the transport is stopped. Everything else on screen keeps
+following the knobs.
+
+Display History, the scroll window of the display, has no knob any
+more - the space went to Tilt. It is still a plugin parameter,
+defaulting to 6 seconds, so a project that set it keeps its window
+and REAPER's parameter list can still reach it. It is cosmetic
+either way.
+
+
+READING THE DISPLAY
+
+The plots scroll left, newest at the right-hand edge.
+
+The top plot is the summed signal:
+
+  IN    (grey)    peak level in, time-aligned with the output
+  OUT   (cyan)    peak level out
+  GR    (orange)  deepest gain reduction of the four bands
+  RATIO (green)   highest ratio of the four bands
+  CEIL  (yellow)  the ceiling
+
+The vertical scale is in dB, not linear amplitude: the centre
+line is -66 dB and the top and bottom edges are 0 dB. That is why
+quiet material still has visible height, and why the ceiling can
+be drawn on the same scale as the waveform. There is no threshold
+line on this plot - there are four thresholds, and they are on
+the curves instead.
+
+Grey standing outside the cyan is gain reduction you can see. The
+input trace is the translucent one, so where they overlap it
+tints the output rather than hiding it.
+
+Under it, one lane per band on the same time axis: that band's
+gain reduction hanging from the lane top in orange, and its
+solved ratio rising from the lane bottom in green. A disabled
+band's lane goes grey and says "off".
+
+
+CURVE
+
+Four live transfer curves, one per band in the band's own colour
+- the same colour as its lane label. Input level across, output
+level up, each drawn at the ratio that band is holding at this
+instant, so they bend as the plugin works.
+
+The input axis runs from -60 dB on the left to 0 dB on the right;
+the output axis from -60 dB at the bottom to +12 dB at the top.
+The grey diagonal is unity.
+
+The dashed line is the ceiling: one yellow line at Tilt 0, or one
+line per band in the band's own colour once it is tilted, each at
+that band's own ceiling.
+
+The B1 to B4 labels under the plot are switches: click one to hide
+or show that band's curve. A hidden curve's label is greyed and
+loses its underline. All four start shown, and which ones you leave
+showing is saved with the project. Hiding a curve changes nothing
+about the sound - only what is drawn.
+
+Each curve includes Blend, that band's Gain and Output Gain, so
+what you see is what that band contributes to the output. The
+ceiling line does not move with Output Gain, because it is the
+per-band target the solver aims at rather than a level the output
+is held to.
+
+
+INTERFACE
+
+Every knob has a value field under it: click to type, drag to
+scrub, Ctrl-click to reset, Shift-drag for fine adjustment.
+
+The percentage box in the title bar scales the whole interface.
+It is shared with every other Magnolius plugin in the session, so
+setting it once sets it everywhere.
+
+A JSFX cannot resize its own window, so a scale larger than the
+window will clip. If that happens, drag the FX window bigger or
+pick a smaller percentage. Fit tracks whatever size the window
+happens to be; 100% is pixel-exact on a fresh window.
+
+
+WHEN SOMETHING LOOKS WRONG
+
+"images failed to load: N" across the title bar
+  The gui_kit folder is not beside the plugin as REAPER sees it.
+  If the .jsfx is a symlink into the Effects folder, gui_kit has
+  to be reachable from there too - including led_cyan.png, which
+  this plugin uses and the single-band one does not.
+
+The output is far louder than the ceiling
+  Expected. The ceiling is per band and four bands held at it
+  sum above it. Use Output Gain for the output level.
+
+A ratio trace sits pinned at the top of its lane
+  That band is asking for more than Max Ratio allows, so peaks
+  are getting past the ceiling. Raise Max Ratio, or lower that
+  band's threshold so less is asked of any single peak.
+
+One band is doing all the work
+  Check its threshold against the others. A band that never
+  reaches its threshold shows a flat lane and a straight curve.
+
+Everything sounds phasey with all bands enabled
+  The crossover sums flat in magnitude but rotates phase, which
+  is normal for an LR4 tree. Large per-band Gain differences
+  exaggerate what that rotation does at the crossover points.
+
+The plugin seems to lag the rest of the project
+  Lookahead is reported as PDC. Make sure the track is not in a
+  context where PDC is disabled.
