@@ -203,7 +203,7 @@ cfg.rider_trim_db, cfg.rider_offset_db = 0, 0
 cfg.rider_lookahead_ms, cfg.rider_trans_ms = 40, 60
 cfg.rider_speed_db_s = 60
 cfg.rider_after_notes = true
-cfg.rider_target_track = 0                   -- exercise the auto rule
+-- Track roles are per case and set below: each case has its own three tracks.
 
 -- Two cases, each its own set of three tracks. The references stay at playrate
 -- 1 in both: nobody time-stretches the backing, and the geometry risk is all
@@ -248,46 +248,82 @@ end
 
 ------------------------------------------------------------------- selection
 
+-- The roles are named, and nothing is selected: the point of the change is that the script no
+-- longer depends on the selection at all. Each case names its own three tracks so the two
+-- cases cannot resolve into each other.
+local function role_cfg(c)
+  local rc = Config.new()
+  for k, v in pairs(cfg) do rc[k] = v end
+  reaper.GetSetMediaTrackInfo_String(c.tgt.track, "P_NAME", c.tag_src, true)
+  reaper.GetSetMediaTrackInfo_String(c.refs[1].track, "P_NAME", c.tag_bg1, true)
+  reaper.GetSetMediaTrackInfo_String(c.refs[2].track, "P_NAME", c.tag_bg2, true)
+  rc.source_guid, rc.source_name = reaper.GetTrackGUID(c.tgt.track), c.tag_src
+  rc.bg1_guid, rc.bg1_name = reaper.GetTrackGUID(c.refs[1].track), c.tag_bg1
+  rc.bg2_guid, rc.bg2_name = reaper.GetTrackGUID(c.refs[2].track), c.tag_bg2
+  return rc
+end
+
+for i, c in ipairs(cases) do
+  c.tag_src = "NL src " .. i
+  c.tag_bg1 = "NL bg1 " .. i
+  c.tag_bg2 = "NL bg2 " .. i
+end
+
 for _, c in ipairs(cases) do
   local tag = " at playrate " .. c.playrate
   reaper.SelectAllMediaItems(0, false)
-  for _, r in ipairs(c.refs) do reaper.SetMediaItemSelected(r.item, true) end
-  reaper.SetMediaItemSelected(c.tgt.item, true)
+  c.cfg = role_cfg(c)
 
-  local sel = Select.resolve(cfg)
-  ok(sel.err == nil, "the selection resolves" .. tag, tostring(sel.err))
+  local sel = Select.resolve(c.cfg)
+  ok(sel.err == nil, "the roles resolve with nothing selected" .. tag, tostring(sel.err))
   ok(#sel.refs == 2, "two clips are taken as reference" .. tag,
      tostring(#sel.refs))
   ok(#sel.target == 1, "one clip is taken as the target" .. tag,
      tostring(#sel.target))
   ok(sel.target[1] and sel.target[1].item == c.tgt.item,
-     "and it is the one on the highest-numbered track" .. tag)
+     "and it is the clip on the named source track" .. tag)
+  ok(sel.ref_tracks == 2, "two background slots contributed" .. tag,
+     tostring(sel.ref_tracks))
   c.sel = sel
 end
 
--- Selection order is not what picks the target, and cannot be -- REAPER does
--- not expose it. Reselecting in the opposite order must give the same answer,
--- which is the whole reason the rule is positional.
+-- The selection is now irrelevant, which is the whole point of the change: it used to decide
+-- the roles, and it used to be the reason the rule had to be positional at all (REAPER does
+-- not expose item selection ORDER, so "the last one you clicked" was never available).
+-- Selecting the wrong things must change nothing.
 do
   local c = cases[1]
   reaper.SelectAllMediaItems(0, false)
-  reaper.SetMediaItemSelected(c.tgt.item, true)
-  for _, r in ipairs(c.refs) do reaper.SetMediaItemSelected(r.item, true) end
-  local sel = Select.resolve(cfg)
+  for _, r in ipairs(cases[2].refs) do reaper.SetMediaItemSelected(r.item, true) end
+  reaper.SetMediaItemSelected(cases[2].tgt.item, true)
+  local sel = Select.resolve(c.cfg)
   ok(sel.target[1] and sel.target[1].item == c.tgt.item,
-     "selecting the target first changes nothing")
+     "selecting another case's clips changes nothing")
+  reaper.SelectAllMediaItems(0, false)
 
-  -- And an explicit track number overrides it, which is what a headless run
-  -- uses when the layout does not suit the rule.
+  -- A typed name overrides the stored guid. This is what a headless run uses, and what
+  -- survives a backing stem being re-rendered onto a fresh track.
   local cfg2 = Config.new()
-  for k, v in pairs(cfg) do cfg2[k] = v end
-  cfg2.rider_target_track =
-    math.floor(reaper.GetMediaTrackInfo_Value(c.refs[1].track, "IP_TRACKNUMBER"))
+  for k, v in pairs(c.cfg) do cfg2[k] = v end
+  cfg2.source_override = c.tag_bg1
   local sel2 = Select.resolve(cfg2)
   ok(sel2.target[1] and sel2.target[1].item == c.refs[1].item,
-     "an explicit target track overrides the auto rule")
-  ok(#sel2.refs == 2, "and everything else becomes reference",
-     tostring(#sel2.refs))
+     "a typed source name overrides the stored guid")
+
+  -- And a typed name that matches nothing is an error, not a silent fall-back to the guid.
+  cfg2.source_override = "No Such Track"
+  local sel3 = Select.resolve(cfg2)
+  ok(sel3.err ~= nil, "a source name matching nothing is refused", tostring(sel3.err))
+  ok(#sel3.target == 0, "and nothing is resolved to ride")
+
+  -- A background slot pointing at the source is refused rather than silently dropped.
+  local cfg3 = Config.new()
+  for k, v in pairs(c.cfg) do cfg3[k] = v end
+  cfg3.bg3_override = c.tag_src
+  local sel4 = Select.resolve(cfg3)
+  ok(sel4.err == nil, "a bad background slot does not stop the run", tostring(sel4.err))
+  ok(sel4.bg_err[3] ~= nil, "but it is reported", tostring(sel4.bg_err[3]))
+  ok(sel4.ref_tracks == 2, "and it contributes nothing", tostring(sel4.ref_tracks))
 end
 
 -------------------------------------------------------------------- analysis
@@ -459,12 +495,10 @@ end
 for _, c in ipairs(cases) do
   local tag = " at playrate " .. c.playrate
   reaper.SelectAllMediaItems(0, false)
-  for _, r in ipairs(c.refs) do reaper.SetMediaItemSelected(r.item, true) end
-  reaper.SetMediaItemSelected(c.tgt.item, true)
 
-  local sel = Select.resolve(cfg)
+  local sel = Select.resolve(c.cfg)
   ok(#sel.target == 1 and sel.target[1].item == c.tgt.item,
-     "part 1 resolves to the target clip, not the first selected one" .. tag)
+     "part 1 resolves to the clip on the named source track" .. tag)
 
   -- Part 1's read is Ride.analyse with no reference at all.
   local data, err = Analyze.drive(
@@ -506,15 +540,12 @@ end
 do
   local c = cases[1]
   reaper.SelectAllMediaItems(0, false)
-  for _, r in ipairs(c.refs) do reaper.SetMediaItemSelected(r.item, true) end
-  reaper.SetMediaItemSelected(c.tgt.item, true)
   local cfg2 = Config.new()
-  for k, v in pairs(cfg) do cfg2[k] = v end
-  cfg2.rider_target_track =
-    math.floor(reaper.GetMediaTrackInfo_Value(c.refs[2].track, "IP_TRACKNUMBER"))
+  for k, v in pairs(c.cfg) do cfg2[k] = v end
+  cfg2.source_guid, cfg2.source_name = reaper.GetTrackGUID(c.refs[2].track), c.tag_bg2
   local sel = Select.resolve(cfg2)
   ok(sel.target[1] and sel.target[1].item == c.refs[2].item,
-     "part 1 follows an explicit target track")
+     "part 1 follows whichever track is named as the source")
 end
 
 --------------------------------------------------------------------- the write

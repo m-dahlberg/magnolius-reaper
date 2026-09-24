@@ -31,6 +31,11 @@ local function ok(cond, name, extra)
   if cond then pass = pass + 1 say("  ok    " .. name)
   else fail = fail + 1 say("  FAIL  " .. name .. (extra and ("  -- " .. extra) or "")) end
 end
+local function near(got, want, tol, name)
+  ok(type(got) == "number" and math.abs(got - want) <= tol, name,
+     string.format("got %s, want %s +/- %s", tostring(got), tostring(want), tostring(tol)))
+end
+
 local function section(s) say("-- " .. s) end
 local function report()
   reaper.ShowConsoleMsg(table.concat(out, "\n") ..
@@ -368,6 +373,69 @@ protected(fit, reaper.GetActiveTake(fit), "stretched fixture (playrate 1.25)")
 reaper.DeleteTrack(ftr)
 reaper.UpdateArrange()
 os.remove(fpath)
+
+---------------------------------------------------------------- time selection
+-- A selection over the middle of the item. Three things have to hold, and the first is the one
+-- that fails silently: the analysed span must START where the selection does. Get that
+-- subtraction backwards and every read is still the right LENGTH, so only the content is wrong.
+section("a time selection")
+do
+  local Timesel = require "dc.timesel"
+  local tsit, tstr, tspath = build_fixture()
+  if not tsit then
+    bail("could not build the fixture for the time-selection case: " .. tostring(tstr))
+  else
+    local take = reaper.GetActiveTake(tsit)
+    local pos  = reaper.GetMediaItemInfo_Value(tsit, "D_POSITION")
+    local len  = reaper.GetMediaItemInfo_Value(tsit, "D_LENGTH")
+    local SEL0, SEL1 = pos + len * 0.25, pos + len * 0.75
+    reaper.GetSet_LoopTimeRange(true, false, SEL0, SEL1, false)
+
+    local cfg = Config.new()
+    local range, rerr = Timesel.for_item(tsit, cfg.ignore_time_selection)
+    ok(range ~= nil, "the range resolves", tostring(rerr))
+
+    if range then
+      ok(range.whole == false, "a mid-item selection is not the whole item")
+
+      local full = Analyze.geometry(take)
+      local geo  = Analyze.geometry(take, range)
+      near(geo.t0, SEL0 - pos, 1e-6,
+           "the read starts where the selection does, in TAKE seconds")
+      near(geo.acc_len, SEL1 - SEL0, 1e-6, "and spans the selection")
+      ok(geo.total_samples < full.total_samples,
+         "so fewer samples are read than for the whole item",
+         string.format("%d vs %d", geo.total_samples, full.total_samples))
+      near(geo.total_samples, (SEL1 - SEL0) * geo.rate, 2, "and the count matches the span")
+
+      -- The override puts it back, without the selection being cleared.
+      local ocfg = Config.new()
+      ocfg.ignore_time_selection = true
+      local orange = Timesel.for_item(tsit, ocfg.ignore_time_selection)
+      ok(orange and orange.whole, "the override processes the whole item")
+      near(Analyze.geometry(take, orange).total_samples, full.total_samples, 2,
+           "and reads as many samples as having no selection at all")
+
+      -- Splitting: three pieces, and only the middle one is ours to touch.
+      local before = reaper.CountTrackMediaItems(tstr)
+      local middle, serr = Timesel.split_to_range(tsit, range.t0, range.t1)
+      ok(middle ~= nil, "the item splits to the range", tostring(serr))
+      if middle then
+        ok(reaper.CountTrackMediaItems(tstr) == before + 2, "into three pieces",
+           tostring(reaper.CountTrackMediaItems(tstr)))
+        near(reaper.GetMediaItemInfo_Value(middle, "D_POSITION"), SEL0, 1e-6,
+             "the middle piece starts at the selection")
+        near(reaper.GetMediaItemInfo_Value(middle, "D_LENGTH"), SEL1 - SEL0, 1e-6,
+             "and is exactly as long as it")
+      end
+    end
+
+    reaper.GetSet_LoopTimeRange(true, false, 0, 0, false)
+    reaper.DeleteTrack(tstr)
+    reaper.UpdateArrange()
+    os.remove(tspath)
+  end
+end
 
 report()
 if os.exit then os.exit(fail == 0 and 0 or 1) end

@@ -11,6 +11,14 @@ M.EXT_SECTION = "spectral_denoise"
 M.FFT_SIZES = { 1024, 2048, 4096 }
 
 M.defaults = {
+  -- A time selection narrows what is analysed and what is written; this overrides that back
+  -- to the whole item without making you clear the selection.
+  ignore_time_selection = false,
+  -- The one place the two halves usefully differ: build the noise profile from the selection
+  -- -- a passage of room tone, say -- and clean the WHOLE item with it. No split then, because
+  -- everything is processed.
+  process_whole_item = false,
+
   -- Analysis ----------------------------------------------------------------
   fftsel        = 2,        -- index into FFT_SIZES
   max_frames    = 20000,    -- analysis frames; the stride is derived from this

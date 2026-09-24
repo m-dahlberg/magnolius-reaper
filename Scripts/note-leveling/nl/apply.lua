@@ -57,8 +57,10 @@ local MARKER_END   = reaper.ColorToNative(64, 96, 112) | 0x1000000
 -- Switch the envelope on and show it, once it has points. Empty envelopes
 -- refuse to activate, so this is called after the points are written -- and
 -- the chunk it round-trips already contains them.
--- Points arrive in take seconds; project time is item_pos + t, with no
--- playrate factor, because the accessor already applied it. Shape is linear
+-- Points arrive in take seconds measured from the START OF THE ANALYSED SPAN. Project time is
+-- therefore geo.origin + t, with no playrate factor because the accessor already applied it --
+-- and origin is item_pos with no time selection, item_pos + t0 with one. Using item_pos here
+-- would write a ride measured over a selection at the start of the item instead. Shape is linear
 -- because the dB curve is carried by the point density, not by the shape.
 function M.write_points(env, mode, pos, points)
   for _, p in ipairs(points) do
@@ -134,7 +136,7 @@ function M.run(results, cfg)
       reaper.DeleteEnvelopePointRangeEx(env, -1, -1, math.huge)
 
       for _, r in ipairs(by_track[track]) do
-        npoints = npoints + M.write_points(env, mode, r.geo.item_pos, r.points)
+        npoints = npoints + M.write_points(env, mode, r.geo.origin or r.geo.item_pos, r.points)
 
         if cfg.write_markers then
           nmarkers = nmarkers + write_markers(r.take, r.notes, r.geo)
@@ -196,12 +198,12 @@ function M.ride(results, cfg)
       -- curve's own first and last points do not land on top of a survivor.
       local pad = math.max(cfg.rider_point_ms, 1) / 1000
       for _, r in ipairs(rs) do
-        local a = r.geo.item_pos + (r.points[1] and r.points[1].t or 0) - pad
-        local b = r.geo.item_pos + r.geo.item_len + pad
+        local a = (r.geo.origin or r.geo.item_pos) + (r.points[1] and r.points[1].t or 0) - pad
+        local b = (r.geo.origin or r.geo.item_pos) + (r.geo.acc_len or r.geo.item_len) + pad
         reaper.DeleteEnvelopePointRangeEx(env, -1, a, b)
       end
       for _, r in ipairs(rs) do
-        nride = nride + M.write_points(env, mode, r.geo.item_pos, r.points)
+        nride = nride + M.write_points(env, mode, r.geo.origin or r.geo.item_pos, r.points)
       end
       reaper.Envelope_SortPointsEx(env, -1)
       activate(env)
@@ -216,7 +218,7 @@ function M.ride(results, cfg)
         local mode = reaper.GetEnvelopeScalingMode(pre)
         reaper.DeleteEnvelopePointRangeEx(pre, -1, -1, math.huge)
         for _, r in ipairs(rs) do
-          npre = npre + M.write_points(pre, mode, r.geo.item_pos,
+          npre = npre + M.write_points(pre, mode, r.geo.origin or r.geo.item_pos,
                                        r.prefx_points or {})
         end
         reaper.Envelope_SortPointsEx(pre, -1)

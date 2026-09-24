@@ -59,6 +59,12 @@ local function make_stub(log, clicks, changed)
     -- can execute the code BEHIND a slider and not only the drawing of it.
     -- That is where a panel's worst bugs live -- a stub whose sliders always
     -- report false never runs those branches at all.
+    -- The track pickers. BeginCombo must open, or the dropdown body -- where the role is
+    -- actually written -- is never executed, and a picker that assigned the wrong key would
+    -- pass. Selectable follows `changed` for the same reason the sliders do.
+    BeginCombo = function() return true end,
+    Selectable = function() return changed end,
+    InputText  = function(_, _, v) return changed, v end,
     IsItemDeactivatedAfterEdit = function() return changed end,
     GetContentRegionAvail = function() return 500, 400 end,
     GetCursorScreenPos    = function() return 0, 0 end,
@@ -94,6 +100,34 @@ end
 -- control report that it was just moved. `prepare` is handed the panel's own
 -- ST and cfg, so a case can set up both the state and the settings the frame
 -- will be drawn under.
+-- The panel persists on edit, and in the `changed` pass every control reports as edited -- so
+-- a run would write fixture track GUIDs into the user's saved roles. Snapshot and restore.
+local ROLE_SUFFIXES = { "_guid", "_name", "_override" }
+
+local function role_keys(Config)
+  local out = {}
+  for k in pairs(Config.defaults or {}) do
+    for _, suffix in ipairs(ROLE_SUFFIXES) do
+      if k:sub(-#suffix) == suffix then out[#out + 1] = k end
+    end
+  end
+  return out
+end
+
+function M.snapshot_roles(Config, section)
+  local saved = {}
+  for _, k in ipairs(role_keys(Config)) do
+    saved[k] = reaper.GetExtState(section, k)
+  end
+  return saved
+end
+
+function M.restore_roles(saved, section)
+  for k, v in pairs(saved or {}) do
+    reaper.SetExtState(section, k, v, true)
+  end
+end
+
 function M.run(UI, dir, prepare, clicks, changed)
   local log = { push = 0, pop = 0, dis = 0 }
   local stub = make_stub(log, clicks or {}, changed or false)

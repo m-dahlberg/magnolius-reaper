@@ -356,7 +356,17 @@ end
 
 -- The selected item runs on the panel's own settings, since the question it
 -- answers is "does this take survive what I have the sliders set to".
-local sel = reaper.GetSelectedMediaItem(0, 0)
+--
+-- OPT-IN, because this script's job is SPLITTING and this case does it to whatever the user
+-- happens to have selected, with no undo of its own -- it only prints "Undo to restore". Run
+-- once by hand that is a fair trade; run by a harness against an open session it silently
+-- rewrites the user's edit. Set QUICKSPLIT_VERIFY_SELECTION=1 to opt in.
+local want_selection = os.getenv("QUICKSPLIT_VERIFY_SELECTION") == "1"
+local sel = want_selection and reaper.GetSelectedMediaItem(0, 0) or nil
+if not want_selection then
+  say("\n-- the selected-item case is OPT-IN (QUICKSPLIT_VERIFY_SELECTION=1): it splits")
+  say("   whatever is selected and does not undo itself")
+end
 if sel then
   local tk = reaper.GetActiveTake(sel)
   if tk and not reaper.TakeIsMIDI(tk) then
@@ -388,7 +398,9 @@ protected(fit, Config.new(),
 reaper.DeleteTrack(ftr)
 reaper.UpdateArrange()
 
-say("\nUndo to restore the selected item, then render and null for the final proof.")
+if want_selection then
+  say("\nUndo to restore the selected item, then render and null for the final proof.")
+end
 report()
 if fails > 0 then
   reaper.MB(("%d of %d checks failed -- see the console.")

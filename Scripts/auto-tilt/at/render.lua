@@ -59,8 +59,8 @@ function M.output_path(take, cfg, avoid)
 end
 
 -- Coroutine body. Yields read requests, returns { path, peak, ... } or nil+msg.
-function M.run(take, cfg, k, plan, path, frac0, frac1)
-  local geo = Analyze.geometry(take)
+function M.run(take, cfg, k, plan, path, frac0, frac1, range)
+  local geo = Analyze.geometry(take, range)
   local total = geo.total_samples
   if total < 1 then return nil, "Item has no audio" end
   if Wav.will_overflow(total, geo.nchan) then
@@ -101,7 +101,7 @@ function M.run(take, cfg, k, plan, path, frac0, frac1)
     end
   end
 
-  local ok, finished = pcall(Analyze.pump, aa, k, geo, 0, total, block,
+  local ok, finished = pcall(Analyze.pump, aa, k, geo, geo.t0, total, block,
                              frac0 or 0, frac1 or 1)
   reaper.DestroyAudioAccessor(aa)
 

@@ -8,6 +8,8 @@
 -- All of the target's clips go in under one undo block, so a comped row is one
 -- undo step rather than eleven.
 
+local Timesel = require "at.timesel"
+
 local M = {}
 
 local function get(t, k) return reaper.GetMediaItemTakeInfo_Value(t, k) end
@@ -60,7 +62,9 @@ end
 
 -- `results` is a list of { item, take, result }, one per rendered target clip.
 -- Returns the number of takes added, or nil + message.
-function M.run(results, cfg, gain_db)
+-- `range` narrows the edit to a time selection: each item is split at its edges and only the
+-- middle piece is touched, so nothing outside the selection is re-rendered.
+function M.run(results, cfg, gain_db, range)
   if #results == 0 then return nil, "Nothing to apply" end
 
   -- Before the undo block: opening a source and building its peaks is not a
@@ -84,9 +88,21 @@ function M.run(results, cfg, gain_db)
 
   -- No early return between here and PreventUIRefresh(-1): an unbalanced call
   -- leaves REAPER's UI frozen for the rest of the session.
-  local added = 0
+  local added, split_err = 0, nil
   for i, r in ipairs(results) do
     local item, take = r.item, r.take
+
+    -- Narrow the item first, so the render lands on a piece whose length matches it.
+    if range and not range.whole then
+      local middle, serr = Timesel.split_to_range(item, range.t0, range.t1)
+      if middle then
+        item = middle
+        take = reaper.GetActiveTake(middle) or take
+      else
+        split_err = split_err or serr
+      end
+    end
+
     local _, oldname = reaper.GetSetMediaItemTakeInfo_String(take, "P_NAME", "", false)
 
     local nt
@@ -113,6 +129,7 @@ function M.run(results, cfg, gain_db)
   reaper.PreventUIRefresh(-1)
   reaper.UpdateArrange()
   reaper.Undo_EndBlock(string.format("AutoTilt %+.1f dB", gain_db), -1)
+  if split_err then return nil, split_err end
   return added
 end
 

@@ -23,10 +23,14 @@ M.VERSION = 1
 M.NLEV = 127                    -- 1 dB level buckets
 M.LEV0 = -120                   -- dB of bucket 0; digital silence lands here
 
--- Changing any of these changes the cube, so the audio must be re-read.
--- target_track is here because it changes *which clips* get read, which is the
--- same cost even though it is not an FFT parameter.
-M.ANALYSIS_KEYS = { "fft_size", "ana_hop", "target_track" }
+-- Changing any of these changes the cube, so the audio must be re-read. The track roles are
+-- here because they change *which clips* get read, which is the same cost even though they are
+-- not FFT parameters. (Analyze.cache_key also folds in every resolved item, so a role change
+-- could not reuse a stale cube either way; naming them here says why they belong to this class.)
+M.ANALYSIS_KEYS = { "fft_size", "ana_hop",
+                    "target_guid", "target_name", "target_override",
+                    "ref_guid", "ref_name", "ref_override",
+                    "ignore_time_selection" }
 
 -- Pure functions of the cube: gate, band limit, split, weight.
 M.MEASURE_KEYS = { "pivot_hz", "band_lo_hz", "band_hi_hz", "gate_db", "gate_pct" }
@@ -40,6 +44,14 @@ M.SOLVE_KEYS = {
 M.OUTPUT_KEYS = { "new_take", "select_take", "compensate_level" }
 
 M.defaults = {
+  -- A time selection narrows what is measured and what is written; this overrides that back to
+  -- the whole item without making you clear the selection.
+  ignore_time_selection = false,
+  -- The one place the two halves usefully differ: measure the tilt over the selection -- a
+  -- chorus, say -- and apply it to the WHOLE clip. No split then, because everything is
+  -- processed.
+  process_whole_item = false,
+
   -- Analysis ----------------------------------------------------------------
   -- 4096 at 48 kHz is an 85 ms window and 11.7 Hz bins. The bins are the
   -- reason for the size rather than the window: at the 80 Hz band edge a
@@ -52,9 +64,15 @@ M.defaults = {
   ana_hop       = 1024,
 
   -- Selection ---------------------------------------------------------------
-  -- 0 means "the highest-numbered selected track". A 1-based track number
-  -- overrides it, for the case where the layout says otherwise.
-  target_track  = 0,
+  -- Both roles are chosen explicitly: a dropdown writes the GUID and the name, a typed name
+  -- overrides both. Every audio clip on the chosen track is used. See at/trackpick.lua for why
+  -- all three are stored, and at/select.lua for what replaced the old positional rule.
+  target_guid     = "",
+  target_name     = "",
+  target_override = "",
+  ref_guid        = "",
+  ref_name        = "",
+  ref_override    = "",
 
   -- Measurement -------------------------------------------------------------
   pivot_hz      = 1000,   -- the tilt pivot, and the split point of the ratio

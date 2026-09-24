@@ -86,7 +86,7 @@ local function source_format(src)
   return rate, math.max(1, nchan), false
 end
 
-function M.geometry(take)
+function M.geometry(take, range)
   local item = reaper.GetMediaItemTake_Item(take)
   local src  = reaper.GetMediaItemTake_Source(take)
 
@@ -96,13 +96,15 @@ function M.geometry(take)
 
   local item_len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
 
+  local _t0, _span = M.clip_span(item, range)
+
   return {
     item = item, playrate = playrate, rate = rate, nchan = nchan,
     rate_known = rate_known,
     -- acc_len is the accessor's span. Named for what it is, so it cannot
     -- quietly be confused with the length of the source file again.
-    item_len = item_len, acc_len = item_len,
-    total_samples = math.floor(item_len * rate + 0.5),
+    item_len = item_len, acc_len = _span, t0 = _t0, range = range,
+    total_samples = math.floor(_span * rate + 0.5),
   }
 end
 
@@ -177,13 +179,28 @@ end
 -- of them has.
 --
 -- `rate` and `nchan` come from the target, not from each clip. See the header.
-function M.run_side(clips, k, rate, nchan, frac0, frac1)
+--- Where a time-selection range falls inside ONE item, in take seconds.
+---
+--- Returns (t0, span). A span of 0 means the item lies outside the range entirely and should be
+--- skipped -- with several clips on a track, a selection over one phrase touches some of them
+--- and misses the rest, and a zero-length read is not the same as an error.
+function M.clip_span(item, range)
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  if not range or range.whole then return 0, len end
+  local a = math.max(pos, range.t0)
+  local b = math.min(pos + len, range.t1)
+  if b <= a then return 0, 0 end
+  return a - pos, b - a
+end
+
+function M.run_side(clips, k, rate, nchan, frac0, frac1, range)
   k:reset_analysis()
   local span = frac1 - frac0
 
   local total = 0
   for _, e in ipairs(clips) do
-    local len = reaper.GetMediaItemInfo_Value(e.item, "D_LENGTH")
+    local _, len = M.clip_span(e.item, range)
     total = total + math.floor(len * rate + 0.5)
   end
   if total < k.fft_size * 2 then
@@ -192,7 +209,7 @@ function M.run_side(clips, k, rate, nchan, frac0, frac1)
 
   local done = 0
   for _, e in ipairs(clips) do
-    local len = reaper.GetMediaItemInfo_Value(e.item, "D_LENGTH")
+    local t0, len = M.clip_span(e.item, range)
     local n = math.floor(len * rate + 0.5)
     if n > 0 then
       local geo = { rate = rate, nchan = nchan }
@@ -201,7 +218,7 @@ function M.run_side(clips, k, rate, nchan, frac0, frac1)
       -- pcall so the accessor is always released; coroutine.yield across pcall
       -- is allowed since Lua 5.2, which is what makes progress reporting and
       -- cancellation possible from inside the read.
-      local ok, finished = pcall(M.pump, aa, k, geo, 0, n,
+      local ok, finished = pcall(M.pump, aa, k, geo, t0, n,
         function(nn) k:analyze(nn) end,
         frac0 + span * (done / total),
         frac0 + span * ((done + n) / total))
@@ -229,15 +246,18 @@ end
 -- The target is read first so that a cancel part way through still leaves the
 -- more expensive half done, and because the reference half is skipped entirely
 -- when there is none.
-function M.run(sel, cfg, k, geo)
+--- `range` narrows BOTH sides. Matching a section of the target against the whole of the
+--- reference compares different moments of the arrangement, and reading a full-length backing
+--- item for a twelve-second selection is most of the wait. Same window, both sides.
+function M.run(sel, cfg, k, geo, range)
   local half = #sel.refs > 0 and 0.5 or 1.0
 
-  local target, err = M.run_side(sel.target, k, geo.rate, geo.nchan, 0, half)
+  local target, err = M.run_side(sel.target, k, geo.rate, geo.nchan, 0, half, range)
   if not target then return nil, err end
 
   local ref
   if #sel.refs > 0 then
-    ref, err = M.run_side(sel.refs, k, geo.rate, geo.nchan, half, 1.0)
+    ref, err = M.run_side(sel.refs, k, geo.rate, geo.nchan, half, 1.0, range)
     if not ref then return nil, err end
   end
 

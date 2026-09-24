@@ -10,6 +10,7 @@ local AutoThresh = require "vs.autothresh"
 local Hierarchy  = require "vs.hierarchy"
 local Levels     = require "vs.levels"
 local Apply      = require "vs.apply"
+local Timesel  = require "vs.timesel"
 
 local M = {}
 
@@ -63,8 +64,35 @@ local function recompute()
 end
 
 local function analyze()
-  ST.item = reaper.GetSelectedMediaItem(0, 0)
+  -- The item the time selection is over, not blindly the first selected one -- with several
+  -- clips on a track, "first selected" is often one the selection does not touch.
+  local picked, perr = Timesel.selected_item(cfg.ignore_time_selection)
+  if not picked then ST.status = perr return end
+  ST.item = picked
   if not ST.item then ST.status = "No item selected."; ST.F = nil; return end
+
+  -- Split at the selection edges BEFORE anything is analysed, and work on the middle piece
+  -- from here on. This script sets D_VOL on each resulting clip, so a piece that straddles a
+  -- selection edge would carry a gain decided from only the part inside it -- audible on the
+  -- half that was never looked at. Splitting first means every clip that receives a gain lies
+  -- wholly within the range.
+  do
+    local pre = Timesel.for_item(ST.item, cfg.ignore_time_selection)
+    if pre and pre.from_selection and not pre.whole then
+      reaper.Undo_BeginBlock()
+      reaper.PreventUIRefresh(1)
+      local middle, serr = Timesel.split_to_range(ST.item, pre.t0, pre.t1)
+      reaper.PreventUIRefresh(-1)
+      reaper.UpdateArrange()
+      reaper.Undo_EndBlock("Vocal Splitter: isolate the time selection", -1)
+      if not middle then ST.status = serr or "could not split to the time selection" return end
+      ST.item = middle
+      reaper.SelectAllMediaItems(0, false)
+      reaper.SetMediaItemSelected(middle, true)
+      -- The piece IS the range now, so nothing downstream has to offset anything.
+      ST.F, ST.cache_key = nil, nil
+    end
+  end
   ST.take = reaper.GetActiveTake(ST.item)
   if not ST.take or reaper.TakeIsMIDI(ST.take) then
     ST.status = "Selected item has no audio take."; ST.F = nil; return
@@ -77,6 +105,9 @@ local function analyze()
     return
   end
 
+  -- No range is passed on: the item was already cut down to the selection above, so the whole
+  -- of what is left IS the work. One coordinate system instead of two.
+  ST.range = nil
   local F, err = Analyze.run(ST.take, cfg, ImGui, ctx, script_dir)
   if not F then ST.status = "Analysis failed: " .. tostring(err); ST.F = nil; return end
 
@@ -187,11 +218,33 @@ local function frame()
   ImGui.TextWrapped(ctx, ST.status)
   if ST.err then ImGui.TextColored(ctx, 0xE05050FF, ST.err) end
 
+  -- Above the "have we analysed yet" guard: this decides what the NEXT analysis reads, so it
+  -- has to be reachable before there is anything to show.
+  ImGui.SeparatorText(ctx, "Range")
+  -- ValidatePtr2, not just a nil check: the item can have been deleted since it was stored,
+  -- and the frame test hands the panel a stub.
+  if ST.item and reaper.ValidatePtr2(0, ST.item, "MediaItem*") then
+    local pos = reaper.GetMediaItemInfo_Value(ST.item, "D_POSITION")
+    local len = reaper.GetMediaItemInfo_Value(ST.item, "D_LENGTH")
+    local r, rerr = Timesel.for_item(ST.item, cfg.ignore_time_selection)
+    if r then
+      ImGui.Text(ctx, Timesel.describe(r, pos, len))
+      if r.from_selection and not r.whole then
+        ImGui.Text(ctx, "Splits are placed inside the selection only.")
+      end
+    else
+      ImGui.TextColored(ctx, 0xE05050FF, rerr)
+    end
+  end
+  -- Through the helper so the key appears as a string literal for the coverage scan.
+  checkbox("Ignore time selection", "ignore_time_selection")
+
   if not ST.F then return end
 
   ImGui.SeparatorText(ctx, "Gate")
   local availw = ImGui.GetContentRegionAvail(ctx)
   draw_histogram(availw, 90)
+
   checkbox("Auto", "gate_auto")
   if cfg.gate_auto then
     ImGui.SameLine(ctx)
@@ -418,7 +471,7 @@ local function frame()
   end
   ImGui.SameLine(ctx)
   if ImGui.Button(ctx, "Apply", 120, 0) then
-    local n = Apply.run(ST.item, ST.spans, cfg)
+    local n = Apply.run(ST.item, ST.spans, cfg, ST.F and ST.F.origin)
     ST.status = string.format("Created %d items.", n)
     ST.F = nil   -- the item is gone; force a re-analyze
   end

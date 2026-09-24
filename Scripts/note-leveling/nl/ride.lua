@@ -56,7 +56,7 @@ end
 -- Returns { targets = { {F, geo, item, take, R}, ... }, refs = {...} }, where
 -- each target's R is the mixed reference level track laid on that target's own
 -- frame grid, so index i of R and index i of F are the same instant.
-function M.analyse(sel, cfg, ensure_kernel, cache)
+function M.analyse(sel, cfg, ensure_kernel, cache, range)
   return function()
     if #sel.target == 0 then return nil, "No target clip" end
 
@@ -69,7 +69,7 @@ function M.analyse(sel, cfg, ensure_kernel, cache)
 
     local targets = {}
     for i, e in ipairs(sel.target) do
-      local geo = Analyze.geometry(e.take)
+      local geo = Analyze.geometry(e.take, range)
       local k, kerr = ensure_kernel(geo.nchan, geo.rate)
       if not k then return nil, kerr end
 
@@ -85,7 +85,7 @@ function M.analyse(sel, cfg, ensure_kernel, cache)
 
     local refs = {}
     for i, e in ipairs(sel.refs) do
-      local rgeo = Analyze.geometry(e.take)
+      local rgeo = Analyze.geometry(e.take, range)
       local rk, rerr = ensure_kernel(rgeo.nchan, rgeo.rate)
       if not rk then return nil, rerr end
       local a = tfrac + (1 - tfrac) * (i - 1) / nref

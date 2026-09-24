@@ -1,118 +1,110 @@
 -- @noindex
--- Note Leveling -- which of the selected clips is the target.
+-- Note Leveling -- which track is the source, and which are the arrangement.
 --
--- The rider takes several clips at once: the references it measures the
--- arrangement from, and the one target it rides. The brief asked for "the
--- first selected clips are the reference, the last is the target", and that
--- rule cannot be implemented as written, for a reason worth recording rather
--- than working around silently:
+-- The source (the vocal being levelled and ridden) and up to three background tracks are each
+-- chosen explicitly, from a dropdown or by typing a track name (see nl/trackpick.lua). EVERY
+-- audio clip on a chosen track is used; nothing needs selecting, and the time selection is not
+-- consulted.
 --
---   REAPER does not expose item SELECTION ORDER. GetSelectedMediaItem walks
---   the project's items in track-then-position order and hands them back in
---   that order however they were clicked. There is no "last selected item" to
---   ask for -- GetLastTouchedTrack exists, its item equivalent does not.
+-- Three background tracks because that is what a loudness reference usually is -- drums, bass,
+-- guitars -- and because `reference.mix` already sums them correctly: it mixes in POWER, not in
+-- dB, which is the right model for sources that are not correlated with each other. Slots may
+-- be left empty; an empty slot contributes nothing rather than silence, and "no reference clip
+-- reaches here" stays distinguishable from "the arrangement is quiet here".
 --
--- So the rule here is positional instead, and chosen to mean the same thing in
--- the session the feature was designed against: **the target is the selected
--- audio on the highest-numbered track, and everything above it is reference.**
--- References on 1 and 2, target on 3 resolves exactly as intended, it survives
--- being re-selected in any order, and -- the reason it is the rule rather than
--- a heuristic -- it is deterministic from project state alone, which is what a
--- headless run needs. cfg.rider_target_track overrides it with an explicit
--- 1-based track number for the case where the layout says otherwise.
---
--- All selected audio on the target track is ridden, not just one clip: a
--- comped lead vocal is normally a row of clips, and riding one of them would
--- be a strange thing to offer.
+-- This replaced a positional rule -- "the target is the selected audio on the highest-numbered
+-- track, everything above it is reference" -- which existed because REAPER does not expose item
+-- SELECTION ORDER: GetSelectedMediaItem walks track-then-position and hands items back in that
+-- order however they were clicked, and there is no item equivalent of GetLastTouchedTrack. That
+-- constraint is real and still worth knowing; the rule it forced was the problem. It tied the
+-- roles to where tracks happened to sit, re-selecting clips could change what the script did,
+-- and a backing track below the vocal could not be used at all. Naming the tracks says what is
+-- meant, survives reordering, and reads the same in a headless run.
+
+local Trackpick = require "nl.trackpick"
 
 local M = {}
 
-local function audio_take(item)
-  local take = reaper.GetActiveTake(item)
-  if take and not reaper.TakeIsMIDI(take) then return take end
-  return nil
-end
+M.SOURCE = "source"
+M.BACKGROUND = { "bg1", "bg2", "bg3" }
 
 -- Returns a table:
 --   { target = { {item, take}, ... }, refs = { {item, take}, ... },
---     track = <MediaTrack>, track_num = <1-based>, err = <string or nil> }
--- `err` is set rather than raised, because every caller of this -- the panel
--- every frame, the headless action once -- wants to report it, not to stop.
+--     track = <MediaTrack>, track_num = <1-based>, ref_tracks = <n>,
+--     tracks = <every track, for the panel's dropdowns>, err = <string or nil> }
+-- `err` is set rather than raised, because every caller of this -- the panel every frame, the
+-- headless action once -- wants to report it, not to stop.
 function M.resolve(cfg)
-  local by_num, nums = {}, {}
-  local n = reaper.CountSelectedMediaItems(0)
-  for i = 0, n - 1 do
-    local item = reaper.GetSelectedMediaItem(0, i)
-    local take = audio_take(item)
-    if take then
-      local tr = reaper.GetMediaItemTrack(item)
-      local num = math.floor(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"))
-      if not by_num[num] then by_num[num] = { track = tr, items = {} }
-                              nums[#nums + 1] = num end
-      local t = by_num[num].items
-      t[#t + 1] = { item = item, take = take }
-    end
-  end
+  local out = { target = {}, refs = {}, ref_tracks = 0, bg = {}, bg_err = {} }
+  if not reaper then out.err = "no REAPER"; return out end
 
-  local out = { target = {}, refs = {}, nsel = n }
-  if #nums == 0 then
-    out.err = "Select the reference clips and the target clip."
+  out.tracks = Trackpick.tracks()
+  out.source_track, out.source_err = Trackpick.resolve(out.tracks, cfg, M.SOURCE)
+
+  if not out.source_track then
+    out.err = out.source_err
+      or (Trackpick.is_set(cfg, M.SOURCE)
+            and "The source track is set but could not be found."
+            or "Pick the source track -- the vocal to level.")
     return out
   end
-  table.sort(nums)
 
-  local want = math.floor(cfg.rider_target_track or 0)
-  local tnum
-  if want > 0 then
-    if not by_num[want] then
-      out.err = string.format(
-        "No selected audio on track %d, which is set as the target track.", want)
-      return out
-    end
-    tnum = want
-  else
-    tnum = nums[#nums]
+  out.target = Trackpick.items(out.source_track.track)
+  if #out.target == 0 then
+    out.err = string.format("%s holds no audio.", out.source_track.name)
+    return out
   end
 
-  out.track, out.track_num = by_num[tnum].track, tnum
-  out.target = by_num[tnum].items
-  for _, num in ipairs(nums) do
-    if num ~= tnum then
-      for _, e in ipairs(by_num[num].items) do out.refs[#out.refs + 1] = e end
+  out.track = out.source_track.track
+  out.track_num = out.source_track.num
+
+  -- Background slots. A slot pointing at the source is refused rather than quietly dropped:
+  -- riding a vocal against its own loudness is a fixed point, not a mix decision, and a silent
+  -- drop would look like the slot simply had no effect.
+  local seen = {}
+  for i, prefix in ipairs(M.BACKGROUND) do
+    local t, err = Trackpick.resolve(out.tracks, cfg, prefix)
+    out.bg[i], out.bg_err[i] = t, err
+    if t then
+      if t.guid == out.source_track.guid then
+        out.bg_err[i] = "that is the source track"
+      elseif seen[t.guid] then
+        out.bg_err[i] = "already used by another slot"
+      else
+        seen[t.guid] = true
+        local items = Trackpick.items(t.track)
+        if #items == 0 then
+          out.bg_err[i] = "holds no audio"
+        else
+          out.ref_tracks = out.ref_tracks + 1
+          for _, e in ipairs(items) do out.refs[#out.refs + 1] = e end
+        end
+      end
     end
   end
 
-  -- No reference is not an error. The target-leveling term still works on its
-  -- own -- it is a note-stepped level rider against the take's own median --
-  -- and saying so is more useful than refusing.
-  out.ref_tracks = #nums - 1
+  -- No background is not an error. The target-levelling term still works on its own -- it is a
+  -- note-stepped level rider against the take's own median -- and saying so is more useful than
+  -- refusing.
   return out
 end
 
--- One line for the panel and the headless log, so what the script decided is
--- always visible rather than inferred from the result.
+-- One line for the panel and the headless log, so what the script decided is always visible
+-- rather than inferred from the result.
 function M.describe(sel)
   if sel.err then return sel.err end
-  local tracks = {}
-  for _, e in ipairs(sel.refs) do
-    local tr = reaper.GetMediaItemTrack(e.item)
-    local _, nm = reaper.GetSetMediaTrackInfo_String(tr, "P_NAME", "", false)
-    local num = math.floor(reaper.GetMediaTrackInfo_Value(tr, "IP_TRACKNUMBER"))
-    tracks[num] = nm ~= "" and nm or ("track " .. num)
-  end
-  local names = {}
-  for num, nm in pairs(tracks) do names[#names + 1] = { num, nm } end
-  table.sort(names, function(a, b) return a[1] < b[1] end)
-  local list = {}
-  for _, e in ipairs(names) do list[#list + 1] = e[2] end
 
-  local _, tname = reaper.GetSetMediaTrackInfo_String(sel.track, "P_NAME", "", false)
-  if tname == "" then tname = "track " .. sel.track_num end
-  if #list == 0 then
-    return string.format("No reference -- riding %s against itself.", tname)
+  local tname = sel.source_track and sel.source_track.name or "?"
+  local names = {}
+  for i, t in ipairs(sel.bg) do
+    if t and not sel.bg_err[i] then names[#names + 1] = t.name end
+  end
+
+  if #names == 0 then
+    return string.format("No background -- riding %s against itself.", tname)
   end
   return string.format("%d clip%s from %s  ->  %d on %s",
-    #sel.refs, #sel.refs == 1 and "" or "s", table.concat(list, ", "),
+    #sel.refs, #sel.refs == 1 and "" or "s", table.concat(names, ", "),
     #sel.target, tname)
 end
 

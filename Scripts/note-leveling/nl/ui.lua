@@ -32,6 +32,8 @@ local Rider   = require "nl.rider"
 local Octave  = require "nl.octave"
 local Ride    = require "nl.ride"
 local Select  = require "nl.select"
+local Trackpick = require "nl.trackpick"
+local Timesel   = require "nl.timesel"
 
 local M = {}
 
@@ -272,7 +274,36 @@ local function analyse(after)
   local key = Ride.cache_key(sel, cfg)
   ST.status, ST.ride_status = "Analysing...", "Analysing..."
 
-  start_job("Analysing", Ride.analyse(sel, cfg, ensure_kernel, nil),
+  -- Resolve the range ONCE, when the job starts: the write must agree with the analysis even
+  -- if the selection is moved while it runs. Envelopes, not takes, so nothing is split --
+  -- narrowing simply means the ride is measured and written over the selection only.
+  -- The range is derived from the clip the selection is actually OVER, not from the first clip
+  -- on the track: a source track normally holds a row of clips and a selection covers one
+  -- phrase, so `target[1]` is usually one the selection misses entirely.
+  local anchor, aerr = Timesel.anchor_clip(sel.target, cfg.ignore_time_selection)
+  if not anchor and aerr then ST.status, ST.ride_status = aerr, aerr return end
+
+  local range, rerr = anchor and Timesel.for_item(anchor.item, cfg.ignore_time_selection) or nil
+  if anchor and not range then ST.status, ST.ride_status = rerr, rerr return end
+  ST.range = range
+
+  -- Clips the range does not touch are not an error and not something to read -- they are
+  -- outside the work. Analysing one of them produced "Item is too short to analyse" and
+  -- stopped the whole run.
+  if range and range.from_selection then
+    sel = { target = Timesel.clips_in_range(sel.target, range),
+            refs   = Timesel.clips_in_range(sel.refs, range),
+            track  = sel.track, track_num = sel.track_num,
+            source_track = sel.source_track, bg = sel.bg, bg_err = sel.bg_err,
+            tracks = sel.tracks, ref_tracks = sel.ref_tracks }
+    if #sel.target == 0 then
+      local msg = "The time selection does not overlap any clip on the source track."
+      ST.status, ST.ride_status = msg, msg
+      return
+    end
+  end
+
+  start_job("Analysing", Ride.analyse(sel, cfg, ensure_kernel, nil, range),
     function(data, jerr)
       if not data then
         local msg = (jerr == "cancelled") and "Cancelled." or "Failed."
@@ -865,17 +896,6 @@ local function slider(label, key, lo, hi, fmt)
   return rv
 end
 
--- Same contract as slider: the key is named once, as a string, so the panel
--- coverage scan in headless.lua can see it.
-local function input_int(label, key, lo)
-  local rv, v = ImGui.InputInt(ctx, label, cfg[key], 1, 1)
-  if rv then
-    cfg[key] = math.max(lo or 0, math.floor(v))
-    Config.save(cfg)
-  end
-  return rv
-end
-
 local function checkbox(label, key)
   local rv, v = ImGui.Checkbox(ctx, label, cfg[key])
   if rv then cfg[key] = v Config.save(cfg) end
@@ -978,22 +998,20 @@ local function controls()
   ImGui.TextColored(ctx, COL_GAIN, "Apply clears the whole")
   ImGui.TextColored(ctx, COL_GAIN, "Pre-FX volume envelope.")
 
-  -- Say which clips this will touch, in the same words the Rider tab uses.
-  -- With a rider-shaped selection -- backing tracks selected alongside the
-  -- vocal -- "3 items selected" was actively misleading: it was true, and it
-  -- was not what the button was about to do.
+  -- Say which clips this will touch, in the same words the Rider tab uses. Note levelling
+  -- works on the source track alone; the background tracks exist for the rider and are read
+  -- but not written, so saying so here stops "why did nothing happen to the guitars".
   local sel = Select.resolve(cfg)
   if sel.err then
     ImGui.TextDisabled(ctx, sel.err)
   else
-    local _, tname = reaper.GetSetMediaTrackInfo_String(sel.track, "P_NAME", "", false)
-    if tname == "" then tname = "track " .. sel.track_num end
     ImGui.TextDisabled(ctx, string.format("%d clip%s on %s",
-      #sel.target, #sel.target == 1 and "" or "s", tname))
-    if #sel.refs > 0 then
+      #sel.target, #sel.target == 1 and "" or "s",
+      sel.source_track and sel.source_track.name or "the source track"))
+    if sel.ref_tracks > 0 then
       ImGui.TextDisabled(ctx, string.format(
-        "%d other selected clip%s ignored here.",
-        #sel.refs, #sel.refs == 1 and " is" or "s are"))
+        "%d background track%s read for the rider, not written here.",
+        sel.ref_tracks, sel.ref_tracks == 1 and "" or "s"))
     end
   end
 
@@ -1016,16 +1034,21 @@ end
 local function ride_controls()
   ImGui.PushItemWidth(ctx, -120)
 
-  ImGui.SeparatorText(ctx, "Clips")
-  -- Re-read every frame, not cached. The panel is a window the user clicks
-  -- past, and a rider whose idea of "the target" was whatever happened to be
-  -- selected when it opened would be a trap.
-  ImGui.TextWrapped(ctx, Select.describe(Select.resolve(cfg)))
+  ImGui.SeparatorText(ctx, "Background")
+  -- The source picker is in the header, above the tabs. Reuse the resolve it already did:
+  -- doing it again here would walk every item on all four tracks a second time, every frame.
+  local sel = ST.header_sel or Select.resolve(cfg)
+  local function role_changed() Config.save(cfg) end
+
+  for i, prefix in ipairs(Select.BACKGROUND) do
+    Trackpick.widget(ImGui, ctx, "Background " .. i, cfg, prefix,
+                     sel.tracks or {}, sel.bg[i], sel.bg_err[i], role_changed)
+  end
+  ImGui.TextDisabled(ctx, "Summed in power into one loudness reference. Leave slots empty.")
+
+  ImGui.TextWrapped(ctx, Select.describe(sel))
+  ImGui.TextDisabled(ctx, "Every clip on a chosen track is used -- nothing needs selecting.")
   ImGui.TextDisabled(ctx, "Analyse reads all of them and fills in both tabs.")
-  ImGui.TextDisabled(ctx, "The target is the selected audio on the")
-  ImGui.TextDisabled(ctx, "highest-numbered track; the rest is reference.")
-  input_int("Target track", "rider_target_track", 0)
-  ImGui.TextDisabled(ctx, "0 = auto. Set it for a headless run.")
 
   ImGui.SeparatorText(ctx, "Balance")
   slider("Offset", "rider_offset_db", -24, 24, "%.1f dB")
@@ -1084,10 +1107,10 @@ local function ride_controls()
   ImGui.TextColored(ctx, COL_GAIN, "Clears the fader envelope over these")
   ImGui.TextColored(ctx, COL_GAIN, "clips only, not the whole track.")
 
-  -- Gated on the selection, not on having analysed: the write asks for an
-  -- analysis and does its work from inside the completion, so pressing it
-  -- first is a longer wait rather than an error.
-  local sel = Select.resolve(cfg)
+  -- Gated on the roles resolving, not on having analysed: the write asks for an analysis and
+  -- does its work from inside the completion, so pressing it first is a longer wait rather
+  -- than an error. `sel` is the one resolved at the top of this panel -- resolving again would
+  -- walk every item on all four tracks a second time, every frame.
   begin_disabled(sel.err ~= nil or busy())
   if ImGui.Button(ctx, "Write the ride", -1, 0) then ride_apply() end
   end_disabled()
@@ -1165,6 +1188,41 @@ local function frame()
       ST.tab == "rider" and ST.ride_status or ST.status))
   else
     ImGui.Text(ctx, ST.tab == "rider" and ST.ride_status or ST.status)
+  end
+
+  -- The source picker lives out here, above the tab bar: both tabs work on the source clips,
+  -- and the rider's control column is behind a tab AND a checkbox. The background slots stay
+  -- in that column, because only the rider reads them.
+  do
+    local hsel = Select.resolve(cfg)
+    ST.header_sel = hsel
+    ImGui.PushItemWidth(ctx, 200)
+    Trackpick.widget(ImGui, ctx, "Source track", cfg, "source",
+                     hsel.tracks or {}, hsel.source_track, hsel.source_err,
+                     function() Config.save(cfg) end)
+    ImGui.PopItemWidth(ctx)
+    if hsel.err then ImGui.TextColored(ctx, COL_RED, hsel.err) end
+
+    -- The SAME anchor the run uses. Asking target[1] instead reported "the time selection
+    -- does not overlap the item" while the run, anchored correctly, went on to analyse and
+    -- write the right thing -- a panel contradicting its own behaviour.
+    local first, ferr = Timesel.anchor_clip(hsel.target, cfg.ignore_time_selection)
+    ImGui.SameLine(ctx)
+    if not first then
+      if ferr then ImGui.TextColored(ctx, COL_RED, ferr) end
+    else
+      local pos = reaper.GetMediaItemInfo_Value(first.item, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(first.item, "D_LENGTH")
+      local r, rerr = Timesel.for_item(first.item, cfg.ignore_time_selection)
+      if r then
+        ImGui.TextDisabled(ctx, Timesel.describe(r, pos, len))
+      else
+        ImGui.TextColored(ctx, COL_RED, rerr)
+      end
+    end
+    -- Through the helper, not an inline Checkbox: the key has to appear as a string literal
+    -- or the panel-coverage scan in headless.lua cannot see that this setting has a control.
+    checkbox("Ignore time selection", "ignore_time_selection")
   end
 
   if busy() then

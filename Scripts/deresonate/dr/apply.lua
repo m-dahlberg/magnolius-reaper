@@ -19,6 +19,8 @@
 -- lane. Peak building is not a project edit, so it happens BEFORE the undo
 -- block and outside PreventUIRefresh.
 
+local Timesel = require "dr.timesel"
+
 local M = {}
 
 M.COPY_NUM = { "D_VOL", "D_PAN" }
@@ -36,7 +38,9 @@ local function build_peaks(src)
 end
 
 -- `results` is a list of { item, take, render, stamp }.
-function M.run(results, cfg)
+-- `range` narrows the edit to a time selection: each item is split at its edges and only the
+-- middle piece is touched, so nothing outside the selection is re-rendered.
+function M.run(results, cfg, range)
   local sources = {}
   for i, r in ipairs(results) do
     local src = reaper.PCM_Source_CreateFromFile(r.render.path)
@@ -52,7 +56,20 @@ function M.run(results, cfg)
   local err, n = nil, 0
   for i, r in ipairs(results) do
     local old, src = r.take, sources[i]
-    local nt = cfg.new_take and reaper.AddTakeToMediaItem(r.item) or old
+
+    -- Narrow the item first, so the render lands on a piece whose length matches it.
+    local target = r.item
+    if range and not range.whole then
+      local middle, serr = Timesel.split_to_range(r.item, range.t0, range.t1)
+      if middle then
+        target = middle
+        old = reaper.GetActiveTake(middle) or old
+      else
+        err = err or serr
+      end
+    end
+
+    local nt = cfg.new_take and reaper.AddTakeToMediaItem(target) or old
     if not nt then
       err = err or "could not add a take"
     else
@@ -69,8 +86,8 @@ function M.run(results, cfg)
       reaper.GetSetMediaItemTakeInfo_String(nt, "P_NAME", (nm or "") .. " [deresonated]", true)
       reaper.GetSetMediaItemTakeInfo_String(nt, "P_EXT:deresonate", r.stamp or "", true)
       if cfg.select_take and cfg.new_take then
-        reaper.SetMediaItemInfo_Value(r.item, "I_CURTAKE",
-          reaper.CountTakes(r.item) - 1)
+        reaper.SetMediaItemInfo_Value(target, "I_CURTAKE",
+          reaper.CountTakes(target) - 1)
       end
       n = n + 1
     end

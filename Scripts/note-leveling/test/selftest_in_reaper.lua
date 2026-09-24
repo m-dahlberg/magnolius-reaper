@@ -425,6 +425,10 @@ end
 do
   local UI = require "nl.ui"
 
+  -- The `changed` passes below report every control as edited, and the panel persists on edit,
+  -- so without this a run would leave a stub track GUID saved as the user's real source track.
+  local saved_roles = UIFrame.snapshot_roles(Config, Config.EXT_SECTION)
+
   local _, err, log = UIFrame.run(UI, script_dir)
   ok(err == nil, "the panel renders a frame with nothing analysed",
      tostring(err))
@@ -545,6 +549,8 @@ do
        "clip arrows pressed", tostring(err7))
     ok(log7.dis == 0, "and still leaves BeginDisabled balanced", tostring(log7.dis))
   end
+
+  UIFrame.restore_roles(saved_roles, Config.EXT_SECTION)
 end
 
 report()

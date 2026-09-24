@@ -19,6 +19,8 @@ local Kernel    = require "nl.kernel"
 local Reference = require "nl.reference"
 local Rider     = require "nl.rider"
 local Octave    = require "nl.octave"
+local Select    = require "nl.select"
+local Trackpick = require "nl.trackpick"
 
 local pass, fail = 0, 0
 
@@ -34,6 +36,11 @@ end
 local function near(a, b, tol, name)
   ok(a and math.abs(a - b) <= tol, name,
      string.format("%s vs %s", tostring(a), tostring(b)))
+end
+
+local function eq(got, want, name)
+  ok(got == want, name,
+     string.format("got %s, want %s", tostring(got), tostring(want)))
 end
 
 -- Anything that stops the run counts as a failure, not as "nothing to check".
@@ -412,6 +419,54 @@ do
   near(Level.value_at(pts, 0.5), -6, 1e-9, "and reaches its gain")
 end
 
+----------------------------------------------------------------- track roles
+
+do
+  -- find() is pure: it takes the track list rather than asking REAPER for it, which is what
+  -- makes the resolution order testable at all.
+  local tracks = {
+    { name = "Lead Vox", guid = "{A}", num = 1 },
+    { name = "Drums",    guid = "{B}", num = 2 },
+    { name = "Bass",     guid = "{C}", num = 3 },
+  }
+
+  eq(Trackpick.find(tracks, "", "{B}", "").guid, "{B}", "found by guid")
+  eq(Trackpick.find(tracks, "", "", "Bass").guid, "{C}", "found by remembered name")
+  eq(Trackpick.find(tracks, "Drums", "{A}", "Lead Vox").guid, "{B}",
+     "a typed name overrides the remembered guid")
+  eq(Trackpick.find(tracks, "DRUMS", "", "").guid, "{B}", "name match ignores case")
+  ok(Trackpick.find(tracks, "", "{gone}", "") == nil, "a stale guid resolves to nothing")
+  ok(Trackpick.find(tracks, "", "", "") == nil, "an unset role resolves to nothing")
+
+  -- The important one: a typed name that matches nothing must be an ERROR, not a quiet
+  -- fall-back to the guid. Falling back would process the wrong track and say nothing.
+  local t, err = Trackpick.find(tracks, "Nope", "{A}", "Lead Vox")
+  ok(t == nil and err ~= nil, "a typed name matching nothing is an error, not a fallback")
+
+  -- A renamed track still resolves by guid, and a rebuilt one by name. The two halves of why
+  -- both are stored.
+  local renamed = { { name = "Lead Vox 2", guid = "{A}", num = 1 } }
+  eq(Trackpick.find(renamed, "", "{A}", "Lead Vox").guid, "{A}", "guid survives a rename")
+  local rebuilt = { { name = "Lead Vox", guid = "{NEW}", num = 1 } }
+  eq(Trackpick.find(rebuilt, "", "{A}", "Lead Vox").guid, "{NEW}",
+     "name survives the track being rebuilt with a new guid")
+
+  local c = Config.new()
+  ok(not Trackpick.is_set(c, "source"), "a fresh config has no source role set")
+  c.source_guid = "{A}"
+  ok(Trackpick.is_set(c, "source"), "a guid counts as set")
+  Trackpick.clear(c, "source")
+  ok(not Trackpick.is_set(c, "source"), "clear() unsets all three")
+
+  eq(#Select.BACKGROUND, 3, "three background slots")
+  local seen = {}
+  for _, p in ipairs(Select.BACKGROUND) do
+    ok(not seen[p], "background prefixes are distinct: " .. p)
+    ok(p ~= Select.SOURCE, "a background prefix is not the source prefix")
+    seen[p] = true
+  end
+end
+
 -------------------------------------------------------------- panel coverage
 
 do
@@ -425,15 +480,37 @@ do
   else
     local usrc = fh:read("a")
     fh:close()
+
+    -- A track role is three settings behind ONE control, and two of the four prefixes reach
+    -- the widget through Select.BACKGROUND rather than as literals, so there is nothing to
+    -- grep for. Expand the roles the select module declares instead, and assert the panel
+    -- actually draws them -- otherwise this would excuse a picker that was deleted.
+    local covered = {}
+    local roles = { Select.SOURCE }
+    for _, prefix in ipairs(Select.BACKGROUND) do roles[#roles + 1] = prefix end
+    ok(usrc:find("Trackpick.widget", 1, true) ~= nil,
+       "the panel draws the track pickers")
+    for _, prefix in ipairs(roles) do
+      for _, k in ipairs(Trackpick.sig_keys(prefix)) do covered[k] = true end
+    end
+
     local hidden = {}
     for k in pairs(Config.defaults) do
-      if not usrc:find('"' .. k .. '"', 1, true) then
+      if not covered[k] and not usrc:find('"' .. k .. '"', 1, true) then
         hidden[#hidden + 1] = k
       end
     end
     table.sort(hidden)
     ok(#hidden == 0, "every default has a panel control",
        table.concat(hidden, ", "))
+
+    -- And the other direction: every key a role declares must be a real default, so renaming
+    -- one in config.lua without renaming it in trackpick.lua is caught.
+    for _, prefix in ipairs(roles) do
+      for _, k in ipairs(Trackpick.sig_keys(prefix)) do
+        ok(Config.defaults[k] ~= nil, "role key is a real default: " .. k)
+      end
+    end
   end
 end
 

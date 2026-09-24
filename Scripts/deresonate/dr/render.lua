@@ -41,9 +41,9 @@ function M.output_path(take, cfg, avoid)
 end
 
 -- Coroutine body. Drive with Analyze.drive or the panel's step_job.
-function M.run(take, cfg, k, filters, t60_of, path, frac0, frac1)
+function M.run(take, cfg, k, filters, t60_of, path, frac0, frac1, range)
   return function()
-    local geo = Analyze.geometry(take)
+    local geo = Analyze.geometry(take, range)
     if geo.nchan ~= k.nchan then
       return nil, string.format(
         "the kernel was built for %d channel(s) and this take has %d",
@@ -52,7 +52,8 @@ function M.run(take, cfg, k, filters, t60_of, path, frac0, frac1)
     local aa = reaper.CreateTakeAudioAccessor(take)
     if not aa then return nil, "could not open an audio accessor" end
     local span = math.min(reaper.GetAudioAccessorEndTime(aa)
-                          - reaper.GetAudioAccessorStartTime(aa), geo.item_len)
+                          - reaper.GetAudioAccessorStartTime(aa),
+                          geo.acc_len or geo.item_len)
     local rate  = geo.rate
     local total = math.floor(span * rate)
     local lat   = Config.latency(cfg)
@@ -94,7 +95,7 @@ function M.run(take, cfg, k, filters, t60_of, path, frac0, frac1)
               written = written + (to - from + 1)
             end
           end
-        end, frac0 or 0, frac1 or 1)
+        end, frac0 or 0, frac1 or 1, nil, geo.t0)
     end)
 
     reaper.DestroyAudioAccessor(aa)

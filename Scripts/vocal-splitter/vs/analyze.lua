@@ -110,7 +110,11 @@ end
 --
 -- Frame times are ITEM-relative PROJECT seconds -- see the geometry note below
 -- -- so apply.lua only has to add the item position to place an edit.
-function M.run(take, cfg, ImGui, ctx, script_dir, progress_cb)
+-- `range` is an optional time-selection range in PROJECT seconds (see vs/timesel.lua). The
+-- accessor is anchored at 0 at the start of the ITEM, so the analysed span starts at
+-- `range.t0 - item_pos` -- `t0` below -- and `origin` is where frame 0 sits in PROJECT time,
+-- which is what the split points are measured from.
+function M.run(take, cfg, ImGui, ctx, script_dir, progress_cb, range)
   local func, err = compile_kernel(ImGui, ctx, script_dir)
   if not func then return nil, err end
 
@@ -118,6 +122,15 @@ function M.run(take, cfg, ImGui, ctx, script_dir, progress_cb)
   local playrate = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE")
   if playrate <= 0 then playrate = 1 end
   local item_len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local item_pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+
+  -- The true OVERLAP of the item with the range; a span of 0 means no overlap.
+  local t0, span_len = 0, item_len
+  if range and not range.whole then
+    local a = math.max(item_pos, range.t0)
+    local b = math.min(item_pos + item_len, range.t1)
+    if b > a then t0, span_len = a - item_pos, b - a else t0, span_len = 0, 0 end
+  end
 
   local src   = reaper.GetMediaItemTake_Source(take)
   local nchan = math.max(1, reaper.GetMediaSourceNumChannels(src))
@@ -146,7 +159,7 @@ function M.run(take, cfg, ImGui, ctx, script_dir, progress_cb)
   -- Neither error is visible at playrate 1, where every one of these is the
   -- same number. `acc_len` and `acc_frame_dur` are named for the accessor so
   -- they cannot quietly be read as source quantities again.
-  local acc_len = item_len
+  local acc_len = span_len
   local total_samples = math.floor(acc_len * rate + 0.5)
   local total_frames  = math.floor(total_samples / hop)
   if total_frames < 4 then return nil, "Item too short to analyse" end
@@ -187,6 +200,10 @@ function M.run(take, cfg, ImGui, ctx, script_dir, progress_cb)
     acc_frame_dur = hop / rate,              -- project (= item = accessor) s
     src_frame_dur = hop / rate * playrate,   -- source file seconds
     playrate = playrate, acc_len = acc_len, item_len = item_len, nchan = nchan,
+    -- Where frame 0 sits, in take seconds and in project time. Split points are measured from
+    -- origin, so a run over a time selection cuts inside it rather than at the item start.
+    t0 = t0, item_pos = item_pos, origin = item_pos + t0, range = range,
+    total_samples = math.floor(acc_len * rate + 0.5),
     level_db = {}, sib_ratio = {}, voice_ratio = {},
     crest = {}, zcr = {}, slope_db = {}, ms = {},
   }
@@ -196,7 +213,7 @@ function M.run(take, cfg, ImGui, ctx, script_dir, progress_cb)
     while done < total_frames do
       local nf = math.min(block_frames, total_frames - done)
       local nsamp = nf * hop
-      local t = (done * hop) / rate    -- accessor time, i.e. item-relative
+      local t = t0 + (done * hop) / rate  -- accessor time, i.e. item-relative
 
       inbuf.clear(0)
       reaper.GetAudioAccessorSamples(aa, rate, nchan, t, nsamp, inbuf)

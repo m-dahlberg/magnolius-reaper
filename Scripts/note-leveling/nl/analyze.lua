@@ -88,7 +88,13 @@ local function source_format(src)
   return rate, math.max(1, nchan), false
 end
 
-function M.geometry(take)
+-- `range` is an optional time-selection range in PROJECT seconds (see nl/timesel.lua).
+--
+-- `origin` is the one to reach for downstream: it is where frame 0 sits in PROJECT time, which
+-- is item_pos with no range and item_pos + t0 with one. Everything that turns a frame index
+-- into a project time -- the envelope writer, the reference mixer -- has to use it, or a ride
+-- measured over a selection is written at the start of the item instead.
+function M.geometry(take, range)
   local item = reaper.GetMediaItemTake_Item(take)
   local src  = reaper.GetMediaItemTake_Source(take)
 
@@ -97,12 +103,29 @@ function M.geometry(take)
   local rate, nchan, rate_known = source_format(src)
 
   local item_len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+  local item_pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+
+  -- The true OVERLAP of the item with the range, not "t0 clamped to 0 then the range's
+  -- length": an item lying entirely after the range has t0 = 0 under that reading and would be
+  -- read from its own start for the range's duration. A span of 0 means no overlap, which the
+  -- callers treat as nothing to do rather than as an error.
+  local t0, span = 0, item_len
+  if range and not range.whole then
+    local a = math.max(item_pos, range.t0)
+    local b = math.min(item_pos + item_len, range.t1)
+    if b > a then t0, span = a - item_pos, b - a else t0, span = 0, 0 end
+  end
 
   return {
     item = item, playrate = playrate, rate = rate, nchan = nchan,
     rate_known = rate_known,
     item_len = item_len,
-    item_pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
+    item_pos = item_pos,
+    t0 = t0, acc_len = span, range = range,
+    -- Frame-based stages do not need this; it is here so the geometry reads the same in every
+    -- script and the shared time-selection suite can check one shape.
+    total_samples = math.floor(span * rate + 0.5),
+    origin = item_pos + t0,
     -- Only the take markers need this. They are stored in SOURCE position,
     -- which is the one coordinate system in this script that is neither take
     -- time nor project time.
@@ -191,8 +214,8 @@ end
 -- frac0/frac1 scale the progress this run reports into a caller's own range.
 -- The rider's job runs the target and then several reference clips, and a
 -- progress bar that restarted at zero four times would be worse than none.
-function M.run(take, cfg, k, geo, frac0, frac1)
-  geo = geo or M.geometry(take)
+function M.run(take, cfg, k, geo, frac0, frac1, range)
+  geo = geo or M.geometry(take, range)
   frac0, frac1 = frac0 or 0, frac1 or 1
   local function at(f) return frac0 + (frac1 - frac0) * f end
   local hop_s = cfg.hop_ms / 1000
@@ -204,8 +227,12 @@ function M.run(take, cfg, k, geo, frac0, frac1)
   -- span is the item length, but taking it from the accessor means the one
   -- assumption this stage rests on is checked against the thing that makes it
   -- true, every run.
-  local a0 = reaper.GetAudioAccessorStartTime(aa)
-  local span = math.min(reaper.GetAudioAccessorEndTime(aa) - a0, geo.item_len)
+  -- The base every read is measured from. A take accessor starts at 0, so with no time
+  -- selection this is 0 and nothing changes; with one it is where the selection starts, in
+  -- take seconds. The span below then caps at whatever is left from there.
+  local a0 = reaper.GetAudioAccessorStartTime(aa) + (geo.t0 or 0)
+  local span = math.min(reaper.GetAudioAccessorEndTime(aa) - a0,
+                        geo.acc_len or geo.item_len)
 
   local total = math.floor(span / hop_s)
   if total < 8 then
@@ -219,7 +246,7 @@ function M.run(take, cfg, k, geo, frac0, frac1)
     -- Take seconds. Adding item_pos gives project time; there is no playrate
     -- factor, because the accessor already applied it.
     span = span, item_len = geo.item_len,
-    playrate = geo.playrate, item_pos = geo.item_pos,
+    playrate = geo.playrate, item_pos = geo.origin or geo.item_pos,
     -- ms/level_db are broadband, and are what the per-note leveling measures.
     -- bp_ms/bp_db are the same frames through the vocal band, and are what the
     -- rider measures -- on the target and, via M.run_ref, on the reference.
@@ -282,20 +309,24 @@ end
 -- Returns a frame table carrying bp_ms on the same hop grid as the target's,
 -- plus the item position, which is what lets several references at different
 -- places on the timeline be mixed onto one project-time axis.
-function M.run_ref(take, cfg, k, geo, frac0, frac1)
-  geo = geo or M.geometry(take)
+function M.run_ref(take, cfg, k, geo, frac0, frac1, range)
+  geo = geo or M.geometry(take, range)
   local hop_s = cfg.hop_ms / 1000
 
   local aa = reaper.CreateTakeAudioAccessor(take)
   if not aa then return nil, "Could not create audio accessor" end
 
-  local a0 = reaper.GetAudioAccessorStartTime(aa)
-  local span = math.min(reaper.GetAudioAccessorEndTime(aa) - a0, geo.item_len)
+  -- The base every read is measured from. A take accessor starts at 0, so with no time
+  -- selection this is 0 and nothing changes; with one it is where the selection starts, in
+  -- take seconds. The span below then caps at whatever is left from there.
+  local a0 = reaper.GetAudioAccessorStartTime(aa) + (geo.t0 or 0)
+  local span = math.min(reaper.GetAudioAccessorEndTime(aa) - a0,
+                        geo.acc_len or geo.item_len)
   local total = math.floor(span / hop_s)
 
   local R = {
     n = total, hop_s = hop_s, span = span,
-    item_pos = geo.item_pos, playrate = geo.playrate,
+    item_pos = geo.origin or geo.item_pos, playrate = geo.playrate,
     rate = geo.rate, nchan = geo.nchan,
     bp_ms = {}, ms = {},
   }

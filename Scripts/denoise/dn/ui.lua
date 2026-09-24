@@ -18,6 +18,7 @@ local Profile = require "dn.profile"
 local Gains   = require "dn.gains"
 local Render  = require "dn.render"
 local Apply   = require "dn.apply"
+local Timesel    = require "dn.timesel"
 
 local M = {}
 
@@ -112,14 +113,29 @@ local function ensure_kernel(nchan, srate)
 end
 
 local function analyse()
-  ST.item = reaper.GetSelectedMediaItem(0, 0)
+  -- The item the time selection is over, not blindly the first selected one -- with several
+  -- clips on a track, "first selected" is often one the selection does not touch.
+  local picked, perr = Timesel.selected_item(cfg.ignore_time_selection)
+  if not picked then ST.status = perr return end
+  ST.item = picked
   if not ST.item then ST.status = "No item selected." return end
   ST.take = reaper.GetActiveTake(ST.item)
   if not ST.take or reaper.TakeIsMIDI(ST.take) then
     ST.status = "Selected item has no audio take." return
   end
 
-  local geo = Analyze.geometry(ST.take)
+  -- Resolve the range ONCE, when the job starts, and keep it: the render and the apply must
+  -- agree with the analysis even if the selection is moved while they run.
+  local range, rerr = Timesel.for_item(ST.item, cfg.ignore_time_selection)
+  if not range then ST.status = rerr return end
+  ST.range = range
+  -- Profiling a region but cleaning everything means no narrowing on the render side, and
+  -- therefore no split.
+  -- Through the helper, which exists because the inline form of this is a trap -- see
+  -- timesel.render_range.
+  ST.render_range = Timesel.render_range(range, cfg.process_whole_item)
+
+  local geo = Analyze.geometry(ST.take, range)
   local k, kerr = ensure_kernel(geo.nchan, geo.rate)
   if not k then ST.err = kerr ST.status = "Failed." return end
 
@@ -133,7 +149,7 @@ local function analyse()
 
   ST.geo = geo
   ST.status = "Analysing..."
-  start_job("Analysing", function() return Analyze.run(ST.take, cfg, k) end,
+  start_job("Analysing", function() return Analyze.run(ST.take, cfg, k, ST.range) end,
     function(res, err)
       if not res then
         ST.status = (err == "cancelled") and "Cancelled." or "Analysis failed."
@@ -167,15 +183,15 @@ local function render()
   cfg._band_lo, cfg._band_hi = ST.th.lo_db, ST.th.hi_db
   cfg._band_frames = ST.th.frames
   ST.status, ST.note = "Rendering...", nil
-  local item, take = ST.item, ST.take
-  start_job("Rendering", function() return Render.run(take, cfg, ST.k, path) end,
+  local item, take, range = ST.item, ST.take, ST.render_range
+  start_job("Rendering", function() return Render.run(take, cfg, ST.k, path, range) end,
     function(res, err)
       if not res then
         ST.status = (err == "cancelled") and "Cancelled." or "Render failed."
         if err ~= "cancelled" then ST.err = err end
         return
       end
-      local nt, aerr = Apply.run(item, take, res, cfg)
+      local nt, aerr = Apply.run(item, take, res, cfg, range)
       if not nt then ST.err = aerr ST.status = "Render failed." return end
       ST.status = string.format("Wrote %s  (peak %.1f dB)",
         res.path:match("([^/\\]+)$"), 20 * math.log(math.max(res.peak, 1e-9), 10))
@@ -471,6 +487,31 @@ local function frame()
     end
     slider("Hold (ms)", "ghold", 0, 1000, "%.0f")
   end
+
+  ImGui.SeparatorText(ctx, "Range")
+  do
+    -- The same item the run picks: the selected one the time selection is over.
+    local it, ierr = Timesel.selected_item(cfg.ignore_time_selection)
+    if not it and ierr then ImGui.Text(ctx, ierr) end
+    if it then
+      local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+      local r, rerr = Timesel.for_item(it, cfg.ignore_time_selection)
+      if r then
+        ImGui.Text(ctx, Timesel.describe(r, pos, len))
+        if r.from_selection and not r.whole and not cfg.process_whole_item then
+          ImGui.Text(ctx, "The item is split at the edges; the rest keeps its original take.")
+        elseif r.from_selection and cfg.process_whole_item then
+          ImGui.Text(ctx, "Profile taken from the selection, applied to the whole item.")
+        end
+      else
+        ImGui.Text(ctx, rerr)
+      end
+    end
+  end
+  checkbox("Ignore time selection", "ignore_time_selection")
+  checkbox("Profile the selection, clean the whole item", "process_whole_item")
+
 
   ImGui.SeparatorText(ctx, "Output")
   checkbox("Add as a new take (keeps the original)", "new_take")

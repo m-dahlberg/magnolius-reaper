@@ -33,6 +33,12 @@ local function make_stub(log, clicks, changed)
     InputDouble  = function(_, _, v) return changed, v end,
     InputInt     = function(_, _, v) return changed, v end,
     Combo        = function(_, _, v) return changed, v end,
+    -- The track pickers. BeginCombo must open, or the dropdown body -- where the role is
+    -- actually written -- is never executed, and a picker that assigned the wrong key would
+    -- pass. Selectable follows `changed` for the same reason the sliders do.
+    BeginCombo = function() return true end,
+    Selectable = function() return changed end,
+    InputText  = function(_, _, v) return changed, v end,
     IsItemDeactivatedAfterEdit = function() return changed end,
     IsItemHovered         = function() return false end,
     IsItemClicked         = function() return false end,
@@ -103,6 +109,34 @@ end
 -- Config.save is stubbed out for the duration: the `changed` flag makes every
 -- control report an edit, and a real save would write this test's cfg over the
 -- user's stored settings.
+-- The panel persists on edit, and in the `changed` pass every control reports as edited -- so
+-- a run would write fixture track GUIDs into the user's saved roles. Snapshot and restore.
+local ROLE_SUFFIXES = { "_guid", "_name", "_override" }
+
+local function role_keys(Config)
+  local out = {}
+  for k in pairs(Config.defaults or {}) do
+    for _, suffix in ipairs(ROLE_SUFFIXES) do
+      if k:sub(-#suffix) == suffix then out[#out + 1] = k end
+    end
+  end
+  return out
+end
+
+function M.snapshot_roles(Config, section)
+  local saved = {}
+  for _, k in ipairs(role_keys(Config)) do
+    saved[k] = reaper.GetExtState(section, k)
+  end
+  return saved
+end
+
+function M.restore_roles(saved, section)
+  for k, v in pairs(saved or {}) do
+    reaper.SetExtState(section, k, v, true)
+  end
+end
+
 function M.run(UI, dir, prepare, clicks, changed)
   local log = { push = 0, pop = 0, dis = 0 }
   local stub = make_stub(log, clicks or {}, changed and true or false)

@@ -26,6 +26,7 @@ local Detect      = require "dr.detect"
 local Solve       = require "dr.solve"
 local Render      = require "dr.render"
 local Apply       = require "dr.apply"
+local Timesel = require "dr.timesel"
 
 local M = {}
 
@@ -266,7 +267,13 @@ local function analyse()
   ST.sel = sel
   if sel.err then ST.err = sel.err; return end
   local clip = sel.clips[1]
-  local geo = Analyze.geometry(clip.take)
+  -- Resolve the range ONCE, when the job starts, and keep it: the render and the apply must
+  -- agree with the analysis even if the selection is moved while they run.
+  local range, rerr = Timesel.for_item(clip.item, cfg.ignore_time_selection)
+  if not range then ST.err = rerr return end
+  ST.range = range
+
+  local geo = Analyze.geometry(clip.take, range)
   ST.geo = geo
   if not ensure_kernels(geo) then return end
   ST.cache = Analyze.cache_key(clip.take, cfg)
@@ -290,7 +297,7 @@ local function run_apply()
   local path = Render.output_path(clip.take, cfg, {})
   ST.applied = nil
   start_job("Rendering",
-    Render.run(clip.take, ecfg, ST.k, ST.plan, ST.t60_of, path),
+    Render.run(clip.take, ecfg, ST.k, ST.plan, ST.t60_of, path, nil, nil, ST.range),
     function(res, err)
       if not res then ST.err = tostring(err); return end
       local stamp = string.format("%s%s%s, peak %.2f",
@@ -306,7 +313,7 @@ local function run_apply()
           cfg.gate_amount, cfg.gate_auto and ST.gate and " (auto)" or "")
       end
       local n, aerr = Apply.run({ { item = clip.item, take = clip.take,
-                                   render = res, stamp = stamp } }, cfg)
+                                   render = res, stamp = stamp } }, cfg, ST.range)
       if not n then ST.err = tostring(aerr); return end
       ST.applied = string.format("Wrote %s%s (peak %.2f)",
         res.path:match("([^/\\]+)$"),
@@ -749,6 +756,27 @@ local function frame()
       dim("measured prominence -- overlapping cuts would otherwise double up.")
     end
   end
+
+  ImGui.SeparatorText(ctx, "Range")
+  do
+    local it, ierr = Timesel.selected_item(cfg.ignore_time_selection)
+    if not it and ierr then ImGui.Text(ctx, ierr) end
+    if it then
+      local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+      local r, rerr = Timesel.for_item(it, cfg.ignore_time_selection)
+      if r then
+        ImGui.Text(ctx, Timesel.describe(r, pos, len))
+        if r.from_selection and not r.whole then
+          ImGui.Text(ctx, "The item is split at the edges; the rest keeps its original take.")
+        end
+      else
+        ImGui.Text(ctx, rerr)
+      end
+    end
+  end
+  checkbox("Ignore time selection", "ignore_time_selection")
+
 
   ImGui.SeparatorText(ctx, "Output")
   checkbox("render the residual (what was removed)", "residual")

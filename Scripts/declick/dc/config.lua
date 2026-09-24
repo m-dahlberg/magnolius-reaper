@@ -34,7 +34,7 @@ M.MIGRATIONS = {
 }
 
 -- Changing any of these changes the envelopes, so the audio must be re-read.
-M.ANALYSIS_KEYS = { "step_ms", "nbands", "flo", "fhi", "nphases" }
+M.ANALYSIS_KEYS = { "step_ms", "nbands", "flo", "fhi", "nphases", "ignore_time_selection" }
 
 -- Changing any of these changes detection but not the envelopes.
 --
@@ -50,6 +50,11 @@ M.DETECT_KEYS = {
 }
 
 M.defaults = {
+  -- A time selection narrows what is analysed and what is written; this overrides that back
+  -- to the whole item without making you clear the selection. In ANALYSIS_KEYS because it
+  -- changes which samples get read.
+  ignore_time_selection = false,
+
   -- Analysis (JSFX sliders 4, 8, 9, 10; "passes" reinterpreted) --------------
   step_ms       = 5,      -- step-peak envelope resolution
   nbands        = 16,     -- log-spaced detection bands

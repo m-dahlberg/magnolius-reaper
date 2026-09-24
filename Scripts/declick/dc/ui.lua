@@ -20,6 +20,7 @@ local Detect     = require "dc.detect"
 local Render     = require "dc.render"
 local Apply      = require "dc.apply"
 local Log        = require "dc.log"
+local Timesel    = require "dc.timesel"
 
 local M = {}
 
@@ -119,14 +120,24 @@ local function ensure_kernel(geo)
 end
 
 local function analyse()
-  ST.item = reaper.GetSelectedMediaItem(0, 0)
+  -- The item the time selection is over, not blindly the first selected one -- with several
+  -- clips on a track, "first selected" is often one the selection does not touch.
+  local picked, perr = Timesel.selected_item(cfg.ignore_time_selection)
+  if not picked then ST.status = perr return end
+  ST.item = picked
   if not ST.item then ST.status = "No item selected." return end
   ST.take = reaper.GetActiveTake(ST.item)
   if not ST.take or reaper.TakeIsMIDI(ST.take) then
     ST.status = "Selected item has no audio take." return
   end
 
-  local geo = Analyze.geometry(ST.take)
+  -- Resolve the range ONCE, when the job starts, and keep it: the render and the apply must
+  -- agree with the analysis even if the selection is moved while they run.
+  local range, rerr = Timesel.for_item(ST.item, cfg.ignore_time_selection)
+  if not range then ST.status = rerr ST.err = nil return end
+  ST.range = range
+
+  local geo = Analyze.geometry(ST.take, range)
   ST.geo = geo
   local k, kerr = ensure_kernel(geo)
   if not k then ST.err = kerr ST.status = "Failed." return end
@@ -141,7 +152,7 @@ local function analyse()
   end
 
   ST.status, ST.err = "Analysing...", nil
-  start_job("Analysing", function() return Analyze.run(ST.take, cfg, k) end,
+  start_job("Analysing", function() return Analyze.run(ST.take, cfg, k, ST.range) end,
     function(res, err)
       if not res then
         ST.status = (err == "cancelled") and "Cancelled." or "Analysis failed."
@@ -188,7 +199,7 @@ local function run_output()
   local events = ST.k:events(ST.th.stats and ST.th.stats.kept or 0)
 
   if cfg.dry_run then
-    local nt, marked = Apply.run(ST.item, ST.take, nil, cfg, events, ST.th)
+    local nt, marked = Apply.run(ST.item, ST.take, nil, cfg, events, ST.th, ST.range)
     if not nt then ST.err = marked ST.status = "Dry run failed." return end
     ST.status = string.format(
       "Dry run: %d events, %d marked, %.3f%% of the file would be repaired.",
@@ -203,15 +214,15 @@ local function run_output()
   local path = Render.output_path(ST.take, cfg)
   if not path then ST.err = "Could not find a free output filename." return end
   ST.status, ST.note = "Rendering...", nil
-  local item, take, th = ST.item, ST.take, ST.th
-  start_job("Rendering", function() return Render.run(take, cfg, ST.k, path) end,
+  local item, take, th, range = ST.item, ST.take, ST.th, ST.range
+  start_job("Rendering", function() return Render.run(take, cfg, ST.k, path, range) end,
     function(res, err)
       if not res then
         ST.status = (err == "cancelled") and "Cancelled." or "Render failed."
         if err ~= "cancelled" then ST.err = err end
         return
       end
-      local nt, marked = Apply.run(item, take, res, cfg, events, th)
+      local nt, marked = Apply.run(item, take, res, cfg, events, th, range)
       if not nt then ST.err = marked ST.status = "Render failed." return end
       ST.status = string.format("Wrote %s  (%d events, %d marked, peak %.1f dB)",
         res.path:match("([^/\\]+)$"), th.stats.events, marked or 0,
@@ -651,6 +662,29 @@ local function frame()
     islider("Max retries", "max_retries", 0, 10)
     slider("Threshold step per retry (dB)", "db_step_on_retry", 0.5, 10, "%.1f")
   end
+
+  ImGui.SeparatorText(ctx, "Range")
+  -- Shown every frame from the live selection, so the panel says what it WOULD do rather than
+  -- what the last run did.
+  do
+    local it = Timesel.selected_item(cfg.ignore_time_selection)
+    if it then
+      local pos = reaper.GetMediaItemInfo_Value(it, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(it, "D_LENGTH")
+      local r, rerr = Timesel.for_item(it, cfg.ignore_time_selection)
+      if r then
+        ImGui.TextColored(ctx, (r.from_selection and not r.whole) and COL_FINAL or COL_GREY,
+          Timesel.describe(r, pos, len))
+        if r.from_selection and not r.whole then
+          ImGui.TextColored(ctx, COL_GREY,
+            "The item is split at the edges; the rest keeps its original take.")
+        end
+      else
+        ImGui.TextColored(ctx, COL_RED, rerr)
+      end
+    end
+  end
+  checkbox("Ignore time selection", "ignore_time_selection")
 
   ImGui.SeparatorText(ctx, "Output")
   checkbox("Isolate changes (render what is removed)", "isolate")

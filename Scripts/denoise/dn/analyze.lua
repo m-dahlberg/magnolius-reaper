@@ -82,7 +82,11 @@ local function source_format(src)
   return rate, math.max(1, nchan), false
 end
 
-function M.geometry(take)
+-- `range` is an optional time-selection range in PROJECT seconds (see dn/timesel.lua). The take
+-- accessor is anchored at 0 at the start of the ITEM, so a range beginning part way in is read
+-- from `range.t0 - item_pos`; that subtraction happens once, here, and everything downstream
+-- just uses t0 and acc_len.
+function M.geometry(take, range)
   local item = reaper.GetMediaItemTake_Item(take)
   local src  = reaper.GetMediaItemTake_Source(take)
 
@@ -92,13 +96,26 @@ function M.geometry(take)
 
   local item_len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
 
+  -- The true OVERLAP of the item with the range, not "t0 clamped to 0 then the range's
+  -- length": an item lying entirely after the range has t0 = 0 under that reading and would be
+  -- read from its own start for the range's duration. A span of 0 means no overlap, which the
+  -- callers treat as nothing to do rather than as an error.
+  local pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local t0, span = 0, item_len
+  if range and not range.whole then
+    local a = math.max(pos, range.t0)
+    local b = math.min(pos + item_len, range.t1)
+    if b > a then t0, span = a - pos, b - a else t0, span = 0, 0 end
+  end
+
   return {
     item = item, playrate = playrate, rate = rate, nchan = nchan,
     rate_known = rate_known,
     -- acc_len is the accessor's span. Named for what it is, so it cannot
-    -- quietly be confused with the length of the source file again.
-    item_len = item_len, acc_len = item_len,
-    total_samples = math.floor(item_len * rate + 0.5),
+    -- quietly be confused with the length of the source file again. With a
+    -- time selection it is the span of the SELECTION, starting t0 into the take.
+    item_len = item_len, acc_len = span, t0 = t0, range = range,
+    total_samples = math.floor(span * rate + 0.5),
   }
 end
 
@@ -167,8 +184,8 @@ function M.pump(aa, k, geo, t0, count, fn, frac0, frac1)
 end
 
 -- Coroutine body. Yields progress, returns true or nil + message.
-function M.run(take, cfg, k)
-  local geo = M.geometry(take)
+function M.run(take, cfg, k, range)
+  local geo = M.geometry(take, range)
   if geo.total_samples < k.fft_size * 4 then
     return nil, "Item is too short to analyse at this FFT size"
   end
@@ -182,7 +199,7 @@ function M.run(take, cfg, k)
 
   -- pcall so the accessor is always released; coroutine.yield across pcall is
   -- allowed since Lua 5.2, which is what makes the progress reporting possible.
-  local ok, finished = pcall(M.pump, aa, k, geo, 0, geo.total_samples,
+  local ok, finished = pcall(M.pump, aa, k, geo, geo.t0, geo.total_samples,
                              function(n) k:analyze(n) end, 0, 1)
   reaper.DestroyAudioAccessor(aa)
 

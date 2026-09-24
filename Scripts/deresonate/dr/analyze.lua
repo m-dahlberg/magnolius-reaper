@@ -54,17 +54,38 @@ local function source_format(src)
   return (rate > 0 and rate or 44100), (nchan > 0 and nchan or 1), false
 end
 
-function M.geometry(take)
+-- `range` is an optional time-selection range in PROJECT seconds (see dr/timesel.lua). The take
+-- accessor is anchored at 0 at the start of the ITEM, so a range beginning part way in is read
+-- from `range.t0 - item_pos`; that subtraction happens once, here, and every read starts at
+-- geo.t0 and runs for geo.acc_len.
+function M.geometry(take, range)
   local item = reaper.GetMediaItemTake_Item(take)
   local src  = reaper.GetMediaItemTake_Source(take)
   local rate, nchan, known = source_format(src)
+  local item_pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  local item_len = reaper.GetMediaItemInfo_Value(item, "D_LENGTH")
+
+  -- The true OVERLAP of the item with the range, not "t0 clamped to 0 then the range's
+  -- length": an item lying entirely after the range has t0 = 0 under that reading and would be
+  -- read from its own start for the range's duration. A span of 0 means no overlap, which the
+  -- callers treat as nothing to do rather than as an error.
+  local t0, span = 0, item_len
+  if range and not range.whole then
+    local a = math.max(item_pos, range.t0)
+    local b = math.min(item_pos + item_len, range.t1)
+    if b > a then t0, span = a - item_pos, b - a else t0, span = 0, 0 end
+  end
+
   return {
     item      = item,
     take      = take,
     playrate  = reaper.GetMediaItemTakeInfo_Value(take, "D_PLAYRATE"),
     startoffs = reaper.GetMediaItemTakeInfo_Value(take, "D_STARTOFFS"),
-    item_pos  = reaper.GetMediaItemInfo_Value(item, "D_POSITION"),
-    item_len  = reaper.GetMediaItemInfo_Value(item, "D_LENGTH"),
+    item_pos  = item_pos,
+    item_len  = item_len,
+    -- acc_len is the span actually read, starting t0 into the take.
+    t0 = t0, acc_len = span, range = range,
+    total_samples = math.floor(span * rate + 0.5),
     rate = rate, nchan = nchan, rate_known = known,
   }
 end
@@ -113,7 +134,8 @@ end
 --
 -- `lookahead` extra samples are appended to each request for kernels that need
 -- them (YIN), overlapping successive reads.
-function M.pump(aa, buf, rate, nchan, total, block, lookahead, fn, frac0, frac1, hopf)
+function M.pump(aa, buf, rate, nchan, total, block, lookahead, fn, frac0, frac1, hopf, t0)
+  t0 = t0 or 0
   local done = 0
   local req = { aa = aa, rate = rate, nchan = nchan, buf = buf }
   while done < total do
@@ -122,9 +144,9 @@ function M.pump(aa, buf, rate, nchan, total, block, lookahead, fn, frac0, frac1,
     if hopf then
       local s0 = math.floor(done * hopf + 0.5)
       local s1 = math.floor((done + n) * hopf + 0.5)
-      nsamp, t = s1 - s0 + lookahead, s0 / rate
+      nsamp, t = s1 - s0 + lookahead, t0 + s0 / rate
     else
-      nsamp, t = n + lookahead, done / rate
+      nsamp, t = n + lookahead, t0 + done / rate
     end
     req.n, req.t, req.got = nsamp, t, nil
     req.progress = frac0 + (frac1 - frac0) * (done / total)
@@ -147,8 +169,9 @@ function M.run(take, cfg, pk, k, geo)
     local aa = reaper.CreateTakeAudioAccessor(take)
     if not aa then return nil, "could not open an audio accessor" end
     local a0, a1 = reaper.GetAudioAccessorStartTime(aa), reaper.GetAudioAccessorEndTime(aa)
-    -- the span is item_len; reading item_len * playrate runs off the end
-    local span = math.min(a1 - a0, geo.item_len)
+    -- the span is item_len -- or the part of it the time selection covers; reading
+    -- item_len * playrate runs off the end of the accessor either way
+    local span = math.min(a1 - a0, geo.acc_len or geo.item_len)
 
     local res, err = nil, nil
     local ok, ferr = pcall(function()
@@ -177,7 +200,7 @@ function M.run(take, cfg, pk, k, geo)
             F.ms[off + i] = m
             F.level_db[off + i] = M.db(m)
           end
-        end, 0.00, 0.20, pk.hopf_level)
+        end, 0.00, 0.20, pk.hopf_level, geo.t0)
 
       -- pass 2: YIN, at pitch_rate, with the lookahead the kernel needs
       M.pump(aa, pk.inbuf, cfg.pitch_rate, geo.nchan, nframes,
@@ -186,18 +209,18 @@ function M.run(take, cfg, pk, k, geo)
           local f0, ap = pk:pitch(off, nf, nsamp)
           local a, b = f0.table(1, nf), ap.table(1, nf)
           for i = 1, nf do F.f0[off + i] = a[i]; F.aper[off + i] = b[i] end
-        end, 0.20, 0.45, pk.hopf_pitch)
+        end, 0.20, 0.45, pk.hopf_pitch, geo.t0)
 
       -- pass 3: the modal cube, at modal_rate
       k:rewind()
       local mtot = math.floor(span * cfg.modal_rate)
       M.pump(aa, k.inbuf, cfg.modal_rate, geo.nchan, mtot, k.block, 0,
-        function(_, nf) k:modal(nf) end, 0.45, 0.75)
+        function(_, nf) k:modal(nf) end, 0.45, 0.75, nil, geo.t0)
 
       -- pass 4: the ring cube, at pitch_rate
       local rtot = math.floor(span * cfg.pitch_rate)
       M.pump(aa, k.inbuf, cfg.pitch_rate, geo.nchan, rtot, k.block, 0,
-        function(_, nf) k:ring(nf) end, 0.75, 1.00)
+        function(_, nf) k:ring(nf) end, 0.75, 1.00, nil, geo.t0)
 
       F.modal_frames = k:frames()
       F.ring_frames  = k:rframes()

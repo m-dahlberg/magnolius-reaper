@@ -109,12 +109,14 @@ local function merge_equal(spans, enabled)
   return out
 end
 
--- spans are in item-relative project seconds.
-function M.run(item, spans, cfg)
+-- spans are in seconds from the START OF THE ANALYSED SPAN, which is the item start with no
+-- time selection and the selection's start with one. `origin` carries that; without it a run
+-- over a selection would cut at the head of the item instead.
+function M.run(item, spans, cfg, origin)
   spans = merge_equal(spans, cfg.split_only_on_change)
   if #spans == 0 then return 0 end
 
-  local item_pos = get(item, "D_POSITION")
+  local item_pos = origin or get(item, "D_POSITION")
 
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
@@ -186,7 +188,9 @@ end
 -- complaint that sends you here is either "it did not find that" or "the clip
 -- is shorter than the sound". A point marker can only answer the first.
 function M.mark(item, tree, F, cfg)
-  local item_pos = reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  -- Same origin rule as M.run: F knows where its frame 0 sits.
+  local item_pos = (F and F.origin)
+                   or reaper.GetMediaItemInfo_Value(item, "D_POSITION")
   local colour = {
     breath    = reaper.ColorToNative(140,  90, 155) | 0x1000000,
     consonant = reaper.ColorToNative(165, 130,  65) | 0x1000000,

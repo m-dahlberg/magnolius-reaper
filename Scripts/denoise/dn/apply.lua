@@ -16,6 +16,8 @@
 -- Adding it as a take rather than replacing the source is what makes A/B a
 -- keypress: the original stays under it.
 
+local Timesel = require "dn.timesel"
+
 local M = {}
 
 -- Properties the accessor did NOT apply, so the rendered audio still needs them.
@@ -70,7 +72,10 @@ local function build_peaks(src)
   return slices <= 100000
 end
 
-function M.run(item, take, result, cfg)
+-- `range` narrows the edit to a time selection: the item is split at its edges and only the
+-- middle piece is touched. The pieces either side keep their original take, so nothing outside
+-- the selection is re-rendered and nothing outside it can have changed.
+function M.run(item, take, result, cfg, range)
   local src = reaper.PCM_Source_CreateFromFile(result.path)
   if not src then return nil, "REAPER could not open " .. result.path end
   -- Before the undo block: this is not a project edit, and it must not sit
@@ -82,13 +87,34 @@ function M.run(item, take, result, cfg)
 
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
+  -- no early return between here and PreventUIRefresh(-1): an unbalanced call freezes
+  -- REAPER's UI for the rest of the session
+
+  -- Narrow the item first, so the render lands on a piece whose length matches it.
+  local target, split_err = item, nil
+  if range and not range.whole then
+    local middle, serr = Timesel.split_to_range(item, range.t0, range.t1)
+    if middle then
+      target = middle
+      take = reaper.GetActiveTake(middle) or take
+    else
+      split_err = serr
+    end
+  end
 
   local nt
-  if cfg.new_take then
-    nt = reaper.AddTakeToMediaItem(item)
+  if cfg.new_take and not split_err then
+    nt = reaper.AddTakeToMediaItem(target)
     copy_props(take, nt)
   else
     nt = take
+  end
+
+  if split_err then
+    reaper.PreventUIRefresh(-1)
+    reaper.UpdateArrange()
+    reaper.Undo_EndBlock("Spectral denoise", -1)
+    return nil, split_err
   end
   reaper.SetMediaItemTake_Source(nt, src)
   reaper.SetMediaItemTakeInfo_Value(nt, "D_STARTOFFS", 0)
@@ -102,7 +128,7 @@ function M.run(item, take, result, cfg)
     reaper.SetActiveTake(nt)
   end
 
-  reaper.UpdateItemInProject(item)
+  reaper.UpdateItemInProject(target)
   reaper.PreventUIRefresh(-1)
   reaper.UpdateArrange()
   reaper.Undo_EndBlock("Spectral denoise", -1)

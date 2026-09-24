@@ -220,14 +220,44 @@ local function run_case(playrate)
 
   local cfg = Config.new()
   cfg.fft_size, cfg.ana_hop = 2048, 512
+  -- Roles are chosen explicitly now, not inferred from track order or from what is selected.
+  -- Deliberately assigned the "wrong" way round relative to the old positional rule -- the
+  -- reference is on the LOWER-numbered track and is named as such -- so a regression back to
+  -- "highest-numbered track wins" would fail here rather than pass by coincidence.
+  reaper.GetSetMediaTrackInfo_String(ttr, "P_NAME", "AT target", true)
+  reaper.GetSetMediaTrackInfo_String(rtr, "P_NAME", "AT reference", true)
+  cfg.target_guid, cfg.target_name = reaper.GetTrackGUID(ttr), "AT target"
+  cfg.ref_guid, cfg.ref_name = reaper.GetTrackGUID(rtr), "AT reference"
+
+  -- Nothing is selected: the roles alone must be enough.
+  reaper.SelectAllMediaItems(0, false)
 
   local sel = Select.resolve(cfg)
-  ok(not sel.err, "the selection resolves", sel.err)
+  ok(not sel.err, "the roles resolve", sel.err)
   if sel.err then drop() return end
   ok(#sel.target == 1 and sel.target[1].take == ttake,
-     "the target is the clip on the higher-numbered track")
+     "the target is every clip on the chosen target track")
   ok(#sel.refs == 1 and sel.refs[1].take == rtake,
-     "and the reference is the one on the lower")
+     "and the reference is every clip on the chosen reference track")
+
+  do
+    -- The typed override, against a live project rather than a table of stubs.
+    local o = Config.new()
+    o.target_guid, o.ref_guid = cfg.target_guid, cfg.ref_guid
+    o.ref_override = "AT TARGET"        -- different case, and pointing elsewhere on purpose
+    local s2 = Select.resolve(o)
+    ok(s2.err ~= nil, "a reference override naming the target track is refused", s2.err)
+
+    o.ref_override = "AT reference"
+    local s3 = Select.resolve(o)
+    ok(not s3.err and #s3.refs == 1 and s3.refs[1].take == rtake,
+       "a typed reference name resolves to the same clips as the guid", s3.err)
+
+    o.ref_override = "No Such Track"
+    local s4 = Select.resolve(o)
+    ok(s4.ref_err ~= nil, "a typed name matching nothing reports, rather than falling back")
+    ok(#s4.refs == 0, "and contributes no clips")
+  end
 
   local geo = Analyze.geometry(ttake)
   near(geo.rate, RATE, 0, "the source rate is read correctly")

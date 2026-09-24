@@ -18,6 +18,8 @@ package.path = root .. "?.lua;" .. root .. "test/?.lua;" .. package.path
 local Config   = require "at.config"
 local Spectrum = require "at.spectrum"
 local Solve    = require "at.solve"
+local Select    = require "at.select"
+local Trackpick = require "at.trackpick"
 
 local pass, fail = 0, 0
 
@@ -306,9 +308,11 @@ do
     ok(Config.measure_sig(cfg) == mbase, key .. " does not force a re-measure")
     cfg[key] = save
   end
+  -- Perturb by type: the track-role keys are strings, so `save + 1` would raise rather than
+  -- test anything. What matters is that ANY change to an analysis key changes the signature.
   for _, key in ipairs(Config.ANALYSIS_KEYS) do
     local save = cfg[key]
-    cfg[key] = save + 1
+    cfg[key] = (type(save) == "number") and (save + 1) or (tostring(save) .. "-changed")
     ok(Config.analysis_sig(cfg) ~= abase, key .. " DOES force a re-read")
     cfg[key] = save
   end
@@ -336,6 +340,9 @@ do
   if not okr then bail("test/ui_frame.lua did not load: " .. tostring(Frame))
   elseif not oku then bail("at/ui.lua did not load: " .. tostring(UI))
   else
+    -- The `changed` pass reports every control as edited, and the panel persists on edit, so
+    -- without this a run would leave a stub track GUID saved as the user's real role.
+    local saved_roles = reaper and Frame.snapshot_roles(Config, Config.EXT_SECTION)
     local function populated(ST, cfg)
       cfg.fft_size, cfg.ana_hop = 256, 64
       ST.k = { fft_size = 256, nbins = 129 }
@@ -372,6 +379,7 @@ do
         ok(log.push == log.pop, "style stack balances: " .. label)
       end
     end
+    if saved_roles then Frame.restore_roles(saved_roles, Config.EXT_SECTION) end
 
     -- Every cfg key a control names must exist, or a rename would leave a
     -- slider silently reading nil until someone touched it.
@@ -381,6 +389,20 @@ do
       local text = fh:read("a")
       fh:close()
       local seen = {}
+      -- A track role is three settings behind ONE control, so the grep above cannot see them:
+      -- Trackpick.widget is handed a prefix, not a key. Expand the roles the select module
+      -- declares, and assert the panel actually draws them -- otherwise this would quietly
+      -- excuse a picker that had been deleted.
+      ok(text:find("Trackpick.widget", 1, true) ~= nil, "the panel draws the track pickers")
+      for _, prefix in ipairs(Select.ROLES) do
+        ok(text:find('"' .. prefix .. '"', 1, true) ~= nil,
+           "the panel names the " .. prefix .. " role")
+        for _, key in ipairs(Trackpick.sig_keys(prefix)) do
+          seen[key] = true
+          ok(Config.defaults[key] ~= nil,
+             string.format("role key %q is a real config key", key))
+        end
+      end
       -- [%w_] rather than %w for the function name: %w excludes the
       -- underscore, so input_double scanned as "double" and the ^input filter
       -- below silently skipped both text fields.
@@ -400,6 +422,43 @@ do
          "no control for: " .. table.concat(missing, ", "))
     end
   end
+end
+
+------------------------------------------------------------------ track roles
+
+do
+  -- find() is pure: it takes the track list rather than asking REAPER for it, which is what
+  -- makes the resolution order testable at all.
+  local tracks = {
+    { name = "Vox",     guid = "{A}", num = 1 },
+    { name = "Ref Vox", guid = "{B}", num = 2 },
+  }
+  ok(Trackpick.find(tracks, "", "{B}", "").guid == "{B}", "found by guid")
+  ok(Trackpick.find(tracks, "", "", "Vox").guid == "{A}", "found by remembered name")
+  ok(Trackpick.find(tracks, "Ref Vox", "{A}", "Vox").guid == "{B}",
+     "a typed name overrides the remembered guid")
+  ok(Trackpick.find(tracks, "REF VOX", "", "").guid == "{B}", "name match ignores case")
+  ok(Trackpick.find(tracks, "", "{gone}", "") == nil, "a stale guid resolves to nothing")
+
+  -- A typed name matching nothing must be an ERROR rather than a quiet fall-back to the guid:
+  -- falling back would tilt the wrong track and say nothing.
+  local t, err = Trackpick.find(tracks, "Nope", "{A}", "Vox")
+  ok(t == nil and err ~= nil, "a typed name matching nothing is an error, not a fallback")
+
+  -- Both halves of why all three are stored.
+  ok(Trackpick.find({ { name = "Vox 2", guid = "{A}", num = 1 } }, "", "{A}", "Vox").guid == "{A}",
+     "guid survives a rename")
+  ok(Trackpick.find({ { name = "Vox", guid = "{NEW}", num = 1 } }, "", "{A}", "Vox").guid == "{NEW}",
+     "name survives the track being rebuilt with a new guid")
+
+  local c = Config.new()
+  ok(not Trackpick.is_set(c, "target"), "a fresh config has no target role set")
+  c.target_guid = "{A}"
+  ok(Trackpick.is_set(c, "target"), "a guid counts as set")
+  Trackpick.clear(c, "target")
+  ok(not Trackpick.is_set(c, "target"), "clear() unsets all three")
+
+  ok(#Select.ROLES == 2, "two roles: target and reference")
 end
 
 print(string.format("\nheadless: %d passed, %d failed", pass, fail))

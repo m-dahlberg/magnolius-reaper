@@ -43,6 +43,10 @@ M.migrations = {
 -- hop is the resolution everything downstream sees. 128 samples is ~2.7 ms at
 -- 48 kHz, fine enough to resolve a plosive burst.
 M.defaults = {
+  -- A time selection narrows what is analysed and where the splits land; this overrides that
+  -- back to the whole item without making you clear the selection.
+  ignore_time_selection = false,
+
   hop            = 128,
   max_rate       = 48000,   -- analysis rate ceiling; accessor resamples for free
   min_rate       = 24000,   -- below this sibilance (5-10 kHz) is lost

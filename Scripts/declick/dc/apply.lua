@@ -21,6 +21,7 @@
 -- which is the intended way to tune by ear before trusting a batch.
 
 local Analyze = require "dc.analyze"
+local Timesel = require "dc.timesel"
 
 local M = {}
 
@@ -55,7 +56,11 @@ local function neutralize(t)
 end
 
 -- Events carry positions in source samples; a take marker wants source time.
-local function place_markers(take, events, rate, severity_floor)
+-- `offset` is where the analysed span starts, in the marked take's own seconds. It is 0 for a
+-- render, because the rendered file begins at the range; it is the range's offset into the item
+-- for a dry run, which marks the ORIGINAL take and so has the untouched head in front of it.
+local function place_markers(take, events, rate, severity_floor, offset)
+  offset = offset or 0
   local n = math.min(#events, M.MAX_MARKERS)
   for i = 1, n do
     local e = events[i]
@@ -65,7 +70,7 @@ local function place_markers(take, events, rate, severity_floor)
     local col = reaper.ColorToNative(255,
                   math.floor(217 - 191 * s), 38) | 0x1000000
     reaper.SetTakeMarker(take, -1,
-      string.format("click %.1f dB", e.over_db), e.pos / rate, col)
+      string.format("click %.1f dB", e.over_db), offset + e.pos / rate, col)
   end
   return n
 end
@@ -105,7 +110,10 @@ end
 
 -- result is nil for a dry run: markers are placed on the existing take and no
 -- audio is written or attached.
-function M.run(item, take, result, cfg, events, th)
+-- `range` narrows the edit to a time selection: the item is split at its edges and only the
+-- middle piece is touched. The pieces either side keep their original take, so nothing outside
+-- the selection is re-rendered and nothing outside it can have changed.
+function M.run(item, take, result, cfg, events, th, range)
   local src
   if result then
     src = reaper.PCM_Source_CreateFromFile(result.path)
@@ -124,11 +132,26 @@ function M.run(item, take, result, cfg, events, th)
 
   reaper.Undo_BeginBlock()
   reaper.PreventUIRefresh(1)
+  -- no early return between here and PreventUIRefresh(-1): an unbalanced call freezes
+  -- REAPER's UI for the rest of the session
+  local split_err
+
+  -- Narrow the item first, so the render lands on a piece whose length matches it.
+  local target = item
+  if result and range and not range.whole then
+    local middle, serr = Timesel.split_to_range(item, range.t0, range.t1)
+    if middle then
+      target = middle
+      take = reaper.GetActiveTake(middle) or take
+    else
+      split_err = serr
+    end
+  end
 
   local nt = take
-  if result then
+  if result and not split_err then
     if cfg.new_take then
-      nt = reaper.AddTakeToMediaItem(item)
+      nt = reaper.AddTakeToMediaItem(target)
       copy_props(take, nt)
     end
     reaper.SetMediaItemTake_Source(nt, src)
@@ -137,16 +160,30 @@ function M.run(item, take, result, cfg, events, th)
     reaper.GetSetMediaItemTakeInfo_String(nt, "P_NAME", oldname .. label, true)
   end
 
+  if split_err then
+    reaper.PreventUIRefresh(-1)
+    reaper.UpdateArrange()
+    reaper.Undo_EndBlock("De-click", -1)
+    return nil, split_err
+  end
+
   reaper.GetSetMediaItemTakeInfo_String(nt, "P_EXT:declick",
     string.format("%.2f dB (%s), %d events, %.3f%% repaired",
       th.sens_used or 0, th.manual and "manual" or "auto",
       (th.stats and th.stats.events) or 0,
       ((th.stats and th.stats.repaired) or 0) * 100), true)
 
+  -- A render starts at the range, so its events are already relative to the take they land on.
+  -- A dry run marks the original take, which still has everything before the range in front.
+  local marker_offset = 0
+  if range and not range.whole and not result then
+    marker_offset = range.t0 - reaper.GetMediaItemInfo_Value(item, "D_POSITION")
+  end
+
   local marked = 0
   if cfg.place_take_markers then
     clear_markers(nt)
-    marked = place_markers(nt, events, rate, th.sens_used or 0)
+    marked = place_markers(nt, events, rate, th.sens_used or 0, marker_offset)
   end
 
   if result and cfg.new_take and cfg.select_take then

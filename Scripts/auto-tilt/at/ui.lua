@@ -16,12 +16,14 @@
 
 local Config   = require "at.config"
 local Select   = require "at.select"
+local Trackpick = require "at.trackpick"
 local Kernel   = require "at.kernel"
 local Analyze  = require "at.analyze"
 local Spectrum = require "at.spectrum"
 local Solve    = require "at.solve"
 local Render   = require "at.render"
 local Apply    = require "at.apply"
+local Timesel = require "at.timesel"
 
 local M = {}
 
@@ -190,7 +192,38 @@ local function analyse(then_apply)
 
   -- The first target clip fixes the rate, the channel count and the kernel;
   -- every clip on both sides is then read at those. See analyze.lua.
-  local geo = Analyze.geometry(sel.target[1].take)
+  -- Resolve the range ONCE, when the job starts, and keep it: the render and the apply must
+  -- agree with the analysis even if the selection is moved while they run.
+  -- Anchor on the clip the selection is actually OVER: a target track holds a row of clips,
+  -- and "the first one" is usually one the selection misses.
+  local anchor, aerr = Timesel.anchor_clip(sel.target, cfg.ignore_time_selection)
+  if not anchor then ST.status = aerr or "No target clip." return end
+
+  local range, rerr = Timesel.for_item(anchor.item, cfg.ignore_time_selection)
+  if not range then ST.status = rerr return end
+  ST.range = range
+
+  -- Read only the clips the range touches -- on BOTH sides. Leaving the reference unclipped
+  -- meant a full-length backing item was read in its entirety for a twelve-second selection,
+  -- which is what made this feel like it was analysing the whole file.
+  if range.from_selection then
+    sel = { target = Timesel.clips_in_range(sel.target, range),
+            refs   = Timesel.clips_in_range(sel.refs, range),
+            track = sel.track, track_num = sel.track_num,
+            target_track = sel.target_track, ref_track = sel.ref_track,
+            ref_tracks = sel.ref_tracks, tracks = sel.tracks }
+    if #sel.target == 0 then
+      ST.status = "The time selection does not overlap any clip on the target track."
+      return
+    end
+  end
+  -- Measuring over a selection but tilting everything means no narrowing on the render side,
+  -- and therefore no split.
+  -- Through the helper, which exists because the inline form of this is a trap -- see
+  -- timesel.render_range.
+  ST.render_range = Timesel.render_range(range, cfg.process_whole_item)
+
+  local geo = Analyze.geometry(sel.target[1].take, range)
   ST.geo = geo
   local k, kerr = ensure_kernel(geo)
   if not k then ST.err = kerr ST.status = "Failed." return end
@@ -205,7 +238,7 @@ local function analyse(then_apply)
 
   ST.status = "Analysing..."
   ST.apply_after = then_apply and true or false
-  start_job("Analysing", function() return Analyze.run(sel, cfg, k, geo) end,
+  start_job("Analysing", function() return Analyze.run(sel, cfg, k, geo, ST.range) end,
     function(res, err)
       if not res then
         ST.status = (err == "cancelled") and "Cancelled." or "Analysis failed."
@@ -260,7 +293,7 @@ function run_apply()
       local rgeo = Analyze.geometry(j.take)
       local plan = Solve.plan(spec, cfg, ana_rate, gain, fft, rgeo.rate)
       local res, err = Render.run(j.take, cfg, k, plan, j.path,
-                                  (i - 1) / #jobs, i / #jobs)
+                                  (i - 1) / #jobs, i / #jobs, ST.render_range)
       if not res then return nil, err end
       out[i] = { item = j.item, take = j.take, result = res, peak = res.peak }
     end
@@ -271,7 +304,7 @@ function run_apply()
       if err ~= "cancelled" then ST.err = err end
       return
     end
-    local added, aerr = Apply.run(res, cfg, gain)
+    local added, aerr = Apply.run(res, cfg, gain, ST.render_range)
     if not added then ST.err = aerr ST.status = "Apply failed." return end
     local peak = 0
     for _, r in ipairs(res) do peak = math.max(peak, r.peak or 0) end
@@ -432,15 +465,6 @@ local function input_double(label, key, fmt)
   return rv
 end
 
-local function input_int(label, key, lo)
-  local rv, v = ImGui.InputInt(ctx, label, math.floor(cfg[key]), 1, 1)
-  if rv then
-    cfg[key] = math.max(lo or 0, math.floor(v))
-    Config.save(cfg)
-  end
-  return rv
-end
-
 -- An analysis parameter: changing it invalidates the cube, so say so rather
 -- than letting the next Analyse quietly cost a re-read.
 local function stale_analysis()
@@ -458,12 +482,60 @@ local function frame()
   step_job()
   recompute()
 
-  -- The selection is re-read every frame so the panel says what it WOULD do,
-  -- not what it did the last time a button was pressed.
+  -- The roles are re-read every frame so the panel says what it WOULD do, not what it did the
+  -- last time a button was pressed.
+  local sel = Select.resolve(cfg)
   if not busy() then
-    local sel = Select.resolve(cfg)
     ST.sel_desc = Select.describe(sel, cfg)
   end
+
+  ImGui.SeparatorText(ctx, "Tracks")
+  -- Deferred, not immediate. Throwing the cached spectrum away here would leave the rest of
+  -- this frame reading a nil ST.ana while the curves derived from it are still in hand -- the
+  -- plots below are drawn from both. Flag it and do it once the frame is finished.
+  local function role_changed()
+    Config.save(cfg)
+    ST.roles_dirty = true
+  end
+  Trackpick.widget(ImGui, ctx, "Target track", cfg, "target",
+                   sel.tracks or {}, sel.target_track, sel.target_err, role_changed)
+  Trackpick.widget(ImGui, ctx, "Reference track", cfg, "ref",
+                   sel.tracks or {}, sel.ref_track, sel.ref_err, role_changed)
+  ImGui.TextColored(ctx, COL_GREY,
+    "Every clip on a chosen track is used -- nothing needs selecting. A typed name overrides " ..
+    "the dropdown. Changing either throws the cached spectrum away.")
+
+  ImGui.SeparatorText(ctx, "Range")
+  do
+    -- The SAME anchor the run uses. Using target[1] here reported "the time selection does
+    -- not overlap the item" for a run that would have worked, on every track with more than
+    -- one clip -- the panel refusing a job it was perfectly able to do.
+    local first, ferr = Timesel.anchor_clip(sel.target, cfg.ignore_time_selection)
+    if not first and ferr then ImGui.TextColored(ctx, COL_RED, ferr) end
+    if first then
+      local pos = reaper.GetMediaItemInfo_Value(first.item, "D_POSITION")
+      local len = reaper.GetMediaItemInfo_Value(first.item, "D_LENGTH")
+      local r, rerr = Timesel.for_item(first.item, cfg.ignore_time_selection)
+      if r then
+        ImGui.TextWrapped(ctx, Timesel.describe(r, pos, len))
+        if r.from_selection and not r.whole and not cfg.process_whole_item then
+          ImGui.TextColored(ctx, COL_GREY,
+            "The clips are split at the edges; the rest keeps its original take.")
+        elseif r.from_selection and cfg.process_whole_item then
+          ImGui.TextColored(ctx, COL_GREY,
+            "Measured over the selection, applied to the whole clip.")
+        end
+      else
+        ImGui.TextColored(ctx, COL_RED, rerr)
+      end
+    end
+  end
+  -- Deferred: these draw BEFORE the plots, and clearing the cached spectrum here would leave
+  -- the rest of the frame reading a nil ST.ana.
+  local function defer_stale() ST.roles_dirty = true end
+  checkbox("Ignore time selection", "ignore_time_selection", defer_stale)
+  checkbox("Measure the selection, tilt the whole clip", "process_whole_item", defer_stale)
+
 
   ImGui.SeparatorText(ctx, "Source")
   begin_disabled(busy())
@@ -558,7 +630,6 @@ local function frame()
   if ImGui.CollapsingHeader(ctx, "Analysis (re-reads the audio)") then
     islider("FFT size", "fft_size", 1024, 8192, stale_analysis)
     islider("Hop", "ana_hop", 256, 4096, stale_analysis)
-    input_int("Target track (0 = highest selected)", "target_track", 0)
     ImGui.TextColored(ctx, COL_GREY,
       "Changing these throws the cached spectrum away.")
   end
@@ -583,6 +654,12 @@ local function frame()
 
   ImGui.Separator(ctx)
   if ImGui.SmallButton(ctx, "Reset all settings") then reset_settings() end
+
+  -- End of frame: safe to drop the cached analysis now that nothing else will read it.
+  if ST.roles_dirty then
+    ST.roles_dirty = false
+    stale_analysis()
+  end
 end
 
 ------------------------------------------------------------------ test hooks

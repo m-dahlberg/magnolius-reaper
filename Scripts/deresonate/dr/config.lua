@@ -16,6 +16,10 @@ M.EXT_SECTION = "deresonate"
 M.VERSION     = 1
 
 M.defaults = {
+  -- A time selection narrows what is analysed and what is written; this overrides that back
+  -- to the whole item without making you clear the selection.
+  ignore_time_selection = false,
+
   -- Analysis -- these cost a re-read of the audio ------------------------
   modal_rate     = 4000,   -- accessor rate for the spectral pass. Reading low
                            -- is *better*: 2048 bins at 4 kHz give 1.95 Hz
@@ -152,7 +156,7 @@ M.defaults = {
 -- Parameter classes. Only ANALYSIS_KEYS change which samples would be read.
 M.ANALYSIS_KEYS = { "modal_rate", "fft_size", "ana_hop", "ring_fft", "ring_hop",
                     "hop_ms", "pitch_rate", "min_hz", "max_hz", "yin_threshold",
-                    "edc_gate_db" }
+                    "edc_gate_db", "ignore_time_selection" }
 M.DETECT_KEYS   = { "skip_silence",
                     "percentile", "smooth_oct", "min_prominence_db", "min_topo_db",
                     "min_q", "max_occupancy", "mask_cents", "search_lo_hz",

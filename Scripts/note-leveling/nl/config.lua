@@ -13,6 +13,11 @@ local M = {}
 M.EXT_SECTION = "note_leveling"
 
 M.defaults = {
+  -- A time selection narrows what is analysed and what is written; this overrides that back to
+  -- the whole item without making you clear the selection. There is no split here: this script
+  -- writes envelopes, not takes, so narrowing simply means fewer points.
+  ignore_time_selection = false,
+
   -- Pitch detection ----------------------------------------------------------
   -- hop_ms is the pitch sampling distance -- the "every 5 ms" of the design.
   -- It sets the frame grid for both the pitch track and the RMS measurement,
@@ -164,10 +169,15 @@ M.defaults = {
   -- it plans against the signal the fader will actually see. That is only true
   -- if the Pre-FX envelope is written too, so by default the rider writes both.
   rider_after_notes = true,
-  -- 0 = auto: the selected items on the highest-numbered track are the target
-  -- and everything above them is reference. Otherwise an explicit 1-based
-  -- track number, which is what a headless run wants.
-  rider_target_track = 0,
+  -- Track roles. The source is the vocal being levelled and ridden; up to three background
+  -- tracks are summed into the loudness reference. Each is stored as a GUID, the name it had
+  -- when it was picked, and a typed name that overrides both -- see nl/trackpick.lua for why
+  -- all three, and nl/select.lua for what replaced the old positional rule. Every audio clip
+  -- on a chosen track is used; nothing needs selecting.
+  source_guid = "", source_name = "", source_override = "",
+  bg1_guid = "", bg1_name = "", bg1_override = "",
+  bg2_guid = "", bg2_name = "", bg2_override = "",
+  bg3_guid = "", bg3_name = "", bg3_override = "",
 }
 
 function M.new()
@@ -199,7 +209,16 @@ end
 -- Everything else only re-derives from frames already in memory, which is why
 -- a floor or ceiling slider can redraw the panel without re-reading a sample.
 
-M.ANALYSIS_KEYS = { "hop_ms", "min_hz", "max_hz", "pitch_rate", "yin_threshold" }
+-- The track roles are analysis keys for the same reason as the rest: they change which samples
+-- would be read. The source picks the take that is levelled and ridden; each background slot
+-- adds reference clips. None of them can be re-derived from frames already in memory, which is
+-- the line this class draws.
+M.ANALYSIS_KEYS = { "hop_ms", "min_hz", "max_hz", "pitch_rate", "yin_threshold",
+                    "source_guid", "source_name", "source_override",
+                    "bg1_guid", "bg1_name", "bg1_override",
+                    "bg2_guid", "bg2_name", "bg2_override",
+                    "bg3_guid", "bg3_name", "bg3_override",
+                    "ignore_time_selection" }
 M.CLUSTER_KEYS  = { "voice_gate_db", "tolerance_cents", "min_note_ms",
                     "max_gap_ms", "silence_db", "wobble_ms",
                     "octave_fix", "octave_hold_ms", "octave_link_ms",
@@ -220,7 +239,7 @@ M.RIDER_KEYS    = { "rider_offset_db", "rider_ref_follow", "rider_tgt_level",
                     "rider_seg_max_ms", "rider_gate_db",
                     "rider_smooth_ms", "rider_speed_db_s",
                     "rider_lookahead_ms", "rider_trans_ms", "rider_point_ms",
-                    "rider_trim_db", "rider_after_notes", "rider_target_track" }
+                    "rider_trim_db", "rider_after_notes" }
 
 local function signature(cfg, keys)
   local t = {}
