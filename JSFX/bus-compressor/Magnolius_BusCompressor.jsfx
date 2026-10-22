@@ -1,0 +1,804 @@
+desc:Bus Compressor (Magnolius)
+// @description Bus Compressor (Magnolius)
+// @author Magnolius
+// @version 0.1
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_BusCompressor.help.txt
+// @about
+//   A stereo bus compressor with the topology and stepped controls of the
+//   SSL G-series: feed-forward, stereo linked, one shared attack/release
+//   element, and an Auto release that follows the programme. Adds a
+//   sidechain high-pass, an external key, dry/wet, and a light Colour stage
+//   whose drive follows the gain reduction.
+//
+//   Constant 24 samples of latency, reported to the host (PDC).
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   First release.
+
+//tags: dynamics compressor bus glue console
+// A behavioural model of the SSL G-series bus compressor - "same structure,
+// same stepped controls", not a circuit simulation.  Everything marked
+// INFERRED is a modelling decision, not a published figure.
+//
+// Signal path (per sample):
+//   key     = the input, or the external key on channels 3/4
+//   key     -> 2nd-order Butterworth HPF (the detector only, never the audio)
+//   detector: peak envelope of max(|L|,|R|), instant attack, DET_REL release
+//   -> dB -> gain computer (3 dB quadratic knee) -> target GR in dB
+//   -> ONE shared timing element, in the GR domain:
+//        attack  : one-pole, time constant = the Attack label
+//        release : one-pole, time constant = max(Release label, Attack label)
+//                  so release can never be effectively faster than attack
+//        Auto    : the same element released at AUTO_TF, plus a SLOW element
+//                  that charges at AUTO_TSC and releases at AUTO_TSR; the GR
+//                  is the larger of the two.  A transient barely charges the
+//                  slow element so it recovers fast; sustained compression
+//                  charges it and recovers slowly.  No switch: it depends on
+//                  how much GR has been held and for how long.
+//   -> VCA gain on the input (the same gain on both channels)
+//   -> Colour: a polynomial shaper run 2x oversampled, evaluated at the
+//        PRE-compression level (so the harmonics follow the input level) with
+//        a drive that follows the gain reduction.  Crossfaded against a plain
+//        delay of the same length, so Colour 0 is bit-transparent.
+//   -> makeup (wet path only) -> dry/wet -> bypass -> key listen
+//
+// LATENCY is a constant LAT = 24 samples (the 49-tap halfband pair), reported
+// through pdc_delay whatever the settings.  The dry path, the bypass path and
+// the Colour-off path are each delayed by the same 24 samples, so actual
+// latency always equals reported latency and toggling anything never shifts
+// timing.  The detector and the gain run on the UNDELAYED input.
+//
+// INFERRED constants (plain numbers in @init, tune by ear): KNEE_W,
+// DET_REL, AUTO_TF, AUTO_TSC, AUTO_TSR, SAT_*.  The labels are time
+// constants: the gain reaches 63% of a step in the labelled time.
+//
+// Every slider label starts with '-', which hides it from REAPER's generic
+// slider list (the panel replaces it) while keeping it automatable.
+//
+// THREADING - do not undo this.  @gfx runs on the UI thread; @init, @slider,
+// @block and @sample run on the audio thread.  ALL globals AND all function
+// locals and parameters are shared and static.  So:
+//   * every @gfx variable is g_-prefixed; @gfx loop counters are gi/gj; the
+//     audio side never uses a g_ name, gi or gj; nothing is named on both.
+//   * audio thread only:  fir, shape, gr_calc, hp_design, ramp, snap,
+//     proc_ch, kaiser_i0, halfband_init
+//   * @gfx only:          every g_* function and every gk_* widget
+//   * the ONE function both threads call is recalc().  It has no parameters,
+//     no local() and no loops - every name in it is a global written
+//     deterministically from the slider values - so two concurrent calls
+//     compute identical results.  It must be callable from @gfx because
+//     neither slider_automate() nor sliderchange() re-runs @slider, and
+//     @block does not run on a stopped track.  DO NOT ADD locals, parameters
+//     or loops to it.
+// EEL2 is case-insensitive, and has no scientific notation (1e-9 is a silent
+// syntax error that kills the whole section).
+//
+// tools/model.py mirrors @init / recalc / @sample sample for sample.  Edit
+// the two together.
+//
+// Shared memory, namespaced to this vendor.  ONE slot map for every
+// options:gmem=Magnolius plugin:
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+//
+// Memory map (words):
+//    0.. 12  halfband taps c_tab[1..12]
+//   16.. 21  attack time constants, 24.. 27  release time constants
+//   64      dry L        128  dry R         (rings of 64, indexed & 63)
+//   192     VCA'd L      256  VCA'd R       (the oversampler input)
+//   320     shaped even L 384 shaped even R
+//   448     shaped odd L  512 shaped odd R
+//   576     drive ring   640  1/gain ring
+//   704.. 707  DC blocker state L, R
+//
+// Registries:  widget ids  10-14 compressor knobs, 15-17 second-row knobs,
+//              21-22 toggles, 40-42 header controls, 50-56 value fields.
+//              string slots 300+ help text.
+
+slider1:thr_db=-10<-40,0,0.1>-Threshold (dBFS)
+slider2:ratio_i=1<0,2,1{2,4,10}>-Ratio
+slider3:att_i=4<0,5,1{0.1,0.3,1,3,10,30}>-Attack (ms)
+slider4:rel_i=1<0,4,1{0.1,0.3,0.6,1.2,Auto}>-Release (s)
+slider5:makeup_db=0<0,20,0.1>-Makeup (dB)
+slider6:hpf_hz=0<0,500,1>-Sidechain HPF (Hz)
+slider7:ext_key=0<0,1,1{Off,On}>-External Key
+slider8:key_listen=0<0,1,1{Off,On}>-Listen to Key
+slider9:colour=0<0,100,1>-Colour (%)
+slider10:mix=100<0,100,1>-Dry Wet Mix (%)
+slider11:bypass=0<0,1,1{Off,On}>-Bypass
+
+options:gmem=Magnolius
+
+in_pin:left input
+in_pin:right input
+in_pin:left key
+in_pin:right key
+out_pin:left output
+out_pin:right output
+
+import gui_kit/gui_kit.jsfx-inc
+
+// Images first and contiguous from 0, the help file LAST.  Never put a
+// trailing // comment on these lines: the rest of the line is the path.
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/value_field.png
+filename:3,gui_kit/header_bar.png
+filename:4,gui_kit/panel_tile.png
+filename:5,gui_kit/dropdown.png
+filename:6,gui_kit/button_cyan.png
+filename:7,gui_kit/toggle_orange.png
+filename:8,gui_kit/logo_magnolius_grey.png
+filename:9,Magnolius_BusCompressor.help.txt
+
+@init
+gk_init();
+gk_img_field = 2; gk_img_header = 3; gk_img_panel = 4;
+gk_img_dropdown = 5; gk_img_button = 6;
+IMG_COUNT = 9;                  // slots 0..8 are images; 9 is the help file
+TOG_IMG = 7;
+LOGO_IMG = 8;
+LOGO_ASPECT = 512/101;
+
+// Grid-packed filmstrip: 8 columns x 8 rows, 64 frames (cyan and orange).
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+// ---- design size ----
+// REAPER opens at the @gfx size, which is a compile-time literal, so keep
+// these in step with the "@gfx 720 360" line.
+UI_W = 720; UI_H = 360;
+
+// ---- interface scale ----
+GM_UI_SCALE = 0;
+UI_SCALE_DEFAULT = 0;           // 0 = Fit, else an entry in ui_scale()
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- help ----
+HELP_FILE = 9; HELP_BASE = 300; HELP_MAX = 600;
+
+// ---- constants ----
+DB2LOG  = 0.11512925464970229;  // ln(10)/20
+LOG2DB  = 8.6858896380650366;   // 20/ln(10)
+TINY_A  = 10^(-6);              // amplitude floor, -120 dB.  NOT 1e-6.
+// INFERRED constants - see the header.
+KNEE_W   = 3;                   // dB, quadratic knee
+DET_REL  = 0.002;               // s, detector peak-envelope release
+AUTO_TF  = 0.12;                // s, Auto: fast element release
+AUTO_TSC = 1.0;                 // s, Auto: slow element charge
+AUTO_TSR = 2.0;                 // s, Auto: slow element release
+SM_T     = 0.020;               // s, makeup / mix / colour smoothing
+RAMP_T   = 0.010;               // s, bypass / listen / Colour-switch ramps
+HP_BLK   = 32;                  // samples between HPF coefficient updates
+HP_OFF_HZ = 10;                 // the filter parks here while Off
+HP_GLIDE_T = 0.020;             // s, cutoff glide
+SAT_A2   = 0.08;                // 2nd-order shaper term
+SAT_A3   = 0.20;                // 3rd-order shaper term
+SAT_BASE = 0.25;                // share of the drive present with no GR
+SAT_GR_FULL = 10;               // dB of GR at which the drive is full
+SAT_REF2 = 0.20;                // squared amplitude the gain trim assumes
+DC_HZ    = 8;                   // DC blocker corner after the shaper
+MTR_RISE = 0.015;               // s, GR needle
+MTR_FALL = 0.250;
+MTR_PK   = 0.300;               // s, in/out peak fall
+KAISER_BETA = 8;
+LAT      = 24;                  // samples; the 49-tap halfband pair
+
+// memory map
+c_tab   = 0;
+att_tab = 16;
+rel_tab = 24;
+R_DRYL = 64;  R_DRYR = 128;
+R_XGL  = 192; R_XGR  = 256;
+R_ZEL  = 320; R_ZER  = 384;
+R_ZOL  = 448; R_ZOR  = 512;
+R_DD   = 576; R_SC   = 640;
+R_DCL  = 704; R_DCR  = 706;
+
+att_tab[0] = 0.1;  att_tab[1] = 0.3;  att_tab[2] = 1;
+att_tab[3] = 3;    att_tab[4] = 10;   att_tab[5] = 30;      // ms
+rel_tab[0] = 0.1;  rel_tab[1] = 0.3;  rel_tab[2] = 0.6;
+rel_tab[3] = 1.2;                                            // s; index 4 = Auto
+
+ext_gr_meter = 0;
+
+// Everything derived from the sliders and srate, in one place.  Called from
+// @slider, from @init and from @gfx.
+//
+// *** DO NOT ADD local() OR PARAMETERS OR LOOPS TO THIS FUNCTION. ***
+// See THREADING.
+function recalc()
+(
+  r_k = min(max(floor(ratio_i + 0.5), 0), 2);
+  a_k = min(max(floor(att_i + 0.5), 0), 5);
+  l_k = min(max(floor(rel_i + 0.5), 0), 4);
+  ratio_v = r_k == 0 ? 2 : r_k == 1 ? 4 : 10;
+  s_slope = 1 - 1/ratio_v;
+  tau_a = att_tab[a_k]*0.001;
+  a_att = 1 - exp(-1/(tau_a*srate));
+  auto_t = l_k == 4 ? 1 : 0;
+  tau_r = l_k == 4 ? AUTO_TF : rel_tab[l_k];
+  a_rel = 1 - exp(-1/(max(tau_r, tau_a)*srate));
+  a_sc = 1 - exp(-1/(AUTO_TSC*srate));
+  a_sr = 1 - exp(-1/(AUTO_TSR*srate));
+  det_r = exp(-1/(DET_REL*srate));
+  sm_a = 1 - exp(-1/(SM_T*srate));
+  ramp_s = 1/(RAMP_T*srate);
+  mk_t = makeup_db;
+  mix_t = mix*0.01;
+  col_t = colour*0.01;
+  sat_t = colour > 0 ? 1 : 0;
+  bp_t = bypass > 0.5 ? 1 : 0;
+  ls_t = key_listen > 0.5 ? 1 : 0;
+  ext_on = ext_key > 0.5;
+  hp_on = hpf_hz >= 20;
+  hp_tgt = log(hp_on ? hpf_hz : HP_OFF_HZ);
+  hp_a = 1 - exp(-1/(HP_GLIDE_T*srate/HP_BLK));
+  dc_r = 1 - 2*$pi*DC_HZ/srate;
+  m_rise = 1 - exp(-1/(MTR_RISE*srate));
+  m_fall = 1 - exp(-1/(MTR_FALL*srate));
+  m_pk = exp(-1/(MTR_PK*srate));
+);
+
+// Kaiser-windowed halfband, 49 taps: the centre tap is 0.5, every other tap
+// at an even distance from it is zero, and the 12 distinct odd-offset taps
+// c_tab[1..12] are scaled so the DC gain is exactly 1.
+function kaiser_i0(x) local(s, t, k)
+(
+  s = 1; t = 1; k = 1;
+  loop(25, t *= sqr(x*0.5/k); s += t; k += 1;);
+  s;
+);
+function halfband_init() local(b0, i, j, w, tot)
+(
+  b0 = kaiser_i0(KAISER_BETA);
+  tot = 0; i = 1;
+  loop(12,
+    j = 2*i - 1;
+    w = kaiser_i0(KAISER_BETA*sqrt(1 - sqr(j/24)))/b0;
+    c_tab[i] = sin($pi*j*0.5)/($pi*j)*w;
+    tot += c_tab[i];
+    i += 1;
+  );
+  i = 1;
+  loop(12, c_tab[i] *= 0.25/tot; i += 1;);
+);
+
+// Second-order Butterworth high-pass, bilinear.  AUDIO THREAD ONLY.
+function hp_design(f) local(k, nrm)
+(
+  f = min(f, srate*0.45);
+  k = tan($pi*f/srate);
+  nrm = 1/(1 + 1.41421356237309505*k + k*k);
+  hb0 = nrm; hb1 = -2*nrm; hb2 = nrm;
+  ha1 = 2*(k*k - 1)*nrm;
+  ha2 = (1 - 1.41421356237309505*k + k*k)*nrm;
+);
+
+initdone != 20261023 ? (
+  initdone = 20261023;
+  recalc();
+  halfband_init();
+  memset(R_DRYL, 0, 640);
+  memset(R_SC, 1, 64);                  // 1/gain = 1: no gain reduction yet
+  memset(R_DCL, 0, 4);
+  det = 0; gr_g = 0; gr_s = 0; gr = 0; lvl = -120;
+  wa = auto_t; mk_sm = mk_t; mix_sm = mix_t; col_sm = col_t;
+  bp_sw = bp_t; ls_sw = ls_t; sat_sw = sat_t;
+  hp_lf = hp_tgt; hp_cnt = 0;
+  hz1l = 0; hz2l = 0; hz1r = 0; hz2r = 0;
+  hp_design(exp(hp_lf));
+  wp = 0;
+  first_run = 1;                        // see snap_states()
+  mtr_gr = 0; mtr_in = 0; mtr_out = 0;
+  gui_scale_idx = UI_SCALE_DEFAULT;
+  help_open = 0; help_lines = 0;
+) : (
+  // @init re-runs on a sample-rate change and on transport start.  The state
+  // survives (the non-empty @serialize keeps it); only the rate-dependent
+  // scalars are refreshed.
+  recalc();
+  halfband_init();
+  hp_design(exp(hp_lf));
+);
+
+// REAPER runs @init with the DEFAULT slider values and only then applies the
+// project's, so without this the smoothed controls would glide from the
+// defaults over the first ~100 ms of playback.  Called from @slider until the
+// first sample has run; after that the smoothing is real.  AUDIO THREAD ONLY.
+function snap_states()
+(
+  wa = auto_t; mk_sm = mk_t; mix_sm = mix_t; col_sm = col_t;
+  bp_sw = bp_t; ls_sw = ls_t; sat_sw = sat_t;
+  hp_lf = hp_tgt;
+  hp_design(exp(hp_lf));
+);
+
+// Gain computer, dB in (level) -> dB out (gain reduction, >= 0).  AUDIO
+// THREAD ONLY - @gfx has its own copy, g_gr.
+function gr_calc(x) local(o)
+(
+  o = x - thr_db;
+  2*o < -KNEE_W ? 0 :
+  2*abs(o) <= KNEE_W ? s_slope*sqr(o + KNEE_W*0.5)/(2*KNEE_W) :
+  s_slope*o;
+);
+
+// Linear ramp and snap, for the smoothed controls.  AUDIO THREAD ONLY.
+function ramp(x, t) ( x < t ? min(x + ramp_s, t) : max(x - ramp_s, t); );
+function snap(x, t, eps) ( abs(t - x) < eps ? t : x; );
+
+// Sum over i = 1..12 of c[i]*(buf[wi-p-i] + buf[wi-q+i]) on a ring of 64.
+function fir(buf, wi, p, q) local(i, s)
+(
+  s = 0; i = 1;
+  loop(12,
+    s += c_tab[i]*(buf[(wi + 64 - p - i) & 63] + buf[(wi + 64 - q + i) & 63]);
+    i += 1;
+  );
+  s;
+);
+
+// Colour shaper at the pre-compression level: sc = 1/gain undoes the gain
+// reduction for the polynomial and puts it back after, so the harmonics
+// follow the input level and only the drive d follows the gain reduction.
+function shape(x, d, sc) local(xs, xc)
+(
+  xs = x*sc;
+  xc = max(-1, min(1, xs));
+  (xs + d*(SAT_A2*xc*xc - SAT_A3*xc*xc*xc))/sc;
+);
+
+// One channel of the processed path.  wi, glin, dsel, ssel, comp, mk and the
+// smoothed controls are set up in @sample before the two calls.
+function proc_ch(dry, xg, ze, zo, st, x, kf) local(e, o, sat, y, wd, wet, dry_d, pr)
+(
+  dry[wi] = x;
+  xg[wi] = x*glin;
+  e = xg[(wi + 64 - 12) & 63];
+  o = 2*fir(xg, wi, 11, 12);
+  ze[wi] = shape(e, dsel, ssel);
+  zo[wi] = shape(o, dsel, ssel);
+  sat = (0.5*ze[(wi + 64 - 12) & 63] + fir(zo, wi, 12, 13))*comp;
+  y = sat - st[0] + dc_r*st[1];
+  st[0] = sat; st[1] = y;
+  wd = xg[(wi + 64 - LAT) & 63];
+  wet = wd + sat_sw*(y - wd);
+  wet *= mk;
+  dry_d = dry[(wi + 64 - LAT) & 63];
+  pr = dry_d*(1 - mix_sm) + wet*mix_sm;
+  pr = pr*(1 - bp_sw) + dry_d*bp_sw;
+  pr*(1 - ls_sw) + kf*ls_sw;
+);
+
+@slider
+recalc();
+first_run ? snap_states();
+
+@serialize
+// GUI-only state: saved with the project, never in automation.
+// APPEND new values, never insert.
+file_var(0, gui_scale_idx);
+
+@block
+pdc_delay = LAT; pdc_bot_ch = 0; pdc_top_ch = 2;
+
+@sample
+first_run = 0;
+al = spl0; ar = spl1;
+ext_on ? ( kin_l = spl2; kin_r = spl3; ) : ( kin_l = al; kin_r = ar; );
+
+// key high-pass, coefficients glided every HP_BLK samples
+hp_cnt -= 1;
+hp_cnt <= 0 ? (
+  hp_cnt = HP_BLK;
+  hp_lf += hp_a*(hp_tgt - hp_lf);
+  hp_design(exp(hp_lf));
+);
+yl = hb0*kin_l + hz1l; hz1l = hb1*kin_l - ha1*yl + hz2l; hz2l = hb2*kin_l - ha2*yl;
+yr = hb0*kin_r + hz1r; hz1r = hb1*kin_r - ha1*yr + hz2r; hz2r = hb2*kin_r - ha2*yr;
+kfl = hp_on ? yl : kin_l;
+kfr = hp_on ? yr : kin_r;
+
+// detector -> gain computer
+dtc = max(abs(kfl), abs(kfr));
+det = dtc > det ? dtc : dtc + (det - dtc)*det_r;
+lvl = LOG2DB*log(max(det, TINY_A));
+tgt = gr_calc(lvl);
+
+// shared timing element; the slow element only matters in Auto
+gr_g += (tgt - gr_g)*(tgt > gr_g ? a_att : a_rel);
+gr_s += (tgt - gr_s)*(tgt > gr_s ? a_sc : a_sr);
+gr_g < 0.000000001 ? ( gr_g = 0; );
+gr_s < 0.000000001 ? ( gr_s = 0; );
+wa = ramp(wa, auto_t);
+gr = gr_g + wa*(max(gr_g, gr_s) - gr_g);
+glin = exp(-gr*DB2LOG);
+
+// smoothed controls and ramps
+mk_sm += sm_a*(mk_t - mk_sm);    mk_sm = snap(mk_sm, mk_t, 0.000001);
+mix_sm += sm_a*(mix_t - mix_sm); mix_sm = snap(mix_sm, mix_t, 0.0000001);
+col_sm += sm_a*(col_t - col_sm); col_sm = snap(col_sm, col_t, 0.0000001);
+bp_sw = ramp(bp_sw, bp_t);
+ls_sw = ramp(ls_sw, ls_t);
+sat_sw = ramp(sat_sw, sat_t);
+
+// per-sample values shared by both channels
+wi = wp;
+dd_v = col_sm*(SAT_BASE + (1 - SAT_BASE)*min(1, gr/SAT_GR_FULL));
+R_DD[wi] = dd_v;
+R_SC[wi] = 1/glin;
+dsel = R_DD[(wi + 64 - 12) & 63];
+ssel = R_SC[(wi + 64 - 12) & 63];
+comp = 1/(1 - 0.75*SAT_A3*dsel*SAT_REF2);
+mk = exp(mk_sm*DB2LOG);
+
+o_l = proc_ch(R_DRYL, R_XGL, R_ZEL, R_ZOL, R_DCL, al, kfl);
+o_r = proc_ch(R_DRYR, R_XGR, R_ZER, R_ZOR, R_DCR, ar, kfr);
+wp = (wi + 1) & 63;
+spl0 = o_l; spl1 = o_r;
+
+ext_gr_meter = -gr;
+
+// published for @gfx, which only READS these scalars
+mi = max(abs(al), abs(ar));
+mtr_in = mi > mtr_in ? mi : mtr_in*m_pk;
+mo = max(abs(o_l), abs(o_r));
+mtr_out = mo > mtr_out ? mo : mtr_out*m_pk;
+mtr_gr += (gr - mtr_gr)*(gr > mtr_gr ? m_rise : m_fall);
+
+@gfx 720 360
+// ---------------------------------------------------------------------------
+// UI THREAD ONLY.  See THREADING at the top.  No audio-side function is
+// called from here except recalc().
+// ---------------------------------------------------------------------------
+gk_begin();
+g_chg = 0;
+
+// Shared scale: read it, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
+
+// gk_begin set gk_S from gfx_ext_retina (1 or 2).  A fixed percentage is
+// relative to that; Fit divides the window by the design size.
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret * g_sc : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(3, gk_font, 9*gk_S);
+gfx_setfont(1);
+
+function g_accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+function g_cyan()   ( g_accent(0.149, 0.784, 0.902); );
+function g_orange() ( g_accent(0.941, 0.588, 0.157); );
+
+function g_count_missing(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// logical-coordinate line, 1 logical px wide
+function g_line(x0, y0, x1, y1)
+(
+  gfx_line(x0*gk_S, y0*gk_S, x1*gk_S, y1*gk_S, 1);
+);
+
+// Detent label on the knob's sweep.  t is the position 0..1; the 270 degree
+// sweep runs from -135 to +135 degrees, 0 = up, as in the filmstrip.
+function g_tick(cx, cy, t, str, lit) local(a, tw, th)
+(
+  a = -2.35619449 + 4.71238898*t;
+  gfx_setfont(3);
+  lit ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1) : gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_measurestr(str, tw, th);
+  gfx_x = (cx + 41*sin(a))*gk_S - tw*0.5;
+  gfx_y = (cy - 41*cos(a))*gk_S - th*0.5;
+  gfx_drawstr(str);
+  gfx_setfont(1);
+);
+
+// Stepped knob: n detents, idx 0..n-1.  Drags 18 px per detent (Shift: 54),
+// the wheel steps one, Ctrl-click resets.  Draws the SNAPPED frame, which is
+// what makes it feel like a detented switch.  Returns the new index.
+function g_knob_step(id, img, x, y, size, n, idx, didx) local(hit, st, t)
+(
+  hit = gk_hit(x, y, size, size);
+  gk_clicked && hit ? (
+    mouse_cap & 4 ? idx = didx : ( gk_active = id; gk_lasty = mouse_y; g_kacc = 0; );
+  );
+  gk_active == id && (mouse_cap & 1) ? (
+    g_kacc += (gk_lasty - mouse_y)/gk_S;
+    gk_lasty = mouse_y;
+    st = (mouse_cap & 8) ? 54 : 18;
+    while (g_kacc >= st) ( idx += 1; g_kacc -= st; );
+    while (g_kacc <= -st) ( idx -= 1; g_kacc += st; );
+  );
+  mouse_wheel != 0 && hit ? (
+    idx += mouse_wheel > 0 ? 1 : -1;
+    mouse_wheel = 0;
+  );
+  idx = gk_clamp(idx, 0, n - 1);
+  t = idx/(n - 1);
+  gk_strip_grid(img, gk_knob_frames, gk_knob_cols, t*(gk_knob_frames - 1), x, y, size, size)
+    ? 0 : gk_knob_vector(x, y, size, t);
+  idx;
+);
+
+// Sidechain HPF knob position <-> Hz: log from 20 to 500 Hz over 4%..100% of
+// the travel, with the bottom 4% = Off (0 Hz).
+function g_hz2p(hz) ( hz < 20 ? 0 : 0.04 + 0.96*log(hz/20)/log(25); );
+function g_p2hz(p) ( p < 0.04 ? 0 : floor(20*exp((p - 0.04)/0.96*log(25)) + 0.5); );
+
+// GR needle angle, radians from straight up.  0..20 dB sweeps -36..+36 deg.
+function g_mang(gdb) ( -0.62831853 + 1.25663706*gdb/20; );
+
+// ---------------------------------------------------------------- header
+gk_header(0, 10, 10, UI_W - 20, 22, "SSL G BUS COMPRESSOR", -1, 0);
+g_r  = min(UI_W - 20, gfx_w/gk_S - 10);
+g_sx = g_r - 86;
+g_i = gk_dropdown(40, g_sx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
+);
+// Must come after the header controls and before every other widget.
+help_open ? gk_help_input(40, 41);
+gk_button(42, g_sx - 62, 13, 58, 16, bypass > 0.5, "BYPASS") ? (
+  bypass = bypass > 0.5 ? 0 : 1;
+  slider_automate(2^10);
+  g_chg = 1;
+);
+
+// ---------------------------------------------------------------- compressor
+gk_panel(10, 40, 470, 168);
+gk_header(0, 10, 40, 470, 22, "COMPRESSOR", -1, 0);
+g_cyan();
+g_ky = 84; g_kc = g_ky + 32;
+
+// Threshold (slider 1, continuous)
+g_cx = 57;
+g_chg |= gk_knob_slider(10, 0, g_cx - 32, g_ky, 64, 1, -40, 0, -10);
+g_tick(g_cx, g_kc, 0,    "-40", 0);
+g_tick(g_cx, g_kc, 0.25, "-30", 0);
+g_tick(g_cx, g_kc, 0.5,  "-20", 0);
+g_tick(g_cx, g_kc, 0.75, "-10", 0);
+g_tick(g_cx, g_kc, 1,    "0",   0);
+gk_text_c(g_cx, 154, "Threshold", 1);
+sprintf(#g_s, "%.1f dB", thr_db);
+g_chg |= gk_field_edit_slider(50, g_cx - 30, 170, 60, 16, 1, -40, 0, -10, #g_s);
+
+// Ratio (slider 2, stepped 2 / 4 / 10)
+g_cx = 151;
+g_ri = min(max(floor(ratio_i + 0.5), 0), 2);
+g_ni = g_knob_step(11, 0, g_cx - 32, g_ky, 64, 3, g_ri, 1);
+g_ni != g_ri ? ( ratio_i = g_ni; slider_automate(2^1); g_chg = 1; g_ri = g_ni; );
+g_tick(g_cx, g_kc, 0,   "2",  g_ri == 0);
+g_tick(g_cx, g_kc, 0.5, "4",  g_ri == 1);
+g_tick(g_cx, g_kc, 1,   "10", g_ri == 2);
+gk_text_c(g_cx, 154, "Ratio", 1);
+sprintf(#g_s, "%d : 1", g_ri == 0 ? 2 : g_ri == 1 ? 4 : 10);
+gk_field(g_cx - 30, 170, 60, 16, #g_s);
+
+// Attack (slider 3, stepped 0.1 .3 1 3 10 30 ms)
+g_cx = 245;
+g_ai = min(max(floor(att_i + 0.5), 0), 5);
+g_ni = g_knob_step(12, 0, g_cx - 32, g_ky, 64, 6, g_ai, 4);
+g_ni != g_ai ? ( att_i = g_ni; slider_automate(2^2); g_chg = 1; g_ai = g_ni; );
+g_tick(g_cx, g_kc, 0,   "0.1", g_ai == 0);
+g_tick(g_cx, g_kc, 0.2, "0.3", g_ai == 1);
+g_tick(g_cx, g_kc, 0.4, "1",   g_ai == 2);
+g_tick(g_cx, g_kc, 0.6, "3",   g_ai == 3);
+g_tick(g_cx, g_kc, 0.8, "10",  g_ai == 4);
+g_tick(g_cx, g_kc, 1,   "30",  g_ai == 5);
+gk_text_c(g_cx, 154, "Attack", 1);
+att_tab[g_ai] < 1 ? sprintf(#g_s, "%.1f ms", att_tab[g_ai]) : sprintf(#g_s, "%d ms", att_tab[g_ai]);
+gk_field(g_cx - 30, 170, 60, 16, #g_s);
+
+// Release (slider 4, stepped 0.1 .3 .6 1.2 s, then Auto)
+g_cx = 339;
+g_li = min(max(floor(rel_i + 0.5), 0), 4);
+g_ni = g_knob_step(13, 0, g_cx - 32, g_ky, 64, 5, g_li, 1);
+g_ni != g_li ? ( rel_i = g_ni; slider_automate(2^3); g_chg = 1; g_li = g_ni; );
+g_tick(g_cx, g_kc, 0,    "0.1",  g_li == 0);
+g_tick(g_cx, g_kc, 0.25, "0.3",  g_li == 1);
+g_tick(g_cx, g_kc, 0.5,  "0.6",  g_li == 2);
+g_tick(g_cx, g_kc, 0.75, "1.2",  g_li == 3);
+g_tick(g_cx, g_kc, 1,    "AUTO", g_li == 4);
+gk_text_c(g_cx, 154, "Release", 1);
+g_li == 4 ? sprintf(#g_s, "Auto") : sprintf(#g_s, "%.1f s", rel_tab[g_li]);
+gk_field(g_cx - 30, 170, 60, 16, #g_s);
+
+// Makeup (slider 5, continuous)
+g_cx = 433;
+g_chg |= gk_knob_slider(14, 0, g_cx - 32, g_ky, 64, 5, 0, 20, 0);
+g_tick(g_cx, g_kc, 0,   "0",   0);
+g_tick(g_cx, g_kc, 0.5, "+10", 0);
+g_tick(g_cx, g_kc, 1,   "+20", 0);
+gk_text_c(g_cx, 154, "Makeup", 1);
+sprintf(#g_s, "%+.1f dB", makeup_db);
+g_chg |= gk_field_edit_slider(51, g_cx - 30, 170, 60, 16, 5, 0, 20, 0, #g_s);
+
+// ---------------------------------------------------------------- gain reduction
+gk_panel(490, 40, 220, 168);
+gk_header(0, 490, 40, 220, 22, "GAIN REDUCTION", -1, 0);
+
+// meter face: warm paper, dark ink, red zone above 14 dB
+g_fx = 506; g_fy = 70; g_fw = 188; g_fh = 88;
+g_px = g_fx + g_fw/2; g_py = g_fy + g_fh + 26;
+gfx_set(0.84, 0.81, 0.71, 1);
+gfx_rect(g_fx*gk_S, g_fy*gk_S, g_fw*gk_S, g_fh*gk_S);
+gfx_set(0.08, 0.085, 0.095, 1);
+gfx_rect(g_fx*gk_S, g_fy*gk_S, g_fw*gk_S, max(1, gk_S));
+gfx_rect(g_fx*gk_S, (g_fy + g_fh)*gk_S - max(1, gk_S), g_fw*gk_S, max(1, gk_S));
+gfx_rect(g_fx*gk_S, g_fy*gk_S, max(1, gk_S), g_fh*gk_S);
+gfx_rect((g_fx + g_fw)*gk_S - max(1, gk_S), g_fy*gk_S, max(1, gk_S), g_fh*gk_S);
+g_r0 = 96;
+gi = 0;
+loop(41,
+  g_g = gi/2;
+  g_a = g_mang(g_g);
+  g_maj = g_g == 0 || g_g == 2 || g_g == 4 || g_g == 6 || g_g == 10 || g_g == 14 || g_g == 20;
+  g_ri2 = g_r0 - (g_maj ? 6 : 3);
+  g_g >= 14 ? gfx_set(0.667, 0.157, 0.118, 1) : gfx_set(0.14, 0.13, 0.118, 1);
+  g_line(g_px + g_ri2*sin(g_a), g_py - g_ri2*cos(g_a), g_px + g_r0*sin(g_a), g_py - g_r0*cos(g_a));
+  gi += 1;
+);
+gfx_setfont(3);
+gi = 0;
+loop(7,
+  g_g = gi == 0 ? 0 : gi == 1 ? 2 : gi == 2 ? 4 : gi == 3 ? 6 : gi == 4 ? 10 : gi == 5 ? 14 : 20;
+  g_a = g_mang(g_g);
+  g_g >= 14 ? gfx_set(0.667, 0.157, 0.118, 1) : gfx_set(0.14, 0.13, 0.118, 1);
+  sprintf(#g_n, "%d", g_g);
+  gfx_measurestr(#g_n, g_tw, g_th);
+  gfx_x = (g_px + (g_r0 - 16)*sin(g_a))*gk_S - g_tw*0.5;
+  gfx_y = (g_py - (g_r0 - 16)*cos(g_a))*gk_S - g_th*0.5;
+  gfx_drawstr(#g_n);
+  gi += 1;
+);
+gfx_set(0.667, 0.157, 0.118, 1);
+gk_arc_band((g_px)*gk_S, g_py*gk_S, (g_r0 + 0.5)*gk_S, (g_r0 + 2.5)*gk_S, g_mang(14), g_mang(20));
+gfx_set(0.14, 0.13, 0.118, 1);
+gfx_x = (g_fx + 10)*gk_S; gfx_y = (g_fy + g_fh - 17)*gk_S;
+gfx_drawstr("GR dB");
+gfx_setfont(1);
+
+// needle, clipped at the bottom edge of the face
+g_gr = min(max(mtr_gr, 0), 20);
+g_a = g_mang(g_gr);
+g_yb = g_fy + g_fh - 3;
+g_n0 = (g_py - g_yb)/cos(g_a);
+gfx_set(0.59, 0.098, 0.078, 1);
+g_line(g_px + g_n0*sin(g_a), g_py - g_n0*cos(g_a), g_px + (g_r0 + 6)*sin(g_a), g_py - (g_r0 + 6)*cos(g_a));
+g_line(g_px + 0.7 + g_n0*sin(g_a), g_py - g_n0*cos(g_a), g_px + 0.7 + (g_r0 + 6)*sin(g_a), g_py - (g_r0 + 6)*cos(g_a));
+
+// IN / OUT peak bars with hold
+function g_bar(y, lab, lv, hold) local(i, bx, bw, seg, on, f)
+(
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_setfont(3);
+  gfx_x = 506*gk_S; gfx_y = (y - 1)*gk_S;
+  gfx_drawstr(lab);
+  gfx_setfont(1);
+  bx = 528; bw = 130; seg = 26;
+  gfx_set(0.10, 0.106, 0.118, 1);
+  gfx_rect(bx*gk_S, (y - 1)*gk_S, bw*gk_S, 7*gk_S);
+  i = 0;
+  loop(seg,
+    on = (i + 1)/seg <= (lv + 60)/60 + 0.0001;
+    f = i/seg;
+    on ? (
+      f < 0.78 ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1) :
+      f < 0.92 ? gfx_set(0.96, 0.77, 0.26, 1) : gfx_set(1, 0.31, 0.27, 1);
+    ) : gfx_set(0.20, 0.21, 0.235, 1);
+    gfx_rect((bx + i*bw/seg)*gk_S + 1, (y - 1)*gk_S + 1, (bw/seg)*gk_S - 1, 7*gk_S - 2);
+    i += 1;
+  );
+  gfx_set(0.85, 0.86, 0.88, 1);
+  f = min(max((hold + 60)/60, 0), 1);
+  gfx_rect((bx + f*bw)*gk_S, (y - 1)*gk_S, max(1, gk_S), 7*gk_S);
+);
+// level in dB, floor -60; hold: 45 frames, then falls
+g_lin = mtr_in > 0.000001 ? 20*log10(mtr_in) : -120;
+g_lout = mtr_out > 0.000001 ? 20*log10(mtr_out) : -120;
+g_lin >= g_hin ? ( g_hin = g_lin; g_hin_t = 45; ) :
+  g_hin_t > 0 ? ( g_hin_t -= 1; ) : ( g_hin = max(g_hin - 0.8, g_lin); );
+g_lout >= g_hout ? ( g_hout = g_lout; g_hout_t = 45; ) :
+  g_hout_t > 0 ? ( g_hout_t -= 1; ) : ( g_hout = max(g_hout - 0.8, g_lout); );
+g_cyan();
+g_bar(173, "IN",  g_lin,  g_hin);
+g_bar(188, "OUT", g_lout, g_hout);
+g_hin > -100  ? sprintf(#g_s, "%.1f", g_hin)  : sprintf(#g_s, "-inf");
+gk_field(662, 169, 36, 14, #g_s);
+g_hout > -100 ? sprintf(#g_s, "%.1f", g_hout) : sprintf(#g_s, "-inf");
+gk_field(662, 184, 36, 14, #g_s);
+
+// ---------------------------------------------------------------- sidechain
+gk_panel(10, 218, 230, 112);
+gk_header(0, 10, 218, 230, 22, "SIDECHAIN", -1, 0);
+g_orange();
+g_cx = 50;
+// the knob keeps its own continuous position while it is dragged, so slow
+// drags at the low end are not lost to rounding the Hz to a whole number
+gk_active != 15 ? ( g_hp = g_hz2p(hpf_hz); );
+g_np = gk_knob(15, 1, g_cx - 32, 252, 64, g_hp, 0, 1, 0);
+g_np != g_hp ? (
+  g_hp = g_np;
+  g_hz = g_p2hz(g_np);
+  g_hz != hpf_hz ? ( hpf_hz = g_hz; slider_automate(2^5); g_chg = 1; );
+);
+g_tick(g_cx, 284, 0,            "Off", hpf_hz < 20);
+g_tick(g_cx, 284, g_hz2p(50),   "50",  0);
+g_tick(g_cx, 284, g_hz2p(150),  "150", 0);
+g_tick(g_cx, 284, 1,            "500", 0);
+gk_text(112, 247, "Key HPF");
+hpf_hz < 20 ? sprintf(#g_s, "Off") : sprintf(#g_s, "%.0f Hz", hpf_hz);
+g_chg |= gk_field_edit_slider(52, 112, 262, 60, 16, 6, 0, 500, 0, #g_s);
+gk_text(112, 286, "Ext key (3/4)");
+g_chg |= gk_toggle_slider(21, TOG_IMG, 196, 284, 28, 16, 7);
+gk_text(112, 308, "Listen");
+g_chg |= gk_toggle_slider(22, TOG_IMG, 196, 306, 28, 16, 8);
+
+// ---------------------------------------------------------------- colour
+gk_panel(250, 218, 230, 112);
+gk_header(0, 250, 218, 230, 22, "COLOUR", -1, 0);
+g_orange();
+g_chg |= gk_knob_slider(16, 1, 268, 252, 64, 9, 0, 100, 0);
+gk_text(350, 260, "Colour");
+sprintf(#g_s, "%.0f %%", colour);
+g_chg |= gk_field_edit_slider(53, 350, 278, 66, 16, 9, 0, 100, 0, #g_s);
+gfx_setfont(3);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = 350*gk_S; gfx_y = 300*gk_S;
+gfx_drawstr("grows with gain reduction");
+gfx_setfont(1);
+
+// ---------------------------------------------------------------- parallel
+gk_panel(490, 218, 220, 112);
+gk_header(0, 490, 218, 220, 22, "PARALLEL", -1, 0);
+g_orange();
+g_chg |= gk_knob_slider(17, 1, 508, 252, 64, 10, 0, 100, 100);
+gk_text(590, 260, "Dry / Wet");
+sprintf(#g_s, "%.0f %%", mix);
+g_chg |= gk_field_edit_slider(54, 590, 278, 66, 16, 10, 0, 100, 100, #g_s);
+gfx_setfont(3);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = 590*gk_S; gfx_y = 300*gk_S;
+gfx_drawstr("makeup on wet only");
+gfx_setfont(1);
+
+// ---------------------------------------------------------------- help
+help_open ? gk_help_draw(10, 40, UI_W - 20, UI_H - 64, "Help  -  Bus Compressor",
+                         HELP_BASE, help_lines);
+
+// ---------------------------------------------------------------- footer
+// Version label: bump on EVERY change - REAPER caches the compiled JSFX per
+// open instance, so a stale instance is otherwise invisible.
+gfx_setfont(3);
+gfx_set(0.35, 0.37, 0.40, 1);
+gfx_x = 10*gk_S; gfx_y = (UI_H - 22)*gk_S;
+sprintf(#g_s, "v0.1   latency %d smp (2x oversampler, PDC)", LAT);
+gfx_drawstr(#g_s);
+gfx_setfont(1);
+gk_strip(LOGO_IMG, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = g_count_missing(IMG_COUNT);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+g_chg ? recalc();
+gk_end();
