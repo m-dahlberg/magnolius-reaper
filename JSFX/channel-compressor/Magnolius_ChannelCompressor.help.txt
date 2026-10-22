@@ -1,0 +1,91 @@
+CHANNEL COMPRESSOR
+
+A model of the SSL 4000 E channel-strip compressor. It reacts to
+energy rather than single peaks, takes longer to clamp down the
+harder it is hit, and adds make-up gain by itself as you lower the
+threshold - so you can set it for feel and not keep re-balancing
+the level.
+
+Zero latency. No lookahead, no PDC.
+
+It is a behavioural model, not a circuit simulation. It follows the
+published SSL specification; the details SSL does not publish are
+educated guesses (see "What is inferred" below).
+
+
+GETTING SET UP
+
+1. Leave Hard Knee, Lin Rel and Fast Att off. That is the classic
+   E-series sound: soft knee, logarithmic release, slower attack.
+2. Set Ratio to about 4:1 and Release to about 0.4 s.
+3. Lower Threshold until the GR ladder moves on the loud parts.
+4. Toggle the FX on and off. Auto Make-up keeps a compressed
+   signal near the same level, so you are comparing character, not
+   loudness.
+5. Reach for Hard Knee and Lin Rel only when you want it to grab.
+
+
+COMPRESSOR
+
+  Ratio        1:1 is off. Turn up for more compression; fully
+               clockwise is infinity:1, a limiter.
+  Threshold    +10 dB down to -30 dB, relative to the Reference
+               level. Below this nothing is compressed.
+  Release      0.1 s to 4 s. How slowly the gain comes back.
+  Output       Trim, plus or minus 12 dB, after the make-up.
+
+  Fast Att     Attack of 3 ms per 20 dB of gain reduction instead
+               of 30 ms per 20 dB. Off keeps more of the transient.
+  Hard Knee    Switches from the soft "Over Easy" knee and the
+               RMS detector to a hard knee and a peak-sensing
+               detector. More dramatic. The Detector readout shows
+               which one is active.
+  Lin Rel      Release becomes a straight line (constant dB per
+               second) instead of the usual logarithmic curve, and
+               the threshold rises by 6 dB. Also more dramatic.
+  Auto Make-up On: lowering Threshold and raising Ratio adds gain
+               so a signal at the Reference level comes out at the
+               Reference level. Off: only Output changes the level.
+
+  Stereo link  How the two channels feed the detector. Max follows
+               the louder one; Avg follows their average power.
+               Either way both channels get the same gain, so the
+               stereo image does not move.
+  Reference    The input level that counts as 0 dB on the Threshold
+               knob. -18 dBFS is the usual match for a +4 dBu
+               console. Raise it if your material is hot.
+  Detector     Read-only. RMS (Over Easy) or Peak (Hard Knee).
+
+
+READING THE DISPLAY
+
+  Transfer curve   Input level across, output level up. The grey
+                   diagonal is "no change". The amber line is the
+                   threshold. The white dot is the level the
+                   detector is reading right now; it rides on the
+                   curve.
+  GR ladder        Gain reduction, 0 to 20 dB, lit from the top
+                   like the hardware. Red above 14 dB. The number
+                   underneath is the reduction in dB.
+
+
+WHAT IS INFERRED
+
+SSL publishes the attack, release range, threshold range and the
+behaviour of the switches. It does not publish the following, so
+they are set by ear: the RMS averaging time, the width of the soft
+knee, how the peak detector behaves, the exact make-up gain and the
+speed of the linear release. If something sounds different from a
+real unit, those are where to look.
+
+
+IF SOMETHING LOOKS WRONG
+
+  Nothing draws, header says "images failed to load"
+      The gui_kit folder is missing next to the plugin as REAPER
+      sees it. See the README.
+  Level changes when you move Threshold
+      Auto Make-up is off, or Threshold is above 0 dB, where no
+      make-up is added.
+  No gain reduction
+      Ratio is at 1:1, or Threshold is above the signal.
