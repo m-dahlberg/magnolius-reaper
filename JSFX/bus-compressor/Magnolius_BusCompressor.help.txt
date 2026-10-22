@@ -1,0 +1,79 @@
+BUS COMPRESSOR
+
+A stereo bus compressor with the structure and stepped controls of
+the SSL G-series. It reacts to the input (feed-forward), applies ONE
+gain reduction to both channels so the stereo image stays put, and
+uses one shared attack/release element. It is a behavioural model,
+not a circuit simulation.
+
+SET-UP
+ - Put it on a bus or master. Stereo in, stereo out.
+ - It always reports 24 samples of latency to REAPER (compensated
+   automatically), whatever the settings.
+ - Start with Ratio 4, Attack 10 ms, Release 0.3 s, then lower the
+   Threshold until the needle moves 2-4 dB on the loudest parts.
+ - Use Makeup to get the level back.
+
+COMPRESSOR
+ Threshold   -40 to 0 dBFS, continuous. The level of the signal
+             PEAKS above which compression starts.
+ Ratio       2:1, 4:1 or 10:1. 10:1 acts almost like a limiter.
+ Attack      0.1, 0.3, 1, 3, 10 or 30 ms. The time the gain takes
+             to reach 63% of a step. Slow settings let the
+             transient through.
+ Release     0.1, 0.3, 0.6 or 1.2 s, or AUTO. Release is never
+             faster than the Attack setting.
+ AUTO        Fast recovery for short transients, slow recovery
+             after sustained compression. It depends on how much
+             and how long the signal has been compressed, so there
+             is no switch point. It is the last detent of the
+             Release knob.
+ Makeup      0 to +20 dB. Applied to the compressed signal only,
+             so with Dry/Wet below 100% the dry part is unchanged.
+
+GAIN REDUCTION
+ The needle shows the gain reduction, 0 to 20 dB, red above 14 dB.
+ IN and OUT are peak meters with a hold marker and the held value
+ in dBFS. REAPER's own FX meter also shows the gain reduction.
+
+SIDECHAIN
+ Key HPF     Off, or 20-500 Hz. A 12 dB/octave high-pass on the
+             signal the compressor listens to. The audio itself is
+             not filtered. Use it so the low end does not drive the
+             compression. Typical: 60-150 Hz.
+ Ext key     Use channels 3/4 of the track as the key instead of
+             the input. The track needs 4 channels, and the key
+             goes through the same HPF. With only 2 channels there
+             is nothing to key from and nothing is compressed.
+ Listen      Hear the key signal (after the HPF) instead of the
+             output. Use it to set the HPF by ear.
+
+COLOUR
+ Adds a light, console-like colour, mostly 2nd and 3rd harmonic.
+ It follows the compression: the more gain reduction, the more
+ colour. 0% is completely off and the signal is untouched. It runs
+ 2x oversampled, which is where the latency comes from.
+
+PARALLEL
+ Dry/Wet   100% is fully compressed, 0% is the dry signal. Parallel
+           compression: the dry path is delayed to line up with the
+           wet one, so there is no comb filtering.
+
+BYPASS
+ The BYPASS button in the header bypasses the effect with a short
+ crossfade. The latency stays the same, so toggling it never shifts
+ the timing.
+
+INTERFACE
+ Drag a knob up or down. Hold Shift for fine control, Ctrl-click to
+ reset. The stepped knobs move one position per 18 pixels, or one
+ per mouse wheel click. Click a value field to type a value, or
+ drag it. The scale menu in the header resizes the panel.
+
+IF SOMETHING LOOKS WRONG
+ - "images failed to load" in the header: the gui_kit folder is
+   missing next to the plugin.
+ - No compression: check Threshold, and that Ext key is off unless
+   you have a key on channels 3/4.
+ - The panel looks stale after an update: remove the plugin from
+   the track and add it again.
