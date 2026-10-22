@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="3c4026a59cd4e02b58ed473f7c063e7fa7f1fe89">
+<index version="1" name="Magnolius" commit="ae9318c689a3a4ae54093d3bd1aa586d77af7133">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -104,6 +104,35 @@ dropdown; it is the one to use if REAPER restores a smaller FX window.]]></chang
       <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
         <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/auto-tilt/Magnolius_AutoTilt.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/channel-compressor">
+    <reapack name="Magnolius_ChannelCompressor.jsfx" type="effect" desc="Channel Compressor (Magnolius)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 A behavioural model of the SSL SL 4000 E channel-strip compressor: the attack that takes longer the harder it is pushed, Over Easy and Hard Knee voicings, logarithmic or linear release, and the automatic make-up gain that keeps a compressed signal at a steady level.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Zero latency, no lookahead, no PDC.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="0.1" author="Magnolius" time="2026-10-22T14:34:26Z">
+        <changelog><![CDATA[First release.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/Magnolius_ChannelCompressor.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/value_field.png</source>
+        <source file="Magnolius_ChannelCompressor.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/Magnolius_ChannelCompressor.help.txt</source>
       </version>
     </reapack>
   </category>
