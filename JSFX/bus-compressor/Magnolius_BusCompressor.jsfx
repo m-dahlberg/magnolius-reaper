@@ -729,7 +729,7 @@ gk_header(0, 490, 40, 220, 22, "GAIN REDUCTION", -1, 0);
 // meter face: the backlit display is a prerendered image (scale, glow, hub);
 // the needle, hold tick and readout are drawn live on top of it
 g_fx = 506; g_fy = 70; g_fw = 188; g_fh = 88;
-g_px = g_fx + 94; g_py = g_fy + 62;          // needle pivot, below the face
+g_px = g_fx + 94; g_py = g_fy + 132;         // needle pivot, 44 px below the face
 g_hub = 58; g_rn = 116; g_r0 = 112;
 gk_strip(METER_IMG, 1, 0, g_fx, g_fy, g_fw, g_fh) ? 0 : (
   // vector fallback if the image did not load: dark face, bare scale
