@@ -1,0 +1,1019 @@
+desc:Channel EQ (Magnolius)
+// @description Channel EQ (Magnolius)
+// @author Magnolius
+// @version 0.1
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_ChannelEQ.help.txt
+// @about
+//   A channel-strip equaliser: an 18 dB/oct high-pass, a 12 dB/oct low-pass and
+//   four bands (LF shelf, LMF bell, HMF bell, HF shelf), modelled from the
+//   transfer functions of a console-style circuit. Gain-dependent shelf corners,
+//   cut that is the exact mirror of boost, and bell widths that narrow as the
+//   gain rises come from the model, not from fitted curves. A live response
+//   curve can be shown or hidden.
+//
+//   Zero latency, no PDC. The saturation controls are placeholders for now.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   First release.
+
+//tags: eq equaliser channel strip console filter
+// A channel EQ modelled from analog transfer functions.  tools/model.py is the
+// reference and mirrors @init / the design functions / @sample; the two must be
+// edited together.
+//
+// Signal path, per channel, the stage order of the circuit:
+//   HPF (one-pole + biquad, 18 dB/oct) -> LPF (biquad, 12 dB/oct)
+//   -> HF shelf -> HMF bell -> LF shelf -> LMF bell
+// Seven fixed biquad slots, each a direct form I section in doubles.  A slot
+// whose target is the identity and which has settled is skipped, so a neutral
+// EQ is bit-identical passthrough.
+//
+// Design (per slot, audio thread):
+//   1. knob positions -> analog prototype N(S)/D(S) (gain law, frequency law,
+//      the circuit's own formulas);
+//   2. matched biquad: poles mapped exactly (z = exp(s T)), numerator from the
+//      analog magnitude at DC, a mid frequency and Nyquist.  This is what keeps
+//      the shelves and bells from cramping near Nyquist;
+//   3. a short Levenberg-Marquardt fit of all five coefficients to the analog
+//      log-magnitude (20 Hz .. 15 kHz at weight 1, to 20 kHz at weight 0.1).
+//      Three points cannot describe a pole near Nyquist; the fit removes the
+//      remaining error (<0.1 dB to 15 kHz at 44.1 kHz in the worst case).
+// The chain is linear, so nothing in it can alias.  Saturation, when it arrives,
+// brings its own oversampling.
+//
+// Changes: the audio thread watches the sliders itself in @block (the panel
+// writes them through slider_automate, which does not re-run @slider) and
+// redesigns only the slots whose inputs moved, at most every 5 ms.  The
+// coefficients then glide per sample (tau 10 ms).  A blend of two stable
+// biquads is stable (the stability region of (a1, a2) is a convex triangle).
+//
+// Knob laws.  Gains store rotation -1..1 and map through the tabulated circuit
+// law (or linear dB).  Frequency and Q knobs store 0..1 and run a piecewise
+// log-linear law through the printed numbers, which sit evenly round the knob;
+// the law is normalised between the first and last number and then mapped onto
+// the circuit's own end-stops.  HPF: 0 = OUT.  LPF: 1 = OUT.
+//
+// Every slider label starts with '-', which hides it from REAPER's generic
+// slider list (the panel replaces it) while keeping it automatable.
+//
+// THREADING - do not undo this.  @gfx runs on the UI thread; @init, @block and
+// @sample run on the audio thread.  ALL globals AND all function locals and
+// parameters are shared and static (named instances do not isolate locals; this
+// was tested).  So:
+//   * every @gfx variable and function is g_-prefixed, @gfx loop counters are
+//     gi/gj; the audio side uses a-prefixed counters ai/aj/ak and descriptive
+//     names; no name is used on both sides;
+//   * no function is called from both threads.  The panel's curve therefore
+//     has its OWN copy of the laws and analog prototypes (g_*), which only
+//     READS the sliders and the constant tables written once in @init.  It
+//     must be kept in step with the audio-side p_* / proto_* functions;
+//   * @gfx never writes audio-side state; the audio side never writes g_*.
+// EEL2 is case-insensitive and has no scientific notation (1e-9 is a silent
+// syntax error that kills the whole section).
+//
+// Shared memory, namespaced to this vendor.  ONE slot map for every
+// options:gmem=Magnolius plugin:
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+//
+// Registries:  widget ids  10-22 knobs (10 HPF, 11 LPF, 12/13 LF gain/freq,
+//              14/15/16 LMF, 17/18/19 HMF, 20/21 HF, 22 saturation amount),
+//              30-35 buttons (30 Filters In, 31 EQ In, 32 LMF /3, 33 HMF x3,
+//              34 Console, 35 Tube), 40-43 header controls (40 scale,
+//              41 help, 42 curve, 43 gain law).  String slots 300+ help text.
+//
+// Memory map (words):
+//    0-32    gain tables (mid 0, HF 11, LF 22)
+//   40-83    ln(legend) for the frequency / Q laws
+//  100-155   analog prototypes, 7 slots x 8   (audio)
+//  160-194   targets, 7 x 5                   (audio)
+//  200-234   current coefficients, 7 x 5      (audio)
+//  240-246   idle flags;  250-256 gliding flags
+//  260-315   filter state, 2 ch x 7 x 4
+//  320-338   previous slider values
+//  340-349   design scratch (x, xn)
+//  400-675   fit grid, 46 x 6;   700-745 residual;  750-795 trial residual
+//  800-824 normal matrix; 830-854 damped copy; 860-864 rhs; 870-874 step
+// 1000-1055  analog prototypes for the panel curve (g_*)
+
+slider1:eq_in=1<0,1,1{Off,On}>-EQ In
+slider2:flt_in=1<0,1,1{Off,On}>-Filters In
+slider3:hpf=0<0,1,0.001>-High-pass
+slider4:lpf=1<0,1,0.001>-Low-pass
+slider5:lf_g=0<-1,1,0.001>-LF Gain
+slider6:lf_f=0.5<0,1,0.001>-LF Freq
+slider7:lmf_g=0<-1,1,0.001>-LMF Gain
+slider8:lmf_f=0.5<0,1,0.001>-LMF Freq
+slider9:lmf_q=0.25<0,1,0.001>-LMF Q
+slider10:lmf_d3=0<0,1,1{Off,On}>-LMF Div
+slider11:hmf_g=0<-1,1,0.001>-HMF Gain
+slider12:hmf_f=0.5<0,1,0.001>-HMF Freq
+slider13:hmf_q=0.25<0,1,0.001>-HMF Q
+slider14:hmf_x3=0<0,1,1{Off,On}>-HMF Mult
+slider15:hf_g=0<-1,1,0.001>-HF Gain
+slider16:hf_f=0.5<0,1,0.001>-HF Freq
+slider17:gain_law=0<0,1,1{Circuit,dB-linear}>-Gain Law
+slider18:sat_amt=0<0,1,0.001>-Saturation Amount
+slider19:sat_mode=0<0,1,1{Console,Tube}>-Saturation Type
+
+options:gmem=Magnolius
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+import gui_kit/gui_kit.jsfx-inc
+
+// Images first and contiguous from 0, the help file LAST.  Never put a
+// trailing // comment on these lines: the rest of the line is the path.
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_cyan_bipolar_grid.png
+filename:2,gui_kit/knob_green_grid.png
+filename:3,gui_kit/knob_orange_grid.png
+filename:4,gui_kit/value_field.png
+filename:5,gui_kit/header_bar.png
+filename:6,gui_kit/panel_tile.png
+filename:7,gui_kit/dropdown.png
+filename:8,gui_kit/button_cyan.png
+filename:9,gui_kit/button_green.png
+filename:10,gui_kit/button_orange.png
+filename:11,gui_kit/logo_magnolius_grey.png
+filename:12,Magnolius_ChannelEQ.help.txt
+
+@init
+gk_init();
+gk_img_field = 4; gk_img_header = 5; gk_img_panel = 6;
+gk_img_dropdown = 7; gk_img_button = 8;
+IMG_COUNT = 12;                 // slots 0..11 are images; 12 is the help file
+KNOB_CYAN = 0; KNOB_BI = 1; KNOB_GREEN = 2; KNOB_ORANGE = 3;
+BTN_CYAN = 8; BTN_GREEN = 9; BTN_ORANGE = 10;
+LOGO_IMG = 11;
+LOGO_ASPECT = 512/101;
+
+// Grid-packed filmstrip: 8 columns x 8 rows, 64 frames, every knob strip.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+// ---- design size ----
+// REAPER opens at the @gfx size, which is a compile-time literal, so keep
+// these in step with the "@gfx 694 494" line.  The panel is shorter when the
+// curve is hidden; the window itself cannot resize, Fit rescales to it.
+UI_W = 694; UI_H_CURVE = 494; UI_H_HIDE = 348;
+
+// ---- interface scale ----
+GM_UI_SCALE = 0;
+UI_SCALE_DEFAULT = 0;           // 0 = Fit, else an entry in ui_scale()
+initdone != 20261024 ? (
+  initdone = 20261024;
+  gui_scale_idx = UI_SCALE_DEFAULT;
+  curve_on = 1;
+  help_open = 0; help_lines = 0;
+);
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- help ----
+HELP_FILE = 12; HELP_BASE = 300; HELP_MAX = 600;
+
+// ---- constants (mirror tools/model.py) ----
+DB2LOG = 0.11512925464970229;   // ln(10)/20
+M_TAB = 0; M_LEG = 40; M_PROTO = 100; M_TGT = 160; M_CUR = 200;
+M_IDLE = 240; M_GL = 250; M_ST = 260; M_PREV = 320; M_X = 340;
+M_FIT = 400; M_RES = 700; M_RN = 750; M_ATA = 800; M_A = 830; M_ATR = 860; M_DX = 870;
+G_PROTO = 1000;
+L_LF = 40; L_LMF = 46; L_HMF = 53; L_HF = 60; L_Q = 67; L_HPF = 72; L_LPF = 78;
+NSEC = 7;
+// gain tables: boost at the plateau / centre for rotation 0, 0.1 .. 1.0
+function fill11(p, a0,a1,a2,a3,a4,a5,a6,a7,a8,a9,a10)
+( p[0]=a0; p[1]=a1; p[2]=a2; p[3]=a3; p[4]=a4; p[5]=a5; p[6]=a6; p[7]=a7; p[8]=a8; p[9]=a9; p[10]=a10; );
+fill11(M_TAB,      0, 2.4, 4.5, 6.5, 8.3, 10.2, 12.0, 13.9, 16.0, 18.3, 21.0);
+fill11(M_TAB + 11, 0, 0.9, 1.8, 2.8, 3.9, 5.1, 6.6, 8.3, 10.7, 14.1, 20.3);
+fill11(M_TAB + 22, 0, 0.9, 2.0, 3.0, 4.2, 5.5, 7.1, 8.8, 11.0, 14.0, 18.4);
+// printed numbers, as ln(value); n = 5, 6 or 7 of them
+function fill_leg(p, n, a0,a1,a2,a3,a4,a5,a6)
+( p[0]=log(a0); p[1]=log(a1); p[2]=log(a2); p[3]=log(a3); p[4]=log(a4);
+  n > 5 ? ( p[5]=log(a5); ); n > 6 ? ( p[6]=log(a6); ); );
+fill_leg(L_LF, 6, 30, 50, 100, 200, 300, 450, 1);
+fill_leg(L_LMF, 7, 200, 300, 800, 1000, 1500, 2000, 2500);
+fill_leg(L_HMF, 7, 600, 800, 1500, 3000, 4500, 6000, 7000);
+fill_leg(L_HF, 7, 1500, 2000, 5000, 8000, 10000, 11000, 16000);
+fill_leg(L_Q, 5, 0.5, 1, 1.5, 2, 3, 1, 1);
+fill_leg(L_HPF, 6, 20, 70, 120, 200, 300, 350, 1);       // at t = 1/6 .. 1
+fill_leg(L_LPF, 6, 3000, 3500, 4000, 5000, 8000, 12000, 1); // at t = 0 .. 5/6
+// circuit end-stops
+Q0_MIN = 0.73; Q0_MAX = 2.95;
+HMF_LO = 605; HMF_HI = 6200; HMF_MUL = 5.02/1.72;
+LMF_LO = 202; LMF_HI = 2070; LMF_DIV = (15 + 47)/15;     // drawn values: /4.13, the label says 3
+HF_C = 26.7*0.000000001;
+HF_R10 = 2400; HF_R1P = 23500; HF_R20 = 5100; HF_R2P = 47000;
+HF_WLO = 1/(HF_C*sqrt((HF_R10 + HF_R1P)*(HF_R20 + HF_R2P)));
+HF_WHI = 1/(HF_C*sqrt(HF_R10*HF_R20));
+LF_W1 = 0.467; LF_W2 = 0.019; LF_C1 = 15*0.000000001; LF_C2 = 470*0.000000001;
+LF_RMAX = 48480; LF_RMIN = 4165;                         // calibrated: corner 31 .. 361 Hz at full boost
+LF_K0 = 1.01056685; LF_K1 = 0.000220316; LF_K2 = 0.000006712891;  // peak = table gain
+HPF_MIN = 14.8; HPF_MAX = 402; HPF_OUT_T = 0.03;
+LPF_MIN = 3200; LPF_MAX = 72000; LPF_OUT_T = 0.97;
+LPF_Q = 0.5*sqrt(6.8/3.3);
+// digital design
+NPT = 40; NEXTRA = 6; NFIT = 46; FIT_HI1 = 15000; FIT_HI2 = 20000; W_EXTRA = 0.1;
+LM_ITERS = 20; STAB_MARGIN = 0.00001;
+GLIDE_TAU = 0.010; GL_SNAP = 0.000000001;
+HOLD_S = 0.005;
+
+// ------------------------------------------------------------------ laws
+function pw_log(t, p, n, x0, dx) local(i, f)
+(
+  i = floor((t - x0)/dx); i = max(0, min(n - 2, i));
+  f = (t - x0 - i*dx)/dx;
+  p[i] + (p[i + 1] - p[i])*f;
+);
+function legend_u(t, p, n) local(tt)
+(
+  tt = min(1, max(0, t));
+  (pw_log(tt, p, n, 0, 1/(n - 1)) - p[0])/(p[n - 1] - p[0]);
+);
+function q0_of(t) local(uq)
+(
+  uq = (pw_log(t, L_Q, 5, 0, 0.25) - log(0.5))/log(6);
+  Q0_MIN*pow(Q0_MAX/Q0_MIN, uq);
+);
+function tab_interp(p, k) local(i)
+(
+  k = min(1, max(0, k))*10; i = min(9, floor(k));
+  p[i] + (p[i + 1] - p[i])*(k - i);
+);
+// signed dB for rotation r
+function gain_db_of(p, r) local(g)
+(
+  g = gain_law >= 0.5 ? abs(r)*p[10] : tab_interp(p, abs(r));
+  r >= 0 ? g : -g;
+);
+function hf_omega(u) ( HF_WLO*pow(HF_WHI/HF_WLO, u); );
+function lf_r(u) ( LF_RMAX*pow(LF_RMIN/LF_RMAX, u); );
+
+// ------------------------------------------------------------------ analog prototypes
+// slot s at M_PROTO + 8 s: n2 n1 n0 d2 d1 d0 kind (0 off, 1 one-pole HP, 2 biquad)
+function set_proto(s, n2, n1, n0, d2, d1, d0, kind) local(pp)
+(
+  pp = M_PROTO + s*8;
+  pp[0] = n2; pp[1] = n1; pp[2] = n0; pp[3] = d2; pp[4] = d1; pp[5] = d0; pp[6] = kind;
+);
+function set_off(s) local(pp) ( pp = M_PROTO + s*8; pp[6] = 0; );
+
+function proto_bell(s, w0, q0, g) local(A)
+(
+  A = exp(abs(g)*DB2LOG) - 1;
+  g >= 0 ? set_proto(s, 1, (1 + A)*w0/q0, w0*w0, 1, w0/q0, w0*w0, 2)
+         : set_proto(s, 1, w0/q0, w0*w0, 1, (1 + A)*w0/q0, w0*w0, 2);
+);
+function proto_hf(s, w0, g) local(K, a, b, c0, y, R1, R2, Gl, c, e1, e0)
+(
+  K = sqr(1/(HF_C*w0));
+  a = HF_R1P*HF_R2P; b = HF_R10*HF_R2P + HF_R1P*HF_R20; c0 = HF_R10*HF_R20 - K;
+  y = (-b + sqrt(b*b - 4*a*c0))/(2*a); y = min(1, max(0, y));
+  R1 = HF_R10 + HF_R1P*y; R2 = HF_R20 + HF_R2P*y;
+  Gl = exp(abs(g)*DB2LOG); c = 1 - 1/Gl;
+  e1 = 2/(R2*HF_C); e0 = 1/(R1*R2*HF_C*HF_C);
+  g >= 0 ? set_proto(s, 1, e1, e0, 1 - c, e1, e0, 2)
+         : set_proto(s, 1 - c, e1, e0, 1, e1, e0, 2);
+);
+function proto_lf(s, rp, g) local(T1, T2, ga, Gl, c, d1, dc1, dc0, dc2)
+(
+  T1 = rp*LF_C1; T2 = rp*LF_C2; ga = abs(g); Gl = exp(ga*DB2LOG);
+  c = (1 - 1/Gl)/(LF_W1 + LF_W2)*(LF_K0 + ga*(LF_K1 + ga*LF_K2));
+  d1 = T1 + T2; dc2 = T1*T2; dc1 = T1 + T2 - c*T2*(LF_W1 + LF_W2); dc0 = 1 - c*LF_W1;
+  g >= 0 ? set_proto(s, dc2, d1, 1, dc2, dc1, dc0, 2)
+         : set_proto(s, dc2, dc1, dc0, dc2, d1, 1, 2);
+);
+
+// Build the analog prototype of one slot from the sliders.  Slots: 0 hpf1,
+// 1 hpf2, 2 lpf, 3 hf, 4 hmf, 5 lf, 6 lmf.
+function build_proto_hp() local(f, w, fmax)
+(
+  fmax = 0.45*srate;
+  flt_in >= 0.5 && hpf >= HPF_OUT_T ? (
+    f = exp(pw_log(hpf, L_HPF, 6, 1/6, 1/6));
+    f = min(min(HPF_MAX, fmax), max(HPF_MIN, f)); w = 2*$pi*f;
+    set_proto(0, 0, 1, 0, 0, 1, w, 1);
+    set_proto(1, 1, 0, 0, 1, w, w*w, 2);
+  ) : ( set_off(0); set_off(1); );
+);
+function build_proto_lp() local(f, w, fmax)
+(
+  fmax = 0.45*srate;
+  flt_in >= 0.5 && lpf <= LPF_OUT_T ? (
+    f = exp(pw_log(lpf, L_LPF, 6, 0, 1/6));
+    f = min(min(LPF_MAX, fmax), max(LPF_MIN, f)); w = 2*$pi*f;
+    set_proto(2, 0, 0, w*w, 1, w/LPF_Q, w*w, 2);
+  ) : set_off(2);
+);
+function build_proto_hf() local(g, w)
+(
+  g = gain_db_of(M_TAB + 11, hf_g);
+  eq_in >= 0.5 && abs(g) > 0.000000001 ? (
+    w = min(hf_omega(legend_u(hf_f, L_HF, 7)), 2*$pi*0.45*srate);
+    proto_hf(3, w, g);
+  ) : set_off(3);
+);
+function build_proto_hmf() local(g, f)
+(
+  g = gain_db_of(M_TAB, hmf_g);
+  eq_in >= 0.5 && abs(g) > 0.000000001 ? (
+    f = HMF_LO*pow(HMF_HI/HMF_LO, legend_u(hmf_f, L_HMF, 7));
+    f = min(f*(hmf_x3 >= 0.5 ? HMF_MUL : 1), 0.45*srate);
+    proto_bell(4, 2*$pi*f, q0_of(hmf_q), g);
+  ) : set_off(4);
+);
+function build_proto_lf() local(g)
+(
+  g = gain_db_of(M_TAB + 22, lf_g);
+  eq_in >= 0.5 && abs(g) > 0.000000001 ? (
+    proto_lf(5, lf_r(legend_u(lf_f, L_LF, 6)), g);
+  ) : set_off(5);
+);
+function build_proto_lmf() local(g, f)
+(
+  g = gain_db_of(M_TAB, lmf_g);
+  eq_in >= 0.5 && abs(g) > 0.000000001 ? (
+    f = LMF_LO*pow(LMF_HI/LMF_LO, legend_u(lmf_f, L_LMF, 7));
+    f = min(f/(lmf_d3 >= 0.5 ? LMF_DIV : 1), 0.45*srate);
+    proto_bell(6, 2*$pi*f, q0_of(lmf_q), g);
+  ) : set_off(6);
+);
+
+// ------------------------------------------------------------------ digital design
+function pwr(c2, c1, c0, w) local(re, im)
+(
+  re = c0 - c2*w*w; im = c1*w;
+  re*re + im*im;
+);
+// roots of c2 S^2 + c1 S + c0 -> rr1 ri1 rr2 ri2
+function roots2(c2, c1, c0) local(disc, sq)
+(
+  disc = c1*c1 - 4*c2*c0;
+  disc >= 0 ? (
+    sq = sqrt(disc);
+    rr1 = (-c1 + sq)/(2*c2); rr2 = (-c1 - sq)/(2*c2); ri1 = 0; ri2 = 0;
+  ) : (
+    sq = sqrt(-disc);
+    rr1 = -c1/(2*c2); rr2 = rr1; ri1 = sq/(2*c2); ri2 = -ri1;
+  );
+);
+
+// matched biquad -> M_X[0..4] = b0 b1 b2 a1 a2
+// (EEL2 is case-insensitive: never name two locals that differ only in case)
+function design_matched(s)
+  local(pp, n2, n1, n0, d2, d1, d0, T, wN, a1, a2, ez, z1, z2, PA0, PA1, PA2, lsum, cnt, m, wm,
+        m0, mN, mmid, NB0, NB1, NB2, ph0, ph1, ph2, dm, W, disc, sd, r1, r2, b0, b1, b2, K,
+        q0, q1, q2, p0, p1, p2, fb)
+(
+  pp = M_PROTO + s*8;
+  n2 = pp[0]; n1 = pp[1]; n0 = pp[2]; d2 = pp[3]; d1 = pp[4]; d0 = pp[5];
+  T = 1/srate; wN = $pi*srate;
+  roots2(d2, d1, d0);
+  ri1 == 0 ? (
+    z1 = exp(rr1*T); z2 = exp(rr2*T); a1 = -(z1 + z2); a2 = z1*z2;
+  ) : (
+    ez = exp(rr1*T); a1 = -2*ez*cos(ri1*T); a2 = ez*ez;
+  );
+  lsum = 0; cnt = 0;
+  m = sqrt(rr1*rr1 + ri1*ri1); m > 0.000000001 ? ( lsum += log(m); cnt += 1; );
+  m = sqrt(rr2*rr2 + ri2*ri2); m > 0.000000001 ? ( lsum += log(m); cnt += 1; );
+  abs(n2) + abs(n1) > 0 ? (
+    roots2(n2, n1, n0);
+    m = sqrt(rr1*rr1 + ri1*ri1); m > 0.000000001 ? ( lsum += log(m); cnt += 1; );
+    m = sqrt(rr2*rr2 + ri2*ri2); m > 0.000000001 ? ( lsum += log(m); cnt += 1; );
+  );
+  wm = min(exp(lsum/cnt), 0.9*wN);
+  PA0 = sqr(1 + a1 + a2); PA1 = sqr(1 - a1 + a2); PA2 = -4*a2;
+  m0 = pwr(n2, n1, n0, 0)/pwr(d2, d1, d0, 0);
+  mN = pwr(n2, n1, n0, wN)/pwr(d2, d1, d0, wN);
+  mmid = pwr(n2, n1, n0, wm)/pwr(d2, d1, d0, wm);
+  NB0 = m0*PA0; NB1 = mN*PA1;
+  ph1 = sqr(sin(wm*T/2)); ph0 = 1 - ph1; ph2 = 4*ph0*ph1;
+  dm = PA0*ph0 + PA1*ph1 + PA2*ph2;
+  NB2 = (mmid*dm - NB0*ph0 - NB1*ph1)/ph2;
+  W = (sqrt(NB0) + sqrt(NB1))/2;
+  disc = W*W + NB2;
+  fb = !(disc >= 0);
+  fb ? (
+    // fallback: bilinear, prewarped at wm
+    K = wm/tan(wm*T/2);
+    q0 = n2*K*K + n1*K + n0; q1 = 2*(n0 - n2*K*K); q2 = n2*K*K - n1*K + n0;
+    p0 = d2*K*K + d1*K + d0; p1 = 2*(d0 - d2*K*K); p2 = d2*K*K - d1*K + d0;
+    M_X[0] = q0/p0; M_X[1] = q1/p0; M_X[2] = q2/p0; M_X[3] = p1/p0; M_X[4] = p2/p0;
+  ) : (
+    b1 = (sqrt(NB0) - sqrt(NB1))/2;
+    sd = sqrt(disc); r1 = (W + sd)/2; r2 = (W - sd)/2;
+    abs(r1) >= abs(r2) ? ( b0 = r1; b2 = r2; ) : ( b0 = r2; b2 = r1; );
+    M_X[0] = b0; M_X[1] = b1; M_X[2] = b2; M_X[3] = a1; M_X[4] = a2;
+  );
+);
+
+// the grid the fit runs on, for the prototype of slot s
+function fit_grid(s) local(pp, T, fh1, fh2, ai2, f, w, wg, q)
+(
+  pp = M_PROTO + s*8; T = 1/srate;
+  fh1 = min(FIT_HI1, 0.45*srate); fh2 = min(FIT_HI2, 0.45*srate);
+  ai2 = 0;
+  loop(NFIT,
+    ai2 < NPT ? ( f = 20*pow(fh1/20, ai2/(NPT - 1)); wg = 1; )
+              : ( f = fh1 + (fh2 - fh1)*(ai2 - NPT + 1)/NEXTRA; wg = W_EXTRA; );
+    w = 2*$pi*f;
+    q = M_FIT + ai2*6;
+    q[0] = cos(w*T); q[1] = -sin(w*T); q[2] = cos(2*w*T); q[3] = -sin(2*w*T);
+    q[4] = 0.5*log(pwr(pp[0], pp[1], pp[2], w)/pwr(pp[3], pp[4], pp[5], w));
+    q[5] = wg;
+    ai2 += 1;
+  );
+);
+// weighted residuals of coefficients xp into outp; returns the cost
+function eval_res(xp, outp) local(q, Nr, Ni, Dr, Di, r, cost, ai2)
+(
+  cost = 0; ai2 = 0;
+  loop(NFIT,
+    q = M_FIT + ai2*6;
+    Nr = xp[0] + xp[1]*q[0] + xp[2]*q[2]; Ni = xp[1]*q[1] + xp[2]*q[3];
+    Dr = 1 + xp[3]*q[0] + xp[4]*q[2];     Di = xp[3]*q[1] + xp[4]*q[3];
+    r = q[5]*(0.5*log((Nr*Nr + Ni*Ni)/(Dr*Dr + Di*Di)) - q[4]);
+    outp[ai2] = r; cost += r*r;
+    ai2 += 1;
+  );
+  cost;
+);
+// Gaussian elimination, partial pivoting, on M_A (5x5) with right-hand side M_DX
+// (overwritten by the solution); returns 0 if a pivot is (almost) zero
+function solve5() local(ai2, aj2, ak2, pv, t, f, v, sing)
+(
+  sing = 0; ai2 = 0;
+  while (ai2 < 5 && !sing) (
+    pv = ai2; ak2 = ai2 + 1;
+    while (ak2 < 5) ( abs(M_A[ak2*5 + ai2]) > abs(M_A[pv*5 + ai2]) ? ( pv = ak2; ); ak2 += 1; );
+    abs(M_A[pv*5 + ai2]) < 0.000000000000000000000000000001 ? ( sing = 1; ) : (
+      pv != ai2 ? (
+        aj2 = 0; loop(5, t = M_A[ai2*5 + aj2]; M_A[ai2*5 + aj2] = M_A[pv*5 + aj2]; M_A[pv*5 + aj2] = t; aj2 += 1; );
+        t = M_DX[ai2]; M_DX[ai2] = M_DX[pv]; M_DX[pv] = t;
+      );
+      ak2 = ai2 + 1;
+      while (ak2 < 5) (
+        f = M_A[ak2*5 + ai2]/M_A[ai2*5 + ai2];
+        aj2 = ai2; while (aj2 < 5) ( M_A[ak2*5 + aj2] -= f*M_A[ai2*5 + aj2]; aj2 += 1; );
+        M_DX[ak2] -= f*M_DX[ai2];
+        ak2 += 1;
+      );
+    );
+    ai2 += 1;
+  );
+  !sing ? (
+    ai2 = 4;
+    while (ai2 >= 0) (
+      v = M_DX[ai2];
+      aj2 = ai2 + 1; while (aj2 < 5) ( v -= M_A[ai2*5 + aj2]*M_DX[aj2]; aj2 += 1; );
+      M_DX[ai2] = v/M_A[ai2*5 + ai2];
+      ai2 -= 1;
+    );
+  );
+  !sing;
+);
+// Levenberg-Marquardt on M_X for slot s's prototype
+function refine(s) local(cost, lam, it, q, r, Nr, Ni, Dr, Di, n2, d2, J0, J1, J2, J3, J4, ai2, aj2, tries, ok, cn, done, xn)
+(
+  fit_grid(s);
+  cost = eval_res(M_X, M_RES);
+  lam = 0.001; it = 0; done = 0;
+  while (it < LM_ITERS && !done) (
+    memset(M_ATA, 0, 25); memset(M_ATR, 0, 5);
+    ai2 = 0;
+    loop(NFIT,
+      q = M_FIT + ai2*6;
+      Nr = M_X[0] + M_X[1]*q[0] + M_X[2]*q[2]; Ni = M_X[1]*q[1] + M_X[2]*q[3];
+      Dr = 1 + M_X[3]*q[0] + M_X[4]*q[2];      Di = M_X[3]*q[1] + M_X[4]*q[3];
+      n2 = Nr*Nr + Ni*Ni; d2 = Dr*Dr + Di*Di;
+      J0 = q[5]*Nr/n2; J1 = q[5]*(q[0]*Nr + q[1]*Ni)/n2; J2 = q[5]*(q[2]*Nr + q[3]*Ni)/n2;
+      J3 = -q[5]*(q[0]*Dr + q[1]*Di)/d2; J4 = -q[5]*(q[2]*Dr + q[3]*Di)/d2;
+      r = M_RES[ai2];
+      M_ATR[0] += J0*r; M_ATR[1] += J1*r; M_ATR[2] += J2*r; M_ATR[3] += J3*r; M_ATR[4] += J4*r;
+      M_ATA[0]  += J0*J0; M_ATA[1]  += J0*J1; M_ATA[2]  += J0*J2; M_ATA[3]  += J0*J3; M_ATA[4]  += J0*J4;
+      M_ATA[5]  += J1*J0; M_ATA[6]  += J1*J1; M_ATA[7]  += J1*J2; M_ATA[8]  += J1*J3; M_ATA[9]  += J1*J4;
+      M_ATA[10] += J2*J0; M_ATA[11] += J2*J1; M_ATA[12] += J2*J2; M_ATA[13] += J2*J3; M_ATA[14] += J2*J4;
+      M_ATA[15] += J3*J0; M_ATA[16] += J3*J1; M_ATA[17] += J3*J2; M_ATA[18] += J3*J3; M_ATA[19] += J3*J4;
+      M_ATA[20] += J4*J0; M_ATA[21] += J4*J1; M_ATA[22] += J4*J2; M_ATA[23] += J4*J3; M_ATA[24] += J4*J4;
+      ai2 += 1;
+    );
+    tries = 0; ok = 0;
+    while (tries < 8 && !ok) (
+      memcpy(M_A, M_ATA, 25);
+      ai2 = 0; loop(5, M_A[ai2*6] += lam*M_ATA[ai2*6] + 0.000000000000000000000000000001; M_DX[ai2] = -M_ATR[ai2]; ai2 += 1; );
+      solve5() ? (
+        xn = M_X + 5;
+        ai2 = 0; loop(5, xn[ai2] = M_X[ai2] + M_DX[ai2]; ai2 += 1; );
+        abs(xn[4]) < 1 - STAB_MARGIN && abs(xn[3]) < 1 + xn[4] - STAB_MARGIN ? (
+          cn = eval_res(xn, M_RN);
+          cn < cost ? (
+            done = !(cost - cn > 0.000000001*cost);
+            memcpy(M_X, xn, 5); memcpy(M_RES, M_RN, NFIT);
+            cost = cn; lam = max(lam/3, 0.000000001); ok = 1;
+          );
+        );
+      );
+      !ok ? lam *= 10;
+      tries += 1;
+    );
+    !ok ? done = 1;
+    it += 1;
+  );
+);
+
+// design slot s: prototype -> target coefficients (identity if off)
+function design_slot(s) local(pp, tp, w, T, p, ok)
+(
+  pp = M_PROTO + s*8; tp = M_TGT + s*5; ok = 1;
+  pp[6] == 0 ? ( tp[0] = 1; tp[1] = 0; tp[2] = 0; tp[3] = 0; tp[4] = 0; )
+  : pp[6] == 1 ? (
+    // one-pole high-pass S/(S + w): exact pole, zero at DC, gain fitted at Nyquist
+    w = pp[5]; T = 1/srate;
+    p = exp(-w*T);
+    tp[0] = ($pi*srate/sqrt(sqr($pi*srate) + w*w))*(1 + p)/2;
+    tp[1] = -tp[0]; tp[2] = 0; tp[3] = -p; tp[4] = 0;
+  ) : (
+    design_matched(s);
+    refine(s);
+    tp[0] = M_X[0]; tp[1] = M_X[1]; tp[2] = M_X[2]; tp[3] = M_X[3]; tp[4] = M_X[4];
+    // never trust a design that is not finite and stable: fall back to identity
+    ok = tp[0] == tp[0] && tp[1] == tp[1] && tp[2] == tp[2] && tp[3] == tp[3] && tp[4] == tp[4]
+         && abs(tp[4]) < 1 && abs(tp[3]) < 1 + tp[4];
+    !ok ? ( tp[0] = 1; tp[1] = 0; tp[2] = 0; tp[3] = 0; tp[4] = 0; );
+  );
+);
+// make the target take effect: glide from the current coefficients, or at once
+function retarget(s, now) local(tp, cp)
+(
+  tp = M_TGT + s*5; cp = M_CUR + s*5;
+  now ? ( memcpy(cp, tp, 5); M_GL[s] = 0; )
+      : ( M_GL[s] = !(cp[0] == tp[0] && cp[1] == tp[1] && cp[2] == tp[2] && cp[3] == tp[3] && cp[4] == tp[4]); );
+  M_IDLE[s] = !M_GL[s] && cp[0] == 1 && cp[1] == 0 && cp[2] == 0 && cp[3] == 0 && cp[4] == 0;
+);
+function rebuild_all(now) local(s)
+(
+  build_proto_hp(); build_proto_lp(); build_proto_hf(); build_proto_hmf(); build_proto_lf(); build_proto_lmf();
+  s = 0; loop(NSEC, design_slot(s); retarget(s, now); s += 1; );
+);
+function save_prev() local(ai2)
+(
+  ai2 = 0; loop(19, M_PREV[ai2] = slider(ai2 + 1); ai2 += 1; );
+);
+
+// ---- start-up state
+memset(M_CUR, 0, 35); memset(M_ST, 0, 56); memset(M_IDLE, 0, 20);
+ai = 0; loop(NSEC, M_CUR[ai*5] = 1; ai += 1; );          // identity until designed
+kg = 1 - exp(-1/(GLIDE_TAU*srate));
+rebuild_all(1);
+save_prev();
+hold = 0;
+
+@slider
+// Nothing to do here: the audio thread compares the sliders itself in @block,
+// because the panel's slider_automate() does not re-run @slider.
+
+@serialize
+// GUI-only state: saved with the project, never in automation.
+// APPEND new values, never insert.
+file_var(0, gui_scale_idx);
+file_var(0, curve_on);
+
+@block
+hold -= samplesblock;
+// which slots have inputs that moved
+dm_hp = flt_in != M_PREV[1] || hpf != M_PREV[2];
+dm_lp = flt_in != M_PREV[1] || lpf != M_PREV[3];
+dm_eq = eq_in != M_PREV[0] || gain_law != M_PREV[16];
+dm_lf = dm_eq || lf_g != M_PREV[4] || lf_f != M_PREV[5];
+dm_lmf = dm_eq || lmf_g != M_PREV[6] || lmf_f != M_PREV[7] || lmf_q != M_PREV[8] || lmf_d3 != M_PREV[9];
+dm_hmf = dm_eq || hmf_g != M_PREV[10] || hmf_f != M_PREV[11] || hmf_q != M_PREV[12] || hmf_x3 != M_PREV[13];
+dm_hf = dm_eq || hf_g != M_PREV[14] || hf_f != M_PREV[15];
+(dm_hp || dm_lp || dm_lf || dm_lmf || dm_hmf || dm_hf) && hold <= 0 ? (
+  dm_hp ? ( build_proto_hp(); design_slot(0); retarget(0, 0); design_slot(1); retarget(1, 0); );
+  dm_lp ? ( build_proto_lp(); design_slot(2); retarget(2, 0); );
+  dm_hf ? ( build_proto_hf(); design_slot(3); retarget(3, 0); );
+  dm_hmf ? ( build_proto_hmf(); design_slot(4); retarget(4, 0); );
+  dm_lf ? ( build_proto_lf(); design_slot(5); retarget(5, 0); );
+  dm_lmf ? ( build_proto_lmf(); design_slot(6); retarget(6, 0); );
+  save_prev();
+  hold = floor(HOLD_S*srate);
+);
+
+@sample
+ax0 = spl0; ax1 = spl1;
+as = 0;
+loop(NSEC,
+  ac = M_CUR + as*5; at = M_TGT + as*5;
+  M_IDLE[as] ? (
+    // neutral and settled: the signal passes untouched, the state keeps following it
+    ap = M_ST + as*4;
+    ap[1] = ap[0]; ap[0] = ax0; ap[3] = ap[2]; ap[2] = ax0;
+    ap = M_ST + 28 + as*4;
+    ap[1] = ap[0]; ap[0] = ax1; ap[3] = ap[2]; ap[2] = ax1;
+  ) : (
+    M_GL[as] ? (
+      ac[0] += (at[0] - ac[0])*kg; ac[1] += (at[1] - ac[1])*kg; ac[2] += (at[2] - ac[2])*kg;
+      ac[3] += (at[3] - ac[3])*kg; ac[4] += (at[4] - ac[4])*kg;
+      abig = max(max(max(abs(at[0] - ac[0]), abs(at[1] - ac[1])), max(abs(at[2] - ac[2]), abs(at[3] - ac[3]))), abs(at[4] - ac[4]));
+      abig < GL_SNAP ? (
+        memcpy(ac, at, 5); M_GL[as] = 0;
+        at[0] == 1 && at[1] == 0 && at[2] == 0 && at[3] == 0 && at[4] == 0 ? ( M_IDLE[as] = 1; );
+      );
+    );
+    ap = M_ST + as*4;
+    ay = ac[0]*ax0 + ac[1]*ap[0] + ac[2]*ap[1] - ac[3]*ap[2] - ac[4]*ap[3];
+    ap[1] = ap[0]; ap[0] = ax0; ap[3] = ap[2]; ap[2] = ay; ax0 = ay;
+    ap = M_ST + 28 + as*4;
+    ay = ac[0]*ax1 + ac[1]*ap[0] + ac[2]*ap[1] - ac[3]*ap[2] - ac[4]*ap[3];
+    ap[1] = ap[0]; ap[0] = ax1; ap[3] = ap[2]; ap[2] = ay; ax1 = ay;
+  );
+  as += 1;
+);
+spl0 = ax0; spl1 = ax1;
+
+@gfx 694 494
+// ---------------------------------------------------------------------------
+// UI THREAD ONLY.  See THREADING at the top.  Nothing audio-side is called from
+// here; the panel's curve uses its own g_* copies of the laws and prototypes.
+// ---------------------------------------------------------------------------
+gk_begin();
+
+// Shared scale: read it, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
+
+// gk_begin set gk_S from gfx_ext_retina (1 or 2).  A fixed percentage is
+// relative to that; Fit divides the window by the design size.
+g_uih = curve_on ? UI_H_CURVE : UI_H_HIDE;
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret * g_sc : min(gfx_w / UI_W, gfx_h / g_uih));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(3, gk_font, 9*gk_S);
+gfx_setfont(1);
+
+function g_count_missing(n) local(gk1, gw, gh, gbad)
+(
+  gk1 = 0; gbad = 0;
+  loop(n, gfx_getimgdim(gk1, gw, gh); gw <= 0 ? gbad += 1; gk1 += 1;);
+  gbad;
+);
+
+// Toggle button bound to slider sidx.  Returns 1 when it changed.
+function g_tog(id, x, y, w, h, sidx, label)
+(
+  gk_button(id, x, y, w, h, slider(sidx) > 0.5, label) ? (
+    slider(sidx) = slider(sidx) > 0.5 ? 0 : 1;
+    slider_automate(2^(sidx-1));
+    1;
+  ) : 0;
+);
+// Two-state radio half: shows "on" when slider sidx == val, sets it when clicked.
+function g_radio(id, x, y, w, h, sidx, val, label)
+(
+  gk_button(id, x, y, w, h, (slider(sidx) > 0.5) == val, label) ? (
+    slider(sidx) = val;
+    slider_automate(2^(sidx-1));
+    1;
+  ) : 0;
+);
+// Dropdown with two entries bound to slider sidx.
+function g_dd2(id, x, y, w, h, sidx, menu, l0, l1) local(gi1)
+(
+  gi1 = gk_dropdown(id, x, y, w, h, slider(sidx) > 0.5, menu, slider(sidx) > 0.5 ? l1 : l0);
+  gi1 != (slider(sidx) > 0.5) ? ( slider(sidx) = gi1; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// ---- numbers round a knob.  Evenly spread over the 270 degree sweep, no tick
+// lines; each label sits a fixed gap outside the knob art, so the radius grows
+// with the label's own extent along its direction.  (cx, cy) is the knob centre.
+function g_lab(cx, cy, k, n, str) local(ga, gtw, gth, gr)
+(
+  ga = (-135 + 270*k/(n - 1))*0.017453292519943295;
+  gfx_measurestr(str, gtw, gth);
+  gr = 33 + abs(sin(ga))*gtw/gk_S*0.5 + abs(cos(ga))*3.25;
+  gfx_x = (cx + gr*sin(ga))*gk_S - gtw*0.5;
+  gfx_y = (cy - gr*cos(ga))*gk_S - gth*0.5;
+  gfx_drawstr(str);
+);
+function g_ring3(cx, cy, a, b, c)
+( gfx_setfont(3); gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  g_lab(cx, cy, 0, 3, a); g_lab(cx, cy, 1, 3, b); g_lab(cx, cy, 2, 3, c); gfx_setfont(1); );
+function g_ring5(cx, cy, a, b, c, d, e)
+( gfx_setfont(3); gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  g_lab(cx, cy, 0, 5, a); g_lab(cx, cy, 1, 5, b); g_lab(cx, cy, 2, 5, c); g_lab(cx, cy, 3, 5, d);
+  g_lab(cx, cy, 4, 5, e); gfx_setfont(1); );
+function g_ring6(cx, cy, a, b, c, d, e, f)
+( gfx_setfont(3); gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  g_lab(cx, cy, 0, 6, a); g_lab(cx, cy, 1, 6, b); g_lab(cx, cy, 2, 6, c); g_lab(cx, cy, 3, 6, d);
+  g_lab(cx, cy, 4, 6, e); g_lab(cx, cy, 5, 6, f); gfx_setfont(1); );
+function g_ring7(cx, cy, a, b, c, d, e, f, g)
+( gfx_setfont(3); gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  g_lab(cx, cy, 0, 7, a); g_lab(cx, cy, 1, 7, b); g_lab(cx, cy, 2, 7, c); g_lab(cx, cy, 3, 7, d);
+  g_lab(cx, cy, 4, 7, e); g_lab(cx, cy, 5, 7, f); g_lab(cx, cy, 6, 7, g); gfx_setfont(1); );
+
+// ---- the panel's own copy of the laws and analog prototypes (see THREADING).
+// Mirrors the audio side's pw_log .. build_proto_*; reads the sliders and the
+// constant tables only.  Writes G_PROTO, which nothing else touches.
+function g_pw_log(t, p, n, x0, dx) local(gq, gf)
+(
+  gq = floor((t - x0)/dx); gq = max(0, min(n - 2, gq));
+  gf = (t - x0 - gq*dx)/dx;
+  p[gq] + (p[gq + 1] - p[gq])*gf;
+);
+function g_legend_u(t, p, n) local(gtt)
+(
+  gtt = min(1, max(0, t));
+  (g_pw_log(gtt, p, n, 0, 1/(n - 1)) - p[0])/(p[n - 1] - p[0]);
+);
+function g_q0(t) local(guq)
+(
+  guq = (g_pw_log(t, L_Q, 5, 0, 0.25) - log(0.5))/log(6);
+  Q0_MIN*pow(Q0_MAX/Q0_MIN, guq);
+);
+function g_gain_db(p, r) local(gk2, gg)
+(
+  gk2 = min(1, abs(r))*10;
+  gg = gain_law >= 0.5 ? abs(r)*p[10] : p[min(9, floor(gk2))] + (p[min(9, floor(gk2)) + 1] - p[min(9, floor(gk2))])*(gk2 - min(9, floor(gk2)));
+  r >= 0 ? gg : -gg;
+);
+function g_set(s, n2, n1, n0, d2, d1, d0, kind) local(gp)
+(
+  gp = G_PROTO + s*8;
+  gp[0] = n2; gp[1] = n1; gp[2] = n0; gp[3] = d2; gp[4] = d1; gp[5] = d0; gp[6] = kind;
+);
+function g_bell(s, w0, q0, gdb) local(gA)
+(
+  gA = exp(abs(gdb)*DB2LOG) - 1;
+  gdb >= 0 ? g_set(s, 1, (1 + gA)*w0/q0, w0*w0, 1, w0/q0, w0*w0, 2)
+           : g_set(s, 1, w0/q0, w0*w0, 1, (1 + gA)*w0/q0, w0*w0, 2);
+);
+function g_protos() local(gg, gw, gf, gK, ga, gb, gc0, gy, gR1, gR2, gGl, gc, ge1, ge0, gT1, gT2, gga, gd1, gdc1, gdc0, gdc2, gu)
+(
+  // filters
+  flt_in >= 0.5 && hpf >= HPF_OUT_T ? (
+    gf = exp(g_pw_log(hpf, L_HPF, 6, 1/6, 1/6));
+    gf = min(HPF_MAX, max(HPF_MIN, gf)); gw = 2*$pi*gf;
+    g_set(0, 0, 1, 0, 0, 1, gw, 1);
+    g_set(1, 1, 0, 0, 1, gw, gw*gw, 2);
+  ) : ( g_set(0, 0, 0, 0, 0, 0, 0, 0); g_set(1, 0, 0, 0, 0, 0, 0, 0); );
+  flt_in >= 0.5 && lpf <= LPF_OUT_T ? (
+    gf = exp(g_pw_log(lpf, L_LPF, 6, 0, 1/6));
+    gf = min(LPF_MAX, max(LPF_MIN, gf)); gw = 2*$pi*gf;
+    g_set(2, 0, 0, gw*gw, 1, gw/LPF_Q, gw*gw, 2);
+  ) : g_set(2, 0, 0, 0, 0, 0, 0, 0);
+  // HF shelf
+  gg = g_gain_db(M_TAB + 11, hf_g);
+  eq_in >= 0.5 && abs(gg) > 0.000000001 ? (
+    gw = HF_WLO*pow(HF_WHI/HF_WLO, g_legend_u(hf_f, L_HF, 7));
+    gK = sqr(1/(HF_C*gw));
+    ga = HF_R1P*HF_R2P; gb = HF_R10*HF_R2P + HF_R1P*HF_R20; gc0 = HF_R10*HF_R20 - gK;
+    gy = (-gb + sqrt(gb*gb - 4*ga*gc0))/(2*ga); gy = min(1, max(0, gy));
+    gR1 = HF_R10 + HF_R1P*gy; gR2 = HF_R20 + HF_R2P*gy;
+    gGl = exp(abs(gg)*DB2LOG); gc = 1 - 1/gGl;
+    ge1 = 2/(gR2*HF_C); ge0 = 1/(gR1*gR2*HF_C*HF_C);
+    gg >= 0 ? g_set(3, 1, ge1, ge0, 1 - gc, ge1, ge0, 2) : g_set(3, 1 - gc, ge1, ge0, 1, ge1, ge0, 2);
+  ) : g_set(3, 0, 0, 0, 0, 0, 0, 0);
+  // HMF bell
+  gg = g_gain_db(M_TAB, hmf_g);
+  eq_in >= 0.5 && abs(gg) > 0.000000001 ? (
+    gf = HMF_LO*pow(HMF_HI/HMF_LO, g_legend_u(hmf_f, L_HMF, 7));
+    gf = min(gf*(hmf_x3 >= 0.5 ? HMF_MUL : 1), 20000);
+    g_bell(4, 2*$pi*gf, g_q0(hmf_q), gg);
+  ) : g_set(4, 0, 0, 0, 0, 0, 0, 0);
+  // LF shelf
+  gg = g_gain_db(M_TAB + 22, lf_g);
+  eq_in >= 0.5 && abs(gg) > 0.000000001 ? (
+    gu = g_legend_u(lf_f, L_LF, 6);
+    gw = LF_RMAX*pow(LF_RMIN/LF_RMAX, gu);
+    gT1 = gw*LF_C1; gT2 = gw*LF_C2; gga = abs(gg); gGl = exp(gga*DB2LOG);
+    gc = (1 - 1/gGl)/(LF_W1 + LF_W2)*(LF_K0 + gga*(LF_K1 + gga*LF_K2));
+    gd1 = gT1 + gT2; gdc2 = gT1*gT2; gdc1 = gT1 + gT2 - gc*gT2*(LF_W1 + LF_W2); gdc0 = 1 - gc*LF_W1;
+    gg >= 0 ? g_set(5, gdc2, gd1, 1, gdc2, gdc1, gdc0, 2) : g_set(5, gdc2, gdc1, gdc0, gdc2, gd1, 1, 2);
+  ) : g_set(5, 0, 0, 0, 0, 0, 0, 0);
+  // LMF bell
+  gg = g_gain_db(M_TAB, lmf_g);
+  eq_in >= 0.5 && abs(gg) > 0.000000001 ? (
+    gf = LMF_LO*pow(LMF_HI/LMF_LO, g_legend_u(lmf_f, L_LMF, 7));
+    gf = min(gf/(lmf_d3 >= 0.5 ? LMF_DIV : 1), 20000);
+    g_bell(6, 2*$pi*gf, g_q0(lmf_q), gg);
+  ) : g_set(6, 0, 0, 0, 0, 0, 0, 0);
+);
+// |H(j 2 pi f)| of panel slot s; slots that are off are 1
+function g_mag(s, f) local(gp, gw2, gnr, gni, gdr, gdi)
+(
+  gp = G_PROTO + s*8;
+  gp[6] == 0 ? 1 : (
+    gw2 = 2*$pi*f;
+    gnr = gp[2] - gp[0]*gw2*gw2; gni = gp[1]*gw2;
+    gdr = gp[5] - gp[3]*gw2*gw2; gdi = gp[4]*gw2;
+    sqrt((gnr*gnr + gni*gni)/(gdr*gdr + gdi*gdi));
+  );
+);
+
+// Rectangle outline of 1 logical px.
+function g_frame(x, y, w, h)
+(
+  gfx_rect(x*gk_S, y*gk_S, w*gk_S, max(1, gk_S));
+  gfx_rect(x*gk_S, (y + h)*gk_S, w*gk_S, max(1, gk_S));
+  gfx_rect(x*gk_S, y*gk_S, max(1, gk_S), h*gk_S);
+  gfx_rect((x + w)*gk_S, y*gk_S, max(1, gk_S), h*gk_S);
+);
+// Text with its left edge at logical x, vertically centred on logical cy.
+function g_text_l(x, cy, str) local(gtw, gth)
+(
+  gfx_measurestr(str, gtw, gth);
+  gfx_x = x*gk_S; gfx_y = cy*gk_S - gth*0.5;
+  gfx_drawstr(str);
+);
+
+// Response curve: the whole chain in bright cyan, each band dimmer.  20 Hz .. 20 kHz, +-24 dB.
+function g_curve(x, y, w, h) local(gnp, gk3, gf, gdb, gxs, gys, gox, goy, gb, gsl, gtot, gmid)
+(
+  g_protos();
+  gfx_set(0.102, 0.106, 0.118, 1);
+  gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S);
+  gmid = y + h*0.5;
+  gfx_setfont(3);
+  gk3 = -18;
+  loop(7,
+    gys = gmid - gk3*(h*0.5)/24;
+    gk3 == 0 ? gfx_set(0.29, 0.31, 0.34, 1) : gfx_set(0.18, 0.19, 0.21, 1);
+    gfx_rect(x*gk_S, gys*gk_S, w*gk_S, max(1, gk_S*0.5));
+    gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    sprintf(#g_n, gk3 == 0 ? "0" : "%+d", gk3);
+    gfx_x = (x + 3)*gk_S; gfx_y = (gys - 11)*gk_S; gfx_drawstr(#g_n);
+    gk3 += 6;
+  );
+  gk3 = 0;
+  loop(8,
+    gf = gk3 == 0 ? 50 : gk3 == 1 ? 100 : gk3 == 2 ? 200 : gk3 == 3 ? 500 : gk3 == 4 ? 1000 :
+         gk3 == 5 ? 2000 : gk3 == 6 ? 5000 : 10000;
+    gxs = x + w*log(gf/20)/log(1000);
+    gfx_set(0.18, 0.19, 0.21, 1);
+    gfx_rect(gxs*gk_S, y*gk_S, max(1, gk_S*0.5), h*gk_S);
+    gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    sprintf(#g_n, gf >= 1000 ? "%dk" : "%d", gf >= 1000 ? gf/1000 : gf);
+    gfx_x = (gxs + 3)*gk_S; gfx_y = (y + h - 12)*gk_S; gfx_drawstr(#g_n);
+    gk3 += 1;
+  );
+  gfx_setfont(1);
+  // each band, dim
+  gb = 3;
+  loop(4,
+    G_PROTO[gb*8 + 6] != 0 ? (
+      gfx_set(0.118, 0.431, 0.494, 1);
+      gnp = floor(w); gk3 = 0; gox = 0; goy = 0;
+      loop(gnp + 1,
+        gf = 20*pow(1000, gk3/gnp);
+        gdb = max(-24, min(24, 8.685889638065037*log(g_mag(gb, gf))));
+        gxs = (x + gk3)*gk_S; gys = (gmid - gdb*(h*0.5)/24)*gk_S;
+        gk3 > 0 ? gfx_line(gox, goy, gxs, gys, 1);
+        gox = gxs; goy = gys; gk3 += 1;
+      );
+    );
+    gb += 1;
+  );
+  // the whole chain
+  gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+  gnp = floor(w); gk3 = 0; gox = 0; goy = 0;
+  loop(gnp + 1,
+    gf = 20*pow(1000, gk3/gnp);
+    gtot = g_mag(0, gf)*g_mag(1, gf)*g_mag(2, gf)*g_mag(3, gf)*g_mag(4, gf)*g_mag(5, gf)*g_mag(6, gf);
+    gdb = max(-24, min(24, 8.685889638065037*log(gtot)));
+    gxs = (x + gk3)*gk_S; gys = (gmid - gdb*(h*0.5)/24)*gk_S;
+    gk3 > 0 ? ( gfx_line(gox, goy, gxs, gys, 1); gfx_line(gox, goy + 1, gxs, gys + 1, 1); );
+    gox = gxs; goy = gys; gk3 += 1;
+  );
+  gfx_set(0.31, 0.33, 0.36, 1);
+  g_frame(x, y, w, h);
+);
+
+// ---------------------------------------------------------------- header
+gk_img_button = BTN_CYAN;
+gk_header(0, 10, 10, UI_W - 20, 22, "CHANNEL EQ", -1, 0);
+g_r = min(UI_W - 10, gfx_w/gk_S - 10);
+g_i = gk_dropdown(40, g_r - 88, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
+);
+// Must come after the header controls and before every other widget.
+help_open ? gk_help_input(40, 41);
+gk_button(42, g_r - 142, 13, 48, 16, curve_on, "Curve") ? curve_on = !curve_on;
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+g_text_l(g_r - 292, 21, "Gain law");
+g_dd2(43, g_r - 240, 13, 92, 16, 17, "Circuit|dB-linear", "Circuit", "dB-linear");
+
+// ---------------------------------------------------------------- response
+g_y0 = 40;
+curve_on ? (
+  gk_panel(10, 40, UI_W - 20, 136);
+  gk_header(0, 10, 40, UI_W - 20, 22, "RESPONSE", -1, 0);
+  g_curve(20, 70, UI_W - 40, 96);
+  g_y0 = 186;
+);
+g_k0 = g_y0 + 42; g_k1 = g_y0 + 122; g_k2 = g_y0 + 202;
+g_ph = 276;                          // panel height
+g_pw = 104;                          // panel width
+g_gx = 10 + 114*0;
+
+// ---------------------------------------------------------------- filters (green)
+g_px = 10;
+gk_panel(g_px, g_y0, g_pw, g_ph);
+gk_header(0, g_px, g_y0, g_pw, 22, "FILTERS", -1, 0);
+gk_knob_slider(10, KNOB_GREEN, g_px + 20, g_k0, 64, 3, 0, 1, 0);
+g_ring7(g_px + 52, g_k0 + 32, "OUT", "20", "70", "120", "200", "300", "350");
+gk_knob_slider(11, KNOB_GREEN, g_px + 20, g_k1, 64, 4, 0, 1, 1);
+g_ring7(g_px + 52, g_k1 + 32, "3", "3.5", "4", "5", "8", "12", "OUT");
+gk_img_button = BTN_GREEN;
+g_tog(30, g_px + 8, g_k1 + 82, g_pw - 16, 18, 2, "Filters In");
+gk_img_button = BTN_CYAN;
+g_tog(31, g_px + 8, g_k1 + 108, g_pw - 16, 18, 1, "EQ In");
+
+// ---------------------------------------------------------------- bands (cyan)
+// LF
+g_px = 10 + 114;
+gk_panel(g_px, g_y0, g_pw, g_ph);
+gk_header(0, g_px, g_y0, g_pw, 22, "LF", -1, 0);
+gk_knob_slider(12, KNOB_BI, g_px + 20, g_k0, 64, 5, -1, 1, 0);
+g_ring3(g_px + 52, g_k0 + 32, "-", "0", "+");
+gk_knob_slider(13, KNOB_CYAN, g_px + 20, g_k1, 64, 6, 0, 1, 0.5);
+g_ring6(g_px + 52, g_k1 + 32, "30", "50", "100", "200", "300", "450");
+// LMF
+g_px = 10 + 114*2;
+gk_panel(g_px, g_y0, g_pw, g_ph);
+gk_header(0, g_px, g_y0, g_pw, 22, "LMF", -1, 0);
+g_tog(32, g_px + g_pw - 46, g_y0 + 3, 40, 16, 10, "/ 3");
+gk_knob_slider(14, KNOB_BI, g_px + 20, g_k0, 64, 7, -1, 1, 0);
+g_ring3(g_px + 52, g_k0 + 32, "-", "0", "+");
+gk_knob_slider(15, KNOB_CYAN, g_px + 20, g_k1, 64, 8, 0, 1, 0.5);
+g_ring7(g_px + 52, g_k1 + 32, ".2", ".3", ".8", "1", "1.5", "2", "2.5");
+gk_knob_slider(16, KNOB_CYAN, g_px + 20, g_k2, 64, 9, 0, 1, 0.25);
+g_ring5(g_px + 52, g_k2 + 32, ".5", "1", "1.5", "2", "3");
+// HMF
+g_px = 10 + 114*3;
+gk_panel(g_px, g_y0, g_pw, g_ph);
+gk_header(0, g_px, g_y0, g_pw, 22, "HMF", -1, 0);
+g_tog(33, g_px + g_pw - 46, g_y0 + 3, 40, 16, 14, "x 3");
+gk_knob_slider(17, KNOB_BI, g_px + 20, g_k0, 64, 11, -1, 1, 0);
+g_ring3(g_px + 52, g_k0 + 32, "-", "0", "+");
+gk_knob_slider(18, KNOB_CYAN, g_px + 20, g_k1, 64, 12, 0, 1, 0.5);
+g_ring7(g_px + 52, g_k1 + 32, ".6", ".8", "1.5", "3", "4.5", "6", "7");
+gk_knob_slider(19, KNOB_CYAN, g_px + 20, g_k2, 64, 13, 0, 1, 0.25);
+g_ring5(g_px + 52, g_k2 + 32, ".5", "1", "1.5", "2", "3");
+// HF
+g_px = 10 + 114*4;
+gk_panel(g_px, g_y0, g_pw, g_ph);
+gk_header(0, g_px, g_y0, g_pw, 22, "HF", -1, 0);
+gk_knob_slider(20, KNOB_BI, g_px + 20, g_k0, 64, 15, -1, 1, 0);
+g_ring3(g_px + 52, g_k0 + 32, "-", "0", "+");
+gk_knob_slider(21, KNOB_CYAN, g_px + 20, g_k1, 64, 16, 0, 1, 0.5);
+g_ring7(g_px + 52, g_k1 + 32, "1.5", "2", "5", "8", "10", "11", "16");
+
+// ---------------------------------------------------------------- saturation (orange)
+g_px = 10 + 114*5;
+gk_panel(g_px, g_y0, g_pw, g_ph);
+gk_header(0, g_px, g_y0, g_pw, 22, "SATURATION", -1, 0);
+gk_knob_slider(22, KNOB_ORANGE, g_px + 20, g_k0, 64, 18, 0, 1, 0);
+sprintf(#g_s, "%d %%", floor(sat_amt*100 + 0.5));
+gk_field(g_px + 22, g_k0 + 76, 60, 16, #g_s);
+gk_img_button = BTN_ORANGE;
+g_radio(34, g_px + 8, g_k0 + 112, 54, 18, 19, 0, "Console");
+g_radio(35, g_px + 62, g_k0 + 112, 34, 18, 19, 1, "Tube");
+gk_img_button = BTN_CYAN;
+gk_text_c(g_px + 52, g_k0 + 142, "no effect yet", 1);
+
+// ---------------------------------------------------------------- help
+help_open ? gk_help_draw(10, 40, UI_W - 20, g_uih - 64, "Help  -  Channel EQ",
+                         HELP_BASE, help_lines);
+
+// ---------------------------------------------------------------- footer
+// Version label: bump on EVERY change - REAPER caches the compiled JSFX per
+// open instance, so a stale instance is otherwise invisible.
+gfx_setfont(3);
+gfx_set(0.35, 0.37, 0.40, 1);
+gfx_x = 10*gk_S; gfx_y = (g_uih - 22)*gk_S;
+gfx_drawstr("v0.1");
+gfx_setfont(1);
+gk_strip(LOGO_IMG, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, g_uih - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = g_count_missing(IMG_COUNT);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 150*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+gk_end();

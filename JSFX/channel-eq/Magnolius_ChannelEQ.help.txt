@@ -1,0 +1,105 @@
+CHANNEL EQ
+
+A channel-strip equaliser: an 18 dB/oct high-pass, a 12 dB/oct
+low-pass and four bands - LF shelf, LMF bell, HMF bell, HF shelf.
+It is modelled from the transfer functions of a console-style
+circuit, so it behaves like one: shelf corners move as you add
+gain, cut is the exact mirror of boost, and the bells get
+narrower as you push them harder.
+
+Zero latency. No lookahead, no PDC. Mono or stereo, both channels
+always get the same settings.
+
+
+GETTING SET UP
+
+1. Put it on a track. Everything starts neutral: the output is
+   identical to the input until you move something.
+2. Turn the gain knob of a band, then sweep its frequency knob.
+   Watch the response curve move.
+3. EQ In switches the four bands in and out, Filters In does the
+   same for the high-pass and low-pass. Use them to A/B.
+
+
+THE PANELS (left to right)
+
+FILTERS (green)
+  Upper knob  High-pass. Fully counter-clockwise is OUT. The
+              numbers are in Hz.
+  Lower knob  Low-pass. Fully clockwise is OUT. The numbers
+              are in kHz. Frequency rises clockwise.
+  Filters In  Switches both filters in and out together.
+  EQ In       Switches the four bands in and out together.
+
+LF (shelf)
+  Gain        Boost to the right, cut to the left, 0 at the top.
+  Freq        Corner, 30 to 450 Hz.
+
+LMF (bell)
+  Gain        As above.
+  Freq        Centre, 0.2 to 2.5 kHz.
+  Q           Width. The numbers run from 0.5 (wide) to 3
+              (narrow).
+  / 3         Moves the whole frequency range down, to about a
+              quarter. The numbers on the knob then read four
+              times too high.
+
+HMF (bell)
+  Gain, Freq  Centre, 0.6 to 7 kHz.
+  Q           As above.
+  x 3         Moves the whole frequency range up by about three.
+              The numbers on the knob then read three times too
+              low.
+
+HF (shelf)
+  Gain        As above.
+  Freq        Corner, 1.5 to 16 kHz. The corner moves up as you
+              add gain, so a big boost starts higher than the
+              printed number. There is also a small dip just
+              below the corner at full boost. Both are part of
+              the circuit.
+
+SATURATION (orange)
+  Amount, Console / Tube. These are placeholders for now: they
+  are saved and can be automated but they do not change the
+  sound yet.
+
+
+THE NUMBERS
+
+The numbers around each knob are spread evenly round its sweep.
+The knob follows them: the pointer on a printed number gives that
+frequency (or Q), and between two numbers it is smooth. The numbers
+are the panel's nominal values, not a calibration: the real centre
+or corner follows the circuit and can differ from the printed one
+by up to about a fifth (more for a strongly boosted shelf). Trust
+the response curve and your ears.
+
+The gain knobs show only - 0 +. How many dB a turn gives depends on
+the Gain law (header):
+  Circuit    The way the original behaves. The shelves keep most
+             of their range for the last fifth of the turn.
+  dB-linear  Equal dB per turn. Full travel is about +-20 dB (HF),
+             +-21 dB (bells) and +-18 dB (LF).
+Cut always mirrors boost exactly.
+
+
+THE RESPONSE CURVE
+
+Bright line: the whole chain. Dim lines: each band on its own.
+20 Hz to 20 kHz, +-24 dB. The Curve button hides it and the panel
+becomes shorter. The window itself keeps its size; use the scale
+menu (Fit, 100 % ... 200 %) to fill it.
+
+Ctrl-click a knob to reset it. Hold Shift while dragging for fine
+control. The mouse wheel works too.
+
+
+IF SOMETHING LOOKS WRONG
+
+- The header says "images failed to load": the gui_kit folder is
+  missing next to the plugin (see the README).
+- A knob moves but nothing changes: check EQ In and Filters In,
+  and that a band's gain is not at 0.
+- Changes take up to 5 ms to start and then glide for about 30 ms.
+  That is deliberate: it stops zipper noise when you sweep.
