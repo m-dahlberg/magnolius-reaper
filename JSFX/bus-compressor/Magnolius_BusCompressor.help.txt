@@ -1,10 +1,10 @@
 BUS COMPRESSOR
 
-A stereo bus compressor with the structure and stepped controls of
-the SSL G-series. It reacts to the input (feed-forward), applies ONE
-gain reduction to both channels so the stereo image stays put, and
-uses one shared attack/release element. It is a behavioural model,
-not a circuit simulation.
+A stereo bus compressor modelled on a classic feedback VCA design.
+The detector hears the gain-REDUCED signal, one gain reduction is
+applied to both channels so the stereo image stays put, and attack
+and release come from one shared RC network. It is a behavioural
+model, not a circuit simulation.
 
 SET-UP
  - Put it on a bus or master. Stereo in, stereo out.
@@ -15,14 +15,19 @@ SET-UP
  - Use Makeup to get the level back.
 
 COMPRESSOR
- Threshold   -40 to 0 dBFS, continuous. The level of the signal
-             PEAKS above which compression starts.
- Ratio       2:1, 4:1 or 10:1. 10:1 acts almost like a limiter.
- Attack      0.1, 0.3, 1, 3, 10 or 30 ms. The time the gain takes
-             to reach 63% of a step. Slow settings let the
-             transient through.
- Release     0.1, 0.3, 0.6 or 1.2 s, or AUTO. Release is never
-             faster than the Attack setting.
+ Threshold   -40 to 0 dBFS. The peak level of a steady sine that
+             gives about 1 dB of gain reduction. There is no hard
+             threshold: the onset is soft, as on the original.
+ Ratio       2:1, 4:1 or 10:1. Nominal: the effective ratio rises
+             as the gain reduction grows, and the label is its
+             value at 10 dB. 10:1 acts almost like a limiter.
+ Attack      0.1, 0.3, 1, 3, 10 or 30 ms. Nominal labels for the
+             attack resistor of the timing network. Slow settings
+             let the transient through.
+ Release     0.1, 0.3, 0.6 or 1.2 s, or AUTO. Nominal labels for
+             the release network. Release can be faster than the
+             attack setting. A slow Attack with a fast Release
+             compresses noticeably less: lower the Threshold.
  AUTO        Fast recovery for short transients, slow recovery
              after sustained compression. It depends on how much
              and how long the signal has been compressed, so there
@@ -32,9 +37,15 @@ COMPRESSOR
              so with Dry/Wet below 100% the dry part is unchanged.
 
 GAIN REDUCTION
- The needle shows the gain reduction, 0 to 20 dB, red above 14 dB.
- IN and OUT are peak meters with a hold marker and the held value
- in dBFS. REAPER's own FX meter also shows the gain reduction.
+ The backlit dial shows the gain reduction. 0 dB is at the right;
+ the needle swings left as the compression grows. The scale ends at
+ 15 dB and is stretched where bus work happens: 0-5 dB takes the
+ right half of the sweep. The red zone starts at 10 dB. A small tick
+ outside the scale holds the peak for about a second. The needle
+ shows the timing network directly, so it includes the fast part of
+ the Auto release. IN and OUT are peak meters with a hold marker and
+ the held value in dBFS. REAPER's own FX meter also shows the gain
+ reduction.
 
 SIDECHAIN
  Key HPF     Off, or 20-500 Hz. A 12 dB/octave high-pass on the
@@ -49,7 +60,7 @@ SIDECHAIN
              output. Use it to set the HPF by ear.
 
 COLOUR
- Adds a light, console-like colour, mostly 2nd and 3rd harmonic.
+ Adds a light colour, mostly 3rd harmonic (a little 2nd).
  It follows the compression: the more gain reduction, the more
  colour. 0% is completely off and the signal is untouched. It runs
  2x oversampled, which is where the latency comes from.

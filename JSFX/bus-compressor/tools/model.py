@@ -10,16 +10,23 @@ assert an exact waveform instead of a hand-derived "about right".
 
 Stdlib only; there is no numpy on this box.
 
+This is a behavioural model of a feedback VCA bus compressor: the detector sees
+the gain-REDUCED signal, so the static curve comes out of the loop instead of a
+gain computer.  The numbers that are not on the drawings are INFERRED and
+marked so; see README.md.
+
 Signal flow (all of it per sample, at the host rate unless stated):
 
     key = input L/R, or the external key (ch 3/4)
     key -> 2nd-order Butterworth HPF (detector only)
-    -> peak envelope of max(|L|,|R|), instant attack, DET_REL release
-    -> dB -> gain computer (3 dB quadratic knee) -> target GR in dB
-    -> shared timing element (one-pole in the GR domain)
-       fixed release : a single state, attack tau / release tau
-       Auto release  : a fast state plus a slow state, GR = max of the two
-    -> VCA gain on the input
+    -> a = max(|L|,|R|) * (the gain of the previous sample)   [the feedback]
+    -> rectifier  Vr = K * a^eta     (eta from the Ratio switch)
+    -> RC timing network, state in dB of gain reduction
+       fixed release : one 0.47 uF capacitor, attack R in, release R and the
+                       3M3 bleed out; the diode only charges
+       Auto release  : two coupled capacitors (0.47 uF || 91k) in series with
+                       (6.8 uF || 750k)
+    -> VCA gain on the input (gain = 10^(-V/20))
     -> Colour: 2x oversampled polynomial shaper (halfband FIR up and down),
        drive follows the gain reduction; crossfaded against a plain delay
     -> makeup (wet path only) -> dry/wet -> bypass -> key listen
@@ -34,26 +41,34 @@ DB2LOG = 0.11512925464970229
 TINY_A = 10.0 ** -6              # amplitude floor, -120 dB.  NOT 1e-6.
 
 # ---- hidden constants; the same names and values as the .jsfx @init block --
-KNEE_W = 3.0                     # dB, quadratic knee
-DET_REL = 0.002                  # s, detector peak-envelope release
-AUTO_TF = 0.12                   # s, Auto: fast element release
-AUTO_TSC = 1.0                   # s, Auto: slow element charge
-AUTO_TSR = 2.0                   # s, Auto: slow element release
+# The RC network.  Resistances in ohms, capacitances in farads.
+C_T = 0.47e-6                    # timing capacitor
+R_ATT = [820.0, 2700.0, 8200.0, 27000.0, 82000.0, 270000.0]
+R_REL = [180000.0, 270000.0, 560000.0, 1200000.0]      # index 4 = Auto
+R_BLEED = 3.3e6                  # always on the node
+R_A1, C_A1 = 91000.0, 0.47e-6    # Auto, fast section
+R_A2, C_A2 = 750000.0, 6.8e-6    # Auto, slow section
+# INFERRED
+U_REF = 1.0                      # dB of GR a steady sine at Threshold gives
+VR_CAP = 100.0                   # dB, rectifier output limit
+GR_MAX = 30.0                    # dB, the control line cannot go further
+ETA_PER_RATIO = 1.15129254649702  # eta = (ratio - 1) / this: slope at 10 dB GR
+A_FLOOR = 10.0 ** -10            # below this the rectifier reads nothing
 SM_T = 0.020                     # s, makeup / mix / colour smoothing
 RAMP_T = 0.010                   # s, bypass / listen / Colour-switch ramps
 HP_BLK = 32                      # samples between HPF coefficient updates
 HP_OFF_HZ = 10.0                 # the filter parks here while Off
 HP_GLIDE_T = 0.020               # s, cutoff glide
-SAT_A2 = 0.08                    # 2nd-order shaper term
+SAT_A2 = 0.01                    # 2nd-order shaper term (a trimmed VCA nulls it)
 SAT_A3 = 0.20                    # 3rd-order shaper term
 SAT_BASE = 0.25                  # share of the drive present with no GR
 SAT_GR_FULL = 10.0               # dB of GR at which the drive is full
 SAT_REF2 = 0.20                  # squared amplitude the gain trim assumes
 DC_HZ = 8.0                      # DC blocker corner after the shaper
-MTR_RISE = 0.015                 # s, GR needle
-MTR_FALL = 0.250
+MTR_T = 0.025                    # s, each of the two needle poles
 MTR_PK = 0.300                   # s, in/out peak fall
 KAISER_BETA = 8.0
+M_N = 1024                       # points for the mean of |sin|^eta
 
 RING = 64                        # power of two
 MASK = RING - 1
@@ -61,8 +76,8 @@ HALF = 12                        # halfband half-length / 2: 49 taps
 LAT = 24                         # samples, total oversampler latency
 
 RATIOS = [2.0, 4.0, 10.0]
-ATT_MS = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0]
-REL_S = [0.1, 0.3, 0.6, 1.2]     # index 4 = Auto
+ATT_MS = [0.1, 0.3, 1.0, 3.0, 10.0, 30.0]     # labels only: the RC values set the time
+REL_S = [0.1, 0.3, 0.6, 1.2]     # labels only; index 4 = Auto
 
 # Order matches the slider numbers in the .jsfx header.
 NAMES = ["thr_db", "ratio_i", "att_i", "rel_i", "makeup_db", "hpf_hz",
@@ -104,14 +119,18 @@ class BusComp:
         self.p = dict(DEFAULTS, **sliders)
         self.srate = float(srate)
         self.c = halfband()
+        self.m_tab = [self._mean_sin_pow(self._eta(r)) for r in RATIOS]
         self.recalc()
         # @init state
-        self.det = 0.0
-        self.g = 0.0
-        self.s = 0.0
+        self.v = 0.0                  # the timing node, dB of gain reduction
+        self.vc1 = 0.0                # Auto: the two capacitor voltages
+        self.vc2 = 0.0
         self.gr = 0.0
+        self.glin = 1.0
         self.lvl = -120.0
-        self.wa = self.auto_t
+        self.c_a = -1                 # timing_design() has not run yet
+        self.c_l = -1
+        self.timing_design()
         self.mk_sm = self.mk_t
         self.mix_sm = self.mix_t
         self.col_sm = self.col_t
@@ -134,26 +153,36 @@ class BusComp:
         self.zo = [z(), z()]
         self.dd = z()
         self.sc = [1.0] * RING                                    # 1/gain; 1 = no GR
+        self.mtr_gr1 = 0.0
         self.mtr_gr = 0.0
         self.mtr_in = 0.0
         self.mtr_out = 0.0
 
     # ---- recalc() ---------------------------------------------------------
+    @staticmethod
+    def _eta(ratio):
+        return (ratio - 1.0) / ETA_PER_RATIO
+
+    @staticmethod
+    def _mean_sin_pow(eta):
+        """Mean of |sin|^eta over a half cycle: what a slow detector averages
+        a sine to.  A midpoint sum, the same one the .jsfx @init runs."""
+        tot = 0.0
+        for k in range(M_N):
+            tot += math.sin(math.pi * (k + 0.5) / M_N) ** eta
+        return tot / M_N
+
     def recalc(self):
         p, sr = self.p, self.srate
-        ri = min(max(int(math.floor(p["ratio_i"] + 0.5)), 0), 2)
-        ai = min(max(int(math.floor(p["att_i"] + 0.5)), 0), 5)
-        li = min(max(int(math.floor(p["rel_i"] + 0.5)), 0), 4)
-        self.thr = p["thr_db"]
-        self.slope = 1.0 - 1.0 / RATIOS[ri]
-        tau_a = ATT_MS[ai] * 0.001
-        self.a_att = 1.0 - math.exp(-1.0 / (tau_a * sr))
-        self.auto_t = 1.0 if li == 4 else 0.0
-        tau_r = AUTO_TF if li == 4 else REL_S[li]
-        self.a_rel = 1.0 - math.exp(-1.0 / (max(tau_r, tau_a) * sr))
-        self.a_sc = 1.0 - math.exp(-1.0 / (AUTO_TSC * sr))
-        self.a_sr = 1.0 - math.exp(-1.0 / (AUTO_TSR * sr))
-        self.det_r = math.exp(-1.0 / (DET_REL * sr))
+        self.r_k = min(max(int(math.floor(p["ratio_i"] + 0.5)), 0), 2)
+        self.a_k = min(max(int(math.floor(p["att_i"] + 0.5)), 0), 5)
+        self.l_k = min(max(int(math.floor(p["rel_i"] + 0.5)), 0), 4)
+        self.eta = self._eta(RATIOS[self.r_k])
+        # Vr = vr_k * exp(eta * (ln a - lref)): a steady sine of peak `thr_db`
+        # averages to U_REF dB of Vr, with no divider.
+        self.lref = DB2LOG * (p["thr_db"] - U_REF)
+        self.vr_k = U_REF / self.m_tab[self.r_k]
+        self.auto_t = 1.0 if self.l_k == 4 else 0.0
         self.sm_a = 1.0 - math.exp(-1.0 / (SM_T * sr))
         self.ramp_s = 1.0 / (RAMP_T * sr)
         self.mk_t = p["makeup_db"]
@@ -167,9 +196,63 @@ class BusComp:
         self.hp_tgt = math.log(p["hpf_hz"] if self.hp_on else HP_OFF_HZ)
         self.hp_a = 1.0 - math.exp(-1.0 / (HP_GLIDE_T * sr / HP_BLK))
         self.dc_r = 1.0 - 2.0 * math.pi * DC_HZ / sr
-        self.m_rise = 1.0 - math.exp(-1.0 / (MTR_RISE * sr))
-        self.m_fall = 1.0 - math.exp(-1.0 / (MTR_FALL * sr))
+        self.m_a = 1.0 - math.exp(-1.0 / (MTR_T * sr))
         self.m_pk = math.exp(-1.0 / (MTR_PK * sr))
+
+    # ---- the RC network, per mode, exactly integrated over one sample -----
+    def timing_design(self):
+        """Coefficients of the timing network for the current Attack/Release
+        and sample rate.  AUDIO THREAD ONLY (in the .jsfx).  Also carries the
+        node voltage across a fixed <-> Auto change, so a release switch never
+        resets the envelope."""
+        sr = self.srate
+        h = 1.0 / sr
+        ra = R_ATT[self.a_k]
+        was_auto = self.c_l == 4
+        now_auto = self.l_k == 4
+        if was_auto and not now_auto:
+            self.v = self.vc1 + self.vc2
+        elif now_auto and not was_auto:
+            self.vc1 = self.v * C_A2 / (C_A1 + C_A2)      # series: equal charge
+            self.vc2 = self.v - self.vc1
+        self.c_a = self.a_k
+        self.c_l = self.l_k
+        # --- fixed release: one state ---
+        rr = R_REL[min(self.l_k, 3)]
+        rp = rr * R_BLEED / (rr + R_BLEED)
+        tau_on = ra * rp / (ra + rp) * C_T
+        self.e_on = math.exp(-h / tau_on)
+        self.f_on = (1.0 - self.e_on) * rp / (ra + rp)
+        self.e_off = math.exp(-h / (rp * C_T))
+        # --- Auto: x = [vc1, vc2], dx/dt = A x + b Vr (diode on) ---
+        d1 = 1.0 / (R_A1 * C_A1)
+        d2 = 1.0 / (R_A2 * C_A2)
+        for mode in (0, 1):                               # 0 = diode on
+            g = (1.0 / ra if mode == 0 else 0.0) + 1.0 / R_BLEED
+            a11 = -g / C_A1 - d1
+            a12 = -g / C_A1
+            a21 = -g / C_A2
+            a22 = -g / C_A2 - d2
+            m = 0.5 * (a11 + a22)
+            sg = math.sqrt((0.5 * (a11 - a22)) ** 2 + a12 * a21)
+            ep = math.exp((m + sg) * h)
+            em = math.exp((m - sg) * h)
+            ch = 0.5 * (ep + em)
+            sh = (ep - em) / (2.0 * sg)
+            e11 = ch + sh * (a11 - m)
+            e12 = sh * a12
+            e21 = sh * a21
+            e22 = ch + sh * (a22 - m)
+            if mode == 0:
+                b1, b2 = 1.0 / (ra * C_A1), 1.0 / (ra * C_A2)
+                det = a11 * a22 - a12 * a21
+                x1 = -(a22 * b1 - a12 * b2) / det         # steady state per Vr
+                x2 = -(-a21 * b1 + a11 * b2) / det
+                self.f1 = (1.0 - e11) * x1 - e12 * x2
+                self.f2 = -e21 * x1 + (1.0 - e22) * x2
+                self.on_e = (e11, e12, e21, e22)
+            else:
+                self.off_e = (e11, e12, e21, e22)
 
     def hp_design(self, f):
         f = min(f, self.srate * 0.45)
@@ -181,19 +264,35 @@ class BusComp:
         self.ha1 = 2.0 * (k * k - 1.0) * nrm
         self.ha2 = (1.0 - 1.41421356237309505 * k + k * k) * nrm
 
-    # ---- gain computer: dB level in -> dB gain reduction out (>= 0) -------
-    def gr_calc(self, x):
-        o = x - self.thr
-        w = KNEE_W
-        if 2 * o < -w:
-            return 0.0
-        if 2 * abs(o) <= w:
-            return self.slope * (o + w * 0.5) ** 2 / (2 * w)
-        return self.slope * o
+    # ---- analytic steady state (used by the tests and the README) ---------
+    def rho(self):
+        """The divider R_p / (R_att + R_p) that sets how much of the
+        rectifier output the timing capacitor reaches in steady state."""
+        ra = R_ATT[self.a_k]
+        if self.l_k == 4:
+            rp = (R_A1 + R_A2) * R_BLEED / (R_A1 + R_A2 + R_BLEED)
+        else:
+            rr = R_REL[self.l_k]
+            rp = rr * R_BLEED / (rr + R_BLEED)
+        return rp / (ra + rp)
 
-    def static_out_db(self, x):
-        """Steady-state output level for a steady input level x (dB)."""
-        return x - self.gr_calc(x) + self.mk_t
+    def static_gr(self, level_db, sine=False):
+        """Steady-state gain reduction in dB for a steady input of peak
+        `level_db` dBFS: the fixed point of V = rho * Vr(a * g(V)).  A square
+        wave reads the rectifier directly; a sine is averaged by a slow
+        attack, so its rectifier output is scaled by the mean of |sin|^eta."""
+        a0 = 10.0 ** (level_db / 20.0)
+        k = self.vr_k * (self.m_tab[self.r_k] if sine else 1.0)
+        rho = self.rho()
+        lo, hi = 0.0, GR_MAX
+        for _ in range(80):
+            v = 0.5 * (lo + hi)
+            vr = min(VR_CAP, k * math.exp(self.eta * (math.log(a0) - DB2LOG * v - self.lref)))
+            if rho * vr > v:
+                lo = v
+            else:
+                hi = v
+        return 0.5 * (lo + hi)
 
     # ---- helpers ----------------------------------------------------------
     @staticmethod
@@ -246,27 +345,45 @@ class BusComp:
             self.hz2[ch] = self.hb2 * x - self.ha2 * y
             kf[ch] = y if self.hp_on else x
 
-        # detector -> gain computer
-        dtc = max(abs(kf[0]), abs(kf[1]))
-        if dtc > self.det:
-            self.det = dtc
+        # feedback detector: the key times the gain of the previous sample
+        if self.a_k != self.c_a or self.l_k != self.c_l:
+            self.timing_design()
+        a = max(abs(kf[0]), abs(kf[1])) * self.glin
+        self.lvl = LOG2DB * math.log(max(a, TINY_A))
+        if a > A_FLOOR:
+            vr = min(VR_CAP, self.vr_k * math.exp(self.eta * (math.log(a) - self.lref)))
         else:
-            self.det = dtc + (self.det - dtc) * self.det_r
-        lvl = LOG2DB * math.log(max(self.det, TINY_A))
-        self.lvl = lvl
-        tgt = self.gr_calc(lvl)
+            vr = 0.0
 
-        # shared timing element; the slow element only matters in Auto
-        self.g += (tgt - self.g) * (self.a_att if tgt > self.g else self.a_rel)
-        self.s += (tgt - self.s) * (self.a_sc if tgt > self.s else self.a_sr)
-        if self.g < 0.000000001:
-            self.g = 0.0
-        if self.s < 0.000000001:
-            self.s = 0.0
-        self.wa = self._ramp(self.wa, self.auto_t)
-        grm = max(self.g, self.s)
-        self.gr = self.g + self.wa * (grm - self.g)
+        # timing network; the diode only charges
+        if self.l_k == 4:
+            on = vr > self.vc1 + self.vc2
+            e11, e12, e21, e22 = self.on_e if on else self.off_e
+            f1 = self.f1 if on else 0.0
+            f2 = self.f2 if on else 0.0
+            n1 = e11 * self.vc1 + e12 * self.vc2 + f1 * vr
+            n2 = e21 * self.vc1 + e22 * self.vc2 + f2 * vr
+            self.vc1, self.vc2 = n1, n2
+            self.v = n1 + n2
+            if self.v > GR_MAX:
+                k = GR_MAX / self.v
+                self.vc1 *= k
+                self.vc2 *= k
+                self.v = GR_MAX
+            if self.v < 0.000000001 and abs(self.vc1) < 0.000000001:
+                self.vc1 = self.vc2 = self.v = 0.0
+        else:
+            if vr > self.v:
+                self.v = self.v * self.e_on + self.f_on * vr
+            else:
+                self.v *= self.e_off
+            if self.v > GR_MAX:
+                self.v = GR_MAX
+            if self.v < 0.000000001:
+                self.v = 0.0
+        self.gr = self.v
         glin = math.exp(-self.gr * DB2LOG)
+        self.glin = glin
 
         # smoothed controls and ramps
         self.mk_sm += self.sm_a * (self.mk_t - self.mk_sm)
@@ -321,8 +438,8 @@ class BusComp:
         mi = max(abs(al), abs(ar))
         self.mtr_in = mi if mi > self.mtr_in else self.mtr_in * self.m_pk
         self.mtr_out = mx if mx > self.mtr_out else self.mtr_out * self.m_pk
-        self.mtr_gr += (self.gr - self.mtr_gr) * (
-            self.m_rise if self.gr > self.mtr_gr else self.m_fall)
+        self.mtr_gr1 += (self.gr - self.mtr_gr1) * self.m_a
+        self.mtr_gr += (self.mtr_gr1 - self.mtr_gr) * self.m_a
         return out[0], out[1]
 
 

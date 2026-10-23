@@ -12,18 +12,19 @@ Prerequisite: "Magnolius_BusCompressor.jsfx" symlinked (never copied)
 somewhere under <resource>/Effects/.
 
 What these tests can and cannot show: there is no reference unit here, so they
-prove (a) the plugin does what model.py says, sample for sample, and (b) the
-behaviours the brief asks for -- the static curve and the 3 dB knee, the
-labelled attack and release time constants, Auto release telling a transient
-from sustained compression, no zipper noise, determinism, and that every path
+prove (a) the plugin does what model.py says, sample for sample, (b) model.py's
+RC network behaves like the circuit it describes (time constants, the divider,
+the two-capacitor Auto release, a stable feedback loop) and (c) that every path
 (dry, bypass, Colour off) lines up with the 24 samples of reported latency.
-They do NOT prove the INFERRED constants (knee width, detector release, Auto
-times, Colour amount) match any hardware.
+They do NOT prove the INFERRED constants (the eta rule, the 1 dB threshold
+reference, the Colour amounts) match any hardware.
 
 Most measurements use SQUARE waves.  |x| of a square is constant, so the
-peak detector reads exactly the amplitude, and out/in sample by sample is the
+rectifier reads the amplitude directly and out/in sample by sample is the
 instantaneous gain -- a gain-reduction trace with no windowing.  Colour is
-off in those tests, so the wet path is a plain delay and the ratio is exact.
+off in those tests, so the wet path is a plain delay.  The dynamic tests keep
+the gain reduction small (about 0.4 dB), where the feedback loop gain is
+negligible and the response is the bare RC network.
 """
 import array
 import math
@@ -169,6 +170,35 @@ def rms(x, lo=0, hi=None):
     return math.sqrt(sum(v * v for v in seg) / len(seg))
 
 
+def quiet(ch, level_db=-20.0):
+    """The programme scaled down so a 10:1 compressor at Threshold 0 dBFS reads
+    nothing: the rectifier output is below 1e-9 dB, so the gain is exactly 1."""
+    k = lin(level_db)
+    return [f32([v * k for v in c]) for c in ch]
+
+
+def level_for_gr(kw, target, sine=False, lo=-80.0, hi=6.0):
+    """Peak level (dBFS) whose steady-state gain reduction is `target` dB."""
+    m = model.BusComp(SR, **kw)
+    for _ in range(60):
+        mid = 0.5 * (lo + hi)
+        if m.static_gr(mid, sine) < target:
+            lo = mid
+        else:
+            hi = mid
+    return 0.5 * (lo + hi)
+
+
+def settled_gr(tr, lo, hi):
+    vals = [v for v in tr[lo:hi] if v is not None]
+    return sum(vals) / len(vals)
+
+
+def t_crossing(tr, level, start, rising):
+    """First index >= start where the trace crosses `level`."""
+    return (first_above if rising else first_below)(tr, level, start)
+
+
 # ---------------------------------------------------------------------------
 # tests
 # ---------------------------------------------------------------------------
@@ -185,29 +215,40 @@ def t_canary():
     """+6.0206 dB of Makeup must be EXACTLY 2x, and +20 dB exactly 10x.
 
     Passthrough cannot fake this, so a dead @init fails here instead of
-    passing every 'nothing changed' assertion vacuously.
+    passing every 'nothing changed' assertion vacuously.  The programme is
+    quiet and the ratio 10:1 with Threshold 0 dBFS, so the gain reduction is
+    exactly zero and the makeup is the only thing acting.
     """
-    ch = program(SR * 2)
-    out = render("canary", dict(thr_db=0.0, makeup_db=GAIN_2X), ch)
+    ch = quiet(program(SR * 2))
+    kw = dict(thr_db=0.0, ratio_i=2)
+    out = render("canary", dict(kw, makeup_db=GAIN_2X), ch)
     d = max(maxdiff(out[0], [2 * v for v in ch[0]]),
             maxdiff(out[1], [2 * v for v in ch[1]]))
     H.report("canary", d < 1e-6, "+6.02 dB = exactly 2x, maxdiff %.2e" % d)
-    out = render("canary20", dict(thr_db=0.0, makeup_db=20.0), ch)
+    out = render("canary20", dict(kw, makeup_db=20.0), ch)
     d = maxdiff(out[0], [10 * v for v in ch[0]])
     H.report("canary20", d < 1e-6, "+20 dB = exactly 10x, maxdiff %.2e" % d)
 
 
 def t_unity():
-    """Engaged but not triggering: the render must be BIT-IDENTICAL to the
-    input.  That single assertion proves actual latency == reported PDC."""
-    ch = program(SR * 2)
-    out = render("unity", dict(thr_db=0.0), ch)
+    """Engaged but reading nothing: the render must be the input to within one
+    float32 ulp of the tiniest samples.  That proves actual latency ==
+    reported PDC: a one-sample misalignment would differ by ~1e-5.
+    (There is no hard threshold, so it takes a quiet programme at 10:1.)
+
+    Why not `== 0`: REAPER itself changes a few near-zero samples (3e-9) by one
+    float32 ulp (2.2e-16) on the way through a track -- a bare JSFX that only
+    does `spl0 = spl0` shows the identical difference at the identical sample --
+    so 5e-16 is as exact as an FX can be measured here."""
+    tol = 5e-16
+    ch = quiet(program(SR * 2))
+    out = render("unity", dict(thr_db=0.0, ratio_i=2), ch)
     d = max(maxdiff(out[0], ch[0]), maxdiff(out[1], ch[1]))
-    H.report("unity", d == 0.0, "no GR, Colour 0: bit-identical, maxdiff %.2e" % d)
+    H.report("unity", d < tol, "no GR, Colour 0: maxdiff %.2e (tol %.0e)" % (d, tol))
     # key HPF and a different release must not change that
-    out = render("unity_hpf", dict(thr_db=0.0, hpf_hz=150, att_i=0, rel_i=4), ch)
+    out = render("unity_hpf", dict(thr_db=0.0, ratio_i=2, hpf_hz=150, att_i=0, rel_i=4), ch)
     d = max(maxdiff(out[0], ch[0]), maxdiff(out[1], ch[1]))
-    H.report("unity_hpf", d == 0.0, "HPF 150 Hz + Auto, still no GR: maxdiff %.2e" % d)
+    H.report("unity_hpf", d < tol, "HPF 150 Hz + Auto, still no GR: maxdiff %.2e" % d)
 
 
 def t_paths():
@@ -241,10 +282,10 @@ def t_model():
     after 2000 samples of silence matches to 1.5e-8 from its first sample, so
     this is a start-of-item effect in how REAPER primes a PDC plugin, not a
     DSP difference; the cause was not pinned down."""
-    n3 = SR * 3 // 2
     cases = [
         ("default", {}, SR),
         ("ratio10", dict(ratio_i=2, att_i=0, rel_i=0, thr_db=-25.0), SR),
+        ("ratio2", dict(ratio_i=0, att_i=5, rel_i=3, thr_db=-30.0), SR),
         ("auto", dict(rel_i=4, att_i=3, thr_db=-18.0, makeup_db=4.0), SR),
         ("hpf", dict(hpf_hz=120, thr_db=-20.0, ratio_i=0, rel_i=2), SR),
         ("colour", dict(colour=100.0, thr_db=-20.0, att_i=2, makeup_db=3.0), SR),
@@ -253,6 +294,7 @@ def t_model():
         ("listen", dict(key_listen=1, hpf_hz=200, thr_db=-22.0), SR),
         ("sr441", dict(thr_db=-15.0, colour=50.0, hpf_hz=60), 44100),
         ("sr96", dict(thr_db=-15.0, colour=50.0, rel_i=4), 96000),
+        ("sr192", dict(thr_db=-25.0, ratio_i=2, att_i=0, rel_i=4), 192000),
     ]
     for name, kw, sr in cases:
         ch = program(int(sr * 3 // 2), srate=sr)
@@ -264,130 +306,229 @@ def t_model():
 
 
 def t_static():
-    """Static curve of a settled square wave vs the analytic gain computer,
-    for each ratio, across the 3 dB knee.  Peak level in, gain reduction out."""
-    thr = -20.0
-    levels = [-50, -40, -30, -25, -22, -21, -20.5, -20, -19.5, -19, -18,
-              -15, -10, -5, -1]
-    seg = 0.5
-    ch = stereo(square(levels, seg))
+    """The static curve comes out of the feedback loop.  For each ratio, a
+    settled square wave at the levels giving 5, 10 and 15 dB of gain reduction
+    is measured, and so are the levels 1 dB either side:
+      * the gain reduction equals the analytic fixed point of the loop
+        (model.static_gr), to 0.05 dB;
+      * the effective ratio (the slope of the curve) is 1 + eta * GR / 8.686,
+        so it RISES with the gain reduction and the 2/4/10 labels are the
+        value at 10 dB."""
+    seg = 0.6
     for ri in range(3):
-        kw = dict(thr_db=thr, ratio_i=ri, att_i=3, rel_i=0)
-        out = render("static_%d" % ri, kw, ch)
+        kw = dict(thr_db=-40.0, ratio_i=ri, att_i=3, rel_i=0)
         m = model.BusComp(SR, **kw)
+        levels, tgts = [], (5.0, 10.0, 15.0)
+        for t in tgts:
+            lv = level_for_gr(kw, t)
+            levels += [lv - 1.0, lv, lv + 1.0]
+        ch = stereo(square(levels, seg))
+        out = render("static_%d" % ri, kw, ch)
         tr = gr_trace(ch[0], out[0])
-        worst, rows = 0.0, []
-        for i, lv in enumerate(levels):
+        meas = []
+        for i in range(len(levels)):
             lo = int((i * seg + seg - 0.1) * SR)
-            vals = [v for v in tr[lo:lo + 4000] if v is not None]
-            meas = sum(vals) / len(vals)
-            want = m.gr_calc(lv)
-            worst = max(worst, abs(meas - want))
-            rows.append((lv, round(meas, 2), round(want, 2)))
+            meas.append(settled_gr(tr, lo, lo + 4000))
+        worst = max(abs(meas[i] - m.static_gr(levels[i])) for i in range(len(levels)))
         H.report("static:%d:1" % model.RATIOS[ri], worst < 0.05,
-                 "worst %.3f dB (tol 0.05)" % worst)
-        if worst >= 0.05:
-            print("   (level, measured GR, wanted GR):", rows)
-    # the knee: firm.  GR at threshold = slope * 3/8, and zero 1.5 dB below.
-    m = model.BusComp(SR, thr_db=thr, ratio_i=1)
-    ok = (abs(m.gr_calc(thr) - 0.75 * 3 / 8) < 1e-12 and m.gr_calc(thr - 1.5) == 0.0
-          and abs(m.gr_calc(thr + 1.5) - 0.75 * 1.5) < 1e-12)
-    H.report("knee", ok, "3 dB quadratic: GR(thr)=%.3f, 0 at -1.5 dB, linear at +1.5 dB"
-             % m.gr_calc(thr))
+                 "GR vs the loop's fixed point: worst %.3f dB (tol 0.05)" % worst)
+        rows, ok = [], True
+        for j, t in enumerate(tgts):
+            lo_, mid, hi_ = meas[3 * j], meas[3 * j + 1], meas[3 * j + 2]
+            eff = 1.0 / (1.0 - (hi_ - lo_) / 2.0)
+            want = 1.0 + m.eta * mid / model.LOG2DB
+            ok &= abs(eff - want) < 0.06 * want
+            rows.append("%g dB: %.2f (want %.2f)" % (t, eff, want))
+        H.report("ratio:%d:1" % model.RATIOS[ri], ok,
+                 "effective ratio at 5/10/15 dB GR: " + "; ".join(rows))
+
+
+def t_threshold():
+    """Threshold is the sine peak level that gives about 1 dB of gain
+    reduction at the default Attack (10 ms) and Release (0.3 s), whatever the
+    Ratio.  It is calibrated for a slow detector that averages the sine, with
+    nothing dividing the rectifier output; the real network then moves it a
+    little with the settings (the diode only charges, and the divider
+    R_p / (R_att + R_p) scales the output), which is the behaviour being
+    modelled, so the claim is 'about 1 dB', not an exact figure.  A faster
+    Release makes the divider smaller and must compress less."""
+    n = SR * 3
+    sig = stereo(sine(bin_freq(220.0, SR, 16384), lin(-20.0), n))
+
+    def gr_of(name, kw):
+        out = render(name, kw, sig)
+        return (db(rms(sig[0], SR * 2, SR * 2 + 16384))
+                - db(rms(out[0], SR * 2, SR * 2 + 16384)))
+
+    gr = [gr_of("thr_r%d" % ri, dict(thr_db=-20.0, ratio_i=ri, att_i=4, rel_i=1))
+          for ri in range(3)]
+    H.report("threshold", all(abs(g - 1.0) < 0.3 for g in gr),
+             "sine at Threshold, Attack 10 ms, Release 0.3 s: GR %.2f / %.2f / %.2f dB "
+             "at 2:1 / 4:1 / 10:1 (want 1 +- 0.3)" % tuple(gr))
+    g_slow = gr_of("thr_rel3", dict(thr_db=-20.0, ratio_i=1, att_i=5, rel_i=3))
+    g_fast = gr_of("thr_rel0", dict(thr_db=-20.0, ratio_i=1, att_i=5, rel_i=0))
+    m = model.BusComp(SR, ratio_i=1, att_i=5, rel_i=3)
+    r3 = m.rho()
+    m = model.BusComp(SR, ratio_i=1, att_i=5, rel_i=0)
+    r0 = m.rho()
+    H.report("threshold:divider", g_fast < g_slow - 0.3,
+             "Attack 30 ms: GR %.2f dB at Release 1.2 s (divider %.2f), %.2f dB at "
+             "Release 0.1 s (divider %.2f)" % (g_slow, r3, g_fast, r0))
+
+
+def rc_tau_on(a_k, l_k):
+    ra = model.R_ATT[a_k]
+    rr = model.R_REL[l_k]
+    rp = rr * model.R_BLEED / (rr + model.R_BLEED)
+    return ra * rp / (ra + rp) * model.C_T
 
 
 def t_attack():
-    """Time to 63% of the final gain reduction equals the labelled time."""
-    lo_n = int(0.1 * SR)
-    ch1 = square([-60.0, -10.0], [0.1, 0.4])
-    ch = stereo(ch1)
-    worst, rows = 0.0, []
-    ok = True
-    for ai, ms in enumerate(model.ATT_MS):
-        kw = dict(thr_db=-40.0, ratio_i=2, att_i=ai, rel_i=3)
+    """Attack is the RC network: the capacitor charges through the Attack
+    resistor with time constant (R_att || R_p) * C.  Measured with a step that
+    gives only ~0.4 dB of gain reduction, where the feedback loop gain is
+    negligible, so the time to 63% is the bare RC."""
+    ch1_lo = 0.05
+    ok, rows = True, []
+    for ai in range(6):
+        kw = dict(thr_db=-20.0, ratio_i=0, att_i=ai, rel_i=3)
+        lv = level_for_gr(kw, 0.4)
+        ch = stereo(square([-70.0, lv], [ch1_lo, 0.9]))
         out = render("attack_%d" % ai, kw, ch)
         tr = gr_trace(ch[0], out[0])
-        fin = model.BusComp(SR, **kw).gr_calc(-10.0)
-        i = first_above(tr, 0.632 * fin, lo_n)
-        t = (i - lo_n) / SR * 1000.0 if i is not None else None
-        good = t is not None and abs(t - ms) <= 0.15 * ms + 0.03
+        s0 = int(ch1_lo * SR)
+        g0 = settled_gr(tr, s0 - 1000, s0 - 10)
+        fin = settled_gr(tr, len(tr) - 3000, len(tr))
+        i = first_above(tr, g0 + 0.632 * (fin - g0), s0)
+        t = (i - s0) / SR if i is not None else None
+        want = rc_tau_on(ai, 3)
+        good = t is not None and abs(t - want) <= 0.08 * want + 1.5 / SR
         ok &= good
-        rows.append("%g ms -> %s" % (ms, "none" if t is None else "%.3f" % t))
+        rows.append("R=%g: %s ms (RC %.3f)" % (model.R_ATT[ai], "none" if t is None
+                                                else "%.3f" % (t * 1000), want * 1000))
     H.report("attack", ok, "t(63%%): %s" % "; ".join(rows))
 
 
 def t_release():
-    """Fixed release: the time for the gain reduction to fall to 1/e equals
-    the labelled time (the detector's own 2 ms fall delays the start, hence
-    the small allowance)."""
+    """Release is the RC network too: exponential decay of the gain reduction
+    in dB with time constant (R_rel || 3M3) * 0.47 uF, whatever the Attack
+    (the diode only charges, so the attack resistor is not in the discharge
+    path)."""
     ok, rows = True, []
-    for ri, sec in enumerate(model.REL_S):
-        ch = stereo(square([-10.0, -60.0], [0.5, sec * 6 + 0.5]))
-        kw = dict(thr_db=-40.0, ratio_i=2, att_i=2, rel_i=ri)
-        out = render("release_%d" % ri, kw, ch)
-        tr = gr_trace(ch[0], out[0])
-        end = int(0.5 * SR)
-        g0 = next(v for v in reversed(tr[end - 2000:end]) if v is not None)
-        i = first_below(tr, g0 / math.e, end)
-        t = (i - end) / SR if i is not None else None
-        good = t is not None and abs(t - sec) <= 0.06 * sec + 0.004
-        ok &= good
-        rows.append("%g s -> %s" % (sec, "none" if t is None else "%.3f" % t))
+    for ri in range(4):
+        for ai in ((2, 5) if ri == 0 else (2,)):
+            ch = stereo(square([-12.0, -60.0], [1.0, 6 * 0.5 + 0.5]))
+            kw = dict(thr_db=-30.0, ratio_i=1, att_i=ai, rel_i=ri)
+            out = render("release_%d_%d" % (ri, ai), kw, ch)
+            tr = gr_trace(ch[0], out[0])
+            end = SR
+            g0 = next(v for v in reversed(tr[end - 2000:end]) if v is not None)
+            i = first_below(tr, g0 / math.e, end)
+            t = (i - end) / SR if i is not None else None
+            rr = model.R_REL[ri]
+            want = rr * model.R_BLEED / (rr + model.R_BLEED) * model.C_T
+            good = t is not None and abs(t - want) <= 0.03 * want + 2.0 / SR
+            ok &= good
+            rows.append("%g s, att %g ms: %s (RC %.3f)" % (
+                model.REL_S[ri], model.ATT_MS[ai], "none" if t is None else "%.3f" % t, want))
     H.report("release", ok, "t(1/e): %s" % "; ".join(rows))
 
 
-def t_shared():
-    """One shared element: release is never effectively faster than attack.
-    With the slowest attack (30 ms) and the fastest release (0.1 s) the
-    release time constant stays 0.1 s, and a long attack still takes 30 ms."""
-    ch = stereo(square([-10.0, -60.0], [0.5, 1.0]))
-    kw = dict(thr_db=-40.0, ratio_i=2, att_i=5, rel_i=0)
-    out = render("shared", kw, ch)
-    tr = gr_trace(ch[0], out[0])
-    end = int(0.5 * SR)
-    g0 = next(v for v in reversed(tr[end - 2000:end]) if v is not None)
-    i = first_below(tr, g0 / math.e, end)
-    t = (i - end) / SR if i is not None else None
-    m = model.BusComp(SR, **kw)
-    H.report("shared", t is not None and abs(t - max(0.1, 0.03)) < 0.01
-             and m.a_rel >= 1 - math.exp(-1 / (0.1 * SR)) - 1e-12,
-             "30 ms attack / 0.1 s release: t(1/e) = %s s" % t)
+def t_divider():
+    """The shared capacitor: a slow Attack with a fast Release settles at only
+    R_p / (R_att + R_p) of the rectifier output, so it compresses less; and
+    the release is not slowed down by the attack setting (the 0.1 s release RC,
+    80 ms, is faster than the 30 ms attack's own 127 ms RC)."""
+    kw0 = dict(thr_db=-20.0, ratio_i=0, att_i=0, rel_i=0)
+    kw5 = dict(kw0, att_i=5)
+    lv = level_for_gr(kw0, 0.4)
+    ch = stereo(square([lv], 1.5))
+    g = {}
+    for nm, kw in (("0", kw0), ("5", kw5)):
+        out = render("div_" + nm, kw, ch)
+        tr = gr_trace(ch[0], out[0])
+        g[nm] = settled_gr(tr, len(tr) - 4000, len(tr))
+    m0, m5 = model.BusComp(SR, **kw0), model.BusComp(SR, **kw5)
+    want = m5.static_gr(lv) / m0.static_gr(lv)
+    meas = g["5"] / g["0"]
+    H.report("divider", abs(meas - want) < 0.02 and m0.rho() > 0.99 and m5.rho() < 0.4,
+             "GR with 30 ms attack / GR with 0.1 ms attack at 0.1 s release: %.3f "
+             "(loop %.3f, divider %.3f / %.3f)" % (meas, want, m5.rho(), m0.rho()))
 
 
 def t_auto():
-    """Auto release tells a transient from sustained compression, gradually.
-
-    A burst of loud material followed by quiet: the time for the gain
-    reduction to fall to 10% of its value grows with the burst length -- a
-    20 ms transient recovers fast, 3 s of sustained compression slowly.
-    """
-    durs = [0.02, 0.1, 0.5, 3.0]
+    """Auto release: two coupled capacitors, no switch point.  After a burst of
+    loud material followed by quiet, the time for the gain reduction to halve
+    grows with the burst length -- a 20 ms transient recovers on the small
+    fast section, 3 s of sustained compression on the big slow one."""
+    durs = [0.02, 0.1, 0.5, 1.0, 3.0]
     times = []
     for d in durs:
-        ch = stereo(square([-10.0, -60.0], [d, 5.0]))
-        kw = dict(thr_db=-40.0, ratio_i=2, att_i=3, rel_i=4)
+        ch = stereo(square([-12.0, -60.0], [d, 4.0]))
+        kw = dict(thr_db=-30.0, ratio_i=1, att_i=3, rel_i=4)
         out = render("auto_%g" % d, kw, ch)
         tr = gr_trace(ch[0], out[0])
         end = int(d * SR)
         g0 = next(v for v in reversed(tr[max(end - 2000, 0):end]) if v is not None)
-        i = first_below(tr, 0.1 * g0, end)
+        i = first_below(tr, 0.5 * g0, end)
         times.append((i - end) / SR if i is not None else float("inf"))
-    mono = all(b >= a - 0.02 for a, b in zip(times, times[1:]))
-    ok = times[0] < 0.35 and times[-1] > 1.5 and mono
-    H.report("auto", ok, "t(10%%) after a %s s burst: %s (want first < 0.35 s, "
-             "last > 1.5 s, rising)" % ("/".join("%g" % d for d in durs),
-                                      " ".join("%.2f" % t for t in times)))
-    # Auto is only engaged on the last detent: 1.2 s must recover differently
-    ch = stereo(square([-10.0, -60.0], [0.02, 3.0]))
-    out = render("auto_off", dict(thr_db=-40.0, ratio_i=2, att_i=3, rel_i=0), ch)
+    mono = all(b >= a - 0.005 for a, b in zip(times, times[1:]))
+    ok = times[0] < 0.06 and 0.1 < times[2] < 0.4 and times[-1] > 1.5 and mono
+    H.report("auto", ok, "t(50%%) after a %s s burst: %s s (want first < 0.06, 0.5 s burst "
+             "0.1-0.4, last > 1.5, rising)" % ("/".join("%g" % d for d in durs),
+                                               " ".join("%.3f" % t for t in times)))
+    # Auto is only engaged on the last detent: Release 1.2 s must recover alike
+    # whatever the burst (tau = 0.41 s, so t(50%) = 0.29 s)
+    t_fix = []
+    for d in (0.02, 3.0):
+        ch = stereo(square([-12.0, -60.0], [d, 2.0]))
+        out = render("auto_off_%g" % d, dict(thr_db=-30.0, ratio_i=1, att_i=3, rel_i=3), ch)
+        tr = gr_trace(ch[0], out[0])
+        end = int(d * SR)
+        g0 = next(v for v in reversed(tr[max(end - 2000, 0):end]) if v is not None)
+        t_fix.append((first_below(tr, 0.5 * g0, end) - end) / SR)
+    H.report("auto:fixed", all(0.26 < t < 0.32 for t in t_fix),
+             "Release 1.2 s (not Auto) after a 20 ms and a 3 s burst: t(50%%) = %.3f / "
+             "%.3f s (RC: %.3f)" % (t_fix[0], t_fix[1], 0.414 * math.log(2)))
+
+
+def t_switch():
+    """Changing the Release switch on a live loop carries the capacitor
+    voltage across: no reset, no jump.  Fixed -> Auto -> fixed while the
+    compressor holds about 13 dB of gain reduction."""
+    ch = stereo(square([-14.0], 3.0))
+    kw = dict(thr_db=-30.0, ratio_i=1, att_i=3, rel_i=0)
+    env = parm_env(3, "Release (s)", [(0.0, 0), (1.0, 4), (2.0, 1)])
+    out = render("switch", kw, ch, parmenv=env)
     tr = gr_trace(ch[0], out[0])
-    end = int(0.02 * SR)
-    g0 = next(v for v in reversed(tr[end - 500:end]) if v is not None)
-    i = first_below(tr, 0.1 * g0, end)
-    t = (i - end) / SR
-    H.report("auto:fixed", 0.15 < t < 0.35,
-             "Release 0.1 s (not Auto) after a 20 ms burst: t(10%%) = %.2f s "
-             "(2.3 tau = 0.23)" % t)
+    ok, rows = True, []
+    for t0 in (1.0, 2.0):
+        i0 = int(t0 * SR)
+        seg = [v for v in tr[i0 - 40:i0 + 400] if v is not None]
+        step = max(abs(b - a) for a, b in zip(seg, seg[1:]))
+        gb = settled_gr(tr, i0 - 200, i0 - 5)
+        ok &= step < 0.05 and gb > 5.0
+        rows.append("at %g s: GR %.1f dB, largest per-sample step %.4f dB" % (t0, gb, step))
+    H.report("switch", ok, "; ".join(rows) + " (tol 0.05)")
+
+
+def t_stability():
+    """The feedback loop is stable at every sample rate: fastest Attack, 10:1,
+    levels that hold 10-27 dB of gain reduction.  The gain reduction must be
+    steady (a limit cycle would show as a ripple) and finite."""
+    ok, rows = True, []
+    for sr in (44100, 48000, 96000, 192000):
+        for lv in (-30.0, -12.0):
+            ch = stereo(square([lv], 0.35, srate=sr))
+            kw = dict(thr_db=-40.0, ratio_i=2, att_i=0, rel_i=0)
+            out = render("stab_%d_%d" % (sr, lv), kw, ch, srate=sr)
+            tr = [v for v in gr_trace(ch[0], out[0], int(0.25 * sr)) if v is not None]
+            pp = max(tr) - min(tr)
+            finite = all(abs(v) < 1e6 for v in out[0])
+            good = finite and pp < 0.01 and sum(tr) / len(tr) > 8.0
+            ok &= good
+            rows.append("%d Hz %d dBFS: GR %.1f dB, p-p %.4f" % (sr, lv, sum(tr) / len(tr), pp))
+    H.report("stability", ok, "; ".join(rows))
 
 
 def t_hpf():
@@ -464,12 +605,13 @@ def t_colour():
     off = harmonics("colour_off", a, dict(base, colour=0.0))
     on = harmonics("colour_on", a, dict(base, colour=100.0))
     light = harmonics("colour_light", a, dict(dict(base, thr_db=-8.0), colour=100.0))
-    ok = (-45.0 < on[1] < -25.0 and -50.0 < on[2] < -25.0
-          and on[1] > off[1] + 10.0 and on[1] > light[1] + 3.0)
+    # a trimmed VCA nulls its 2nd harmonic: the colour leans to the 3rd
+    ok = (-45.0 < on[2] < -30.0 and on[1] < on[2] - 8.0
+          and on[2] > off[2] + 10.0 and on[2] > light[2] + 3.0)
     H.report("colour:harmonics", ok,
-             "-6 dBFS, ~18 dB GR: 2nd %.1f / 3rd %.1f dBc (Colour 0: %.1f / %.1f; "
-             "with 1 dB GR: %.1f / %.1f)" % (on[1], on[2], off[1], off[2],
-                                            light[1], light[2]))
+             "-6 dBFS, ~13 dB GR: 2nd %.1f / 3rd %.1f dBc (Colour 0: %.1f / %.1f -- the "
+             "VCA's own gain ripple; with 1 dB GR: %.1f / %.1f)"
+             % (on[1], on[2], off[1], off[2], light[1], light[2]))
     worst = 0.0
     for lv in (-24.0, -12.0, -6.0):
         o0 = harmonics("colour_n0_%d" % lv, lin(lv), dict(base, colour=0.0))
@@ -477,17 +619,23 @@ def t_colour():
         worst = max(worst, abs(db(o1[0] / o0[0])))
     H.report("colour:level", worst < 0.5,
              "fundamental changes by at most %.2f dB (tol 0.5) at -24/-12/-6 dBFS" % worst)
-    # alias floor: a 17 kHz tone's 2nd/3rd harmonics would fold to 14 and 3 kHz
+    # alias floor: a 17 kHz tone's 2nd/3rd harmonics would fold to 14 and 3 kHz.
+    # The 3 kHz bin also holds the compressor's OWN gain-ripple distortion (it
+    # is the same with Colour 0), so Colour is judged on the 14 kHz bin and on
+    # adding nothing to the 3 kHz one.
     f17 = bin_freq(17000.0, SR, n)
     ch = stereo(sine(f17, lin(-6.0), SR * 2))
-    out = render("colour_alias", dict(base, colour=100.0, thr_db=-30.0), ch)
-    seg = out[0][SR:SR + n]
-    h1 = dft_mag_hann(seg, f17)
     fa = [bin_freq(abs(SR - 2 * f17), SR, n), bin_freq(abs(3 * f17 - SR), SR, n)]
-    al = [db(dft_mag_hann(seg, x) / h1) for x in fa]
-    H.report("colour:alias", max(al) < -75.0,
-             "17 kHz tone, Colour 100: aliases at %.0f / %.0f Hz are %.1f / %.1f dBc "
-             "(want < -75)" % (fa[0], fa[1], al[0], al[1]))
+    al = {}
+    for col in (100.0, 0.0):
+        out = render("colour_alias_%d" % col, dict(base, colour=col, thr_db=-30.0), ch)
+        seg = out[0][SR:SR + n]
+        h1 = dft_mag_hann(seg, f17)
+        al[col] = [db(dft_mag_hann(seg, x) / h1) for x in fa]
+    H.report("colour:alias", al[100.0][0] < -75.0 and al[100.0][1] < al[0.0][1] + 1.0,
+             "17 kHz tone, Colour 100: %.0f Hz alias %.1f dBc (want < -75); %.0f Hz "
+             "%.1f dBc against %.1f with Colour 0 (the compressor's own ripple)"
+             % (fa[0], al[100.0][0], fa[1], al[100.0][1], al[0.0][1]))
     # alignment: with Colour on but no GR the output still lines up with the
     # input (PDC), to within the shaper's own small distortion
     ch = stereo(sine(bin_freq(5000.0, SR, n), 0.25, SR))
@@ -566,9 +714,10 @@ def t_filter():
 
 TESTS = [("params", t_params), ("canary", t_canary), ("unity", t_unity),
          ("paths", t_paths), ("model", t_model), ("static", t_static),
-         ("attack", t_attack), ("release", t_release), ("shared", t_shared),
-         ("auto", t_auto), ("hpf", t_hpf), ("ext", t_ext), ("colour", t_colour),
-         ("smooth", t_smooth), ("determinism", t_determinism),
+         ("threshold", t_threshold), ("attack", t_attack), ("release", t_release),
+         ("divider", t_divider), ("auto", t_auto), ("switch", t_switch),
+         ("stability", t_stability), ("hpf", t_hpf), ("ext", t_ext),
+         ("colour", t_colour), ("smooth", t_smooth), ("determinism", t_determinism),
          ("filter", t_filter)]
 
 if __name__ == "__main__":
