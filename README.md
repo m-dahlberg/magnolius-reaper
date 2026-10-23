@@ -32,6 +32,7 @@ Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
 | --- | --- |
 | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. |
 | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. |
+| Channel EQ | Channel-strip EQ: 18 dB/oct high-pass, 12 dB/oct low-pass, two shelves and two bells, modelled from circuit transfer functions, with a live response curve. |
 | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. |
 | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. |
 | DeNoise | Spectral noise reduction, ported from libspecbleach. |
