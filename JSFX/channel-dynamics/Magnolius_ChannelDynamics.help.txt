@@ -1,0 +1,128 @@
+CHANNEL DYNAMICS
+
+A model of a classic console channel-strip dynamics section: a
+compressor and an expander / gate that share one detector. It reacts
+to energy rather than single peaks, has a soft "over easy" knee, a
+release that is quick after a short burst and slow after sustained
+compression, and adds make-up gain by itself as you lower the
+threshold - so you can set it for feel and not keep re-balancing the
+level.
+
+Zero latency. No lookahead, no PDC.
+
+It is a behavioural model, not a circuit simulation. A few values are
+educated guesses (see "What is fitted" below).
+
+
+GETTING SET UP
+
+1. Set Ratio to about 4:1 and Release to about 0.4 s.
+2. Lower Threshold until the compressor's GR ladder moves on the loud
+   parts.
+3. Toggle the FX on and off. Auto Make-up keeps a compressed signal
+   near the same level, so you are comparing character, not loudness.
+4. For the gate, press In, pick Expand or Gate, then raise Threshold
+   until the strip's level bar drops below the line between phrases.
+   Range sets how far it closes.
+5. Both sections use the same detector, and the gate listens to the
+   signal BEFORE the compressor, so compressing does not change what
+   the gate does.
+
+
+COMPRESSOR (cyan)
+
+  Ratio        1:1 is off. Turn up for more compression; fully
+               clockwise is infinity:1, a limiter.
+  Threshold    +10 dB down to -30 dB, relative to the Reference
+               level. Below this nothing is compressed.
+  Release      0.1 s to 4 s. How slowly the gain comes back.
+  Output       Trim, plus or minus 12 dB, after the make-up.
+
+  Fast Att     Attack time constant 1 ms instead of 33 ms (Auto).
+  Auto Make-up On: lowering Threshold and raising Ratio adds gain
+               so a signal at the Reference level comes out at the
+               Reference level. Off: only Output changes the level.
+
+  Stereo link  How the two channels feed the detector. Max follows
+               the louder one; Avg follows their average power.
+               Either way both channels get the same gain, so the
+               stereo image does not move.
+  Reference    The input level that counts as 0 dB on both Threshold
+               knobs. -18 dBFS is the usual match for a +4 dBu
+               console. Raise it if your material is hot.
+
+The knee is gentle at low gain reduction and firms up as it grows.
+A 2:1 setting with 10 dB over the threshold gives about 2.3 dB of
+reduction, not 5. That is the "over easy" sound.
+
+
+GATE / EXPANDER (green)
+
+  In           Off by default. Switching it in starts the gate open.
+  Mode         Expand: gentle, about 2:1 below Threshold, no
+               hysteresis. Gate: opens and closes. It closes when the
+               level falls 11.6 dB below Threshold and re-opens when
+               it rises to 2.2 dB below it, so decaying notes can
+               die away before it shuts.
+  Threshold    +10 dB down to -30 dB, relative to the Reference
+               level.
+  Range        0 to 40 dB: how far the gain can fall. At 0 the gate
+               does nothing.
+  Release      0.1 s to 4 s. How quickly it closes (or, in Expand,
+               follows the level down). It always aims at Range.
+  Fast Att     Opens in 40 us instead of 0.7 ms. Can click on
+               low-frequency material.
+
+Whichever section needs more gain reduction wins; they do not add.
+Make-up is applied afterwards, so a closed gate is lifted a little by
+it: with 4.5 dB of make-up a Range of 40 dB gives about 35 dB.
+
+
+READING THE DISPLAY
+
+  Transfer curve   Input level across, output level up. The grey
+                   diagonal is "no change". The amber line is the
+                   threshold. The white dot is the level the
+                   detector is reading right now; it rides on the
+                   curve.
+  GR ladder        Compressor gain reduction, 0 to 20 dB, lit from
+                   the top. Red above 14 dB. The number underneath
+                   is the reduction in dB.
+  Gate level       The detector level (bar) against the gate. In
+                   Gate mode the shaded band runs from the close
+                   line to the open line, and the lamp says OPEN or
+                   CLOSED. In Expand mode there is one line.
+                   Grey while the gate is out.
+  Gate GR ladder   Gate gain reduction, 0 to 40 dB, in green.
+
+Compare the two ladders to see which section is doing the work.
+
+
+WHAT IS FITTED
+
+The detector averaging, the knee and the gate timing follow the
+design this models. A few values are fitted by ear: how the Release
+knob maps to the fast and slow time constants and how much the slow
+one counts, the make-up scale, and the fast gate attack. If
+something sounds different from a real unit, those are where to look.
+
+The detector is nearly instantaneous, so low-frequency tones ripple
+through the gain computers. That is part of the character: the
+compressor reads a bass note a little hot, and a note whose peaks
+stay below the gate's opening level can close it.
+
+
+IF SOMETHING LOOKS WRONG
+
+  Nothing draws, header says "images failed to load"
+      The gui_kit folder is missing next to the plugin as REAPER
+      sees it, or it lacks the green knob and button. See the
+      README.
+  Level changes when you move Threshold
+      Auto Make-up is off, or Threshold is above 0 dB, where no
+      make-up is added.
+  No gain reduction
+      Ratio is at 1:1, or Threshold is above the signal.
+  Gate does nothing
+      In is off, Range is 0, or the signal never falls below the
+      close line (shown on the strip).

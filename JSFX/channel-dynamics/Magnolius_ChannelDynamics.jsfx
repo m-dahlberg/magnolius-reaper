@@ -1,0 +1,657 @@
+desc:Channel Dynamics (Magnolius)
+// @description Channel Dynamics (Magnolius)
+// @author Magnolius
+// @version 0.1
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_ChannelDynamics.help.txt
+// @about
+//   A behavioural model of a classic console channel-strip dynamics section:
+//   a compressor and an expander / gate that share one detector and one gain
+//   stage. Over-easy knee, program-dependent release, automatic make-up gain,
+//   and a gate with fixed hysteresis whose Range sets how far it closes.
+//
+//   Zero latency, no lookahead, no PDC.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   First release.
+
+//tags: dynamics compressor expander gate channel strip console
+// A behavioural model of a console channel-strip dynamics section - "behaves
+// and responds like it", not a circuit simulation.  Values the published
+// behaviour fixes are used as written; the rest are fitted by ear and marked
+// FIT below.
+//
+// Signal path (feed-forward, per sample):
+//
+//   input -> detector (dB) -+-> compressor gain computer -> RC attack, two-state
+//                           |   release -----------------+
+//                           |                            +-> max -> gain
+//                           +-> gate gain computer -> timing cap -------+
+//
+//   The detector reads the input, so the gate never sees the compressed signal.
+//   The two sections each give a gain reduction in dB; the gain stage applies
+//   the larger.  Make-up comes from the compressor side only and is applied
+//   after the max, so it also lifts a closed gate (it eats a few dB of Range).
+//
+//   Detector:   mean square, 80 us averaging - almost instantaneous.  Low
+//       frequencies ripple through to both gain computers; that is part of the
+//       character.  Stereo link: Max follows the louder channel, Avg the mean
+//       power.  Both channels always get the same gain.
+//   Knee:       over-easy, from a closed-form fit of the diode network:
+//       x = overshoot*(1 - 1/ratio);  GR = 0.45x + 1.012 ln(1 + e^((x-9.8)/1.84)).
+//       About half the nominal ratio at small GR, full ratio at large GR.
+//   Attack:     one-pole RC, 33 ms (Auto) or 1 ms (Fast Att).
+//   Release:    two states pulled up by the same attack.  The fast state has
+//       tau = REL_FAST_K * Release; the slow one 6.7x longer and weighted by
+//       K_SLOW, so a short burst recovers fast and sustained compression
+//       lingers.  FIT: REL_FAST_K, SLOW_ATK_X, K_SLOW.
+//   Make-up:    FIT.  The compressor's own curve at the Reference level, so a
+//       signal at the Reference level stays at the Reference level.
+//   Gate:       Expand = linear, about 2:1 (GR = 1.1 x dB below Threshold).
+//       Gate = Schmitt trigger, closes 11.6 dB below Threshold and opens 2.2 dB
+//       below it (9.4 dB of hysteresis, fixed).  One timing cap is charged
+//       toward Range at the release rate and pulled down toward the target at
+//       the attack rate, so Range is the asymptote of the release.  Note the
+//       direction: for the gate, attack LOWERS the GR and release RAISES it.
+//       The same two rates leave a small residue of GR while the gate is open
+//       (Range * tau_attack / (tau_attack + tau_release), at most about 0.4 dB).
+//       FIT: GATE_ATK_FAST.
+//   Level:      Threshold 0 dB = the Reference level (default -18 dBFS), for
+//       the compressor and the gate alike.
+//
+// Hidden constants are plain numbers in @init.
+//
+// Every slider label starts with '-', which hides it from REAPER's generic
+// slider list (the panel replaces it) while keeping it automatable.
+//
+// THREADING - do not undo this.  @gfx runs on the UI thread; @init, @slider
+// and @sample run on the audio thread.  ALL globals AND all function locals
+// and parameters are shared and static.  So:
+//   * every @gfx variable is g_-prefixed; @gfx loop counters are gi/gj; the
+//     audio side uses a-prefixed or descriptive names; no name is used on both
+//     sides.
+//   * audio thread only:  gr_calc
+//   * @gfx only:          every g_* function and every gk_* widget
+//   * the ONE function both threads call is recalc().  It has no parameters,
+//     no local() and no loops - every name in it is a global written
+//     deterministically from the slider values - so two concurrent calls
+//     compute identical results.  It must be callable from @gfx because
+//     neither slider_automate() nor sliderchange() re-runs @slider, and
+//     @block does not run on a stopped track.  DO NOT ADD locals, parameters
+//     or loops to it.
+//   * the curve in @gfx inlines the gain-computer maths (g_gr) rather than
+//     calling gr_calc().
+// EEL2 is case-insensitive, and has no scientific notation (1e-9 is a silent
+// syntax error that kills the whole section).
+//
+// tools/model.py mirrors @init / recalc / @sample sample for sample.  Edit
+// the two together.
+//
+// Shared memory, namespaced to this vendor.  ONE slot map for every
+// options:gmem=Magnolius plugin:
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+//
+// Registries:  widget ids  10-13 compressor knobs, 14-16 gate knobs,
+//              20-27 buttons / dropdowns (20 Fast Att, 23 Auto Make-up,
+//              24 link, 25 gate In, 26 gate Mode, 27 gate Fast Att),
+//              40-41 header controls, 50-54 compressor value fields,
+//              55-57 gate value fields.
+//              string slots 300+ help text.
+
+slider1:thr_db=0<-30,10,0.1>-Threshold (dB)
+slider2:ratio=4<1,20,0.01>-Ratio (20 is infinity)
+slider3:rel_s=0.4<0.1,4,0.01>-Release (s)
+slider4:out_db=0<-12,12,0.1>-Output (dB)
+slider5:fast_att=0<0,1,1{Off,On}>-Fast Attack
+slider6:auto_mu=1<0,1,1{Off,On}>-Auto Make-up
+slider7:link_mode=0<0,1,1{Max,Avg}>-Stereo Link
+slider8:ref_db=-18<-30,-6,0.1>-Reference (dBFS)
+slider9:gate_on=0<0,1,1{Off,On}>-Gate In
+slider10:gate_mode=0<0,1,1{Expand,Gate}>-Gate Mode
+slider11:gate_thr=-20<-30,10,0.1>-Gate Threshold (dB)
+slider12:gate_range=20<0,40,0.1>-Gate Range (dB)
+slider13:gate_rel=0.4<0.1,4,0.01>-Gate Release (s)
+slider14:gate_fast=0<0,1,1{Off,On}>-Gate Fast Attack
+
+options:gmem=Magnolius
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+
+import gui_kit/gui_kit.jsfx-inc
+
+// Images first and contiguous from 0, the help file LAST.  Never put a
+// trailing // comment on these lines: the rest of the line is the path.
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/value_field.png
+filename:2,gui_kit/header_bar.png
+filename:3,gui_kit/panel_tile.png
+filename:4,gui_kit/dropdown.png
+filename:5,gui_kit/button_cyan.png
+filename:6,gui_kit/knob_green_grid.png
+filename:7,gui_kit/button_green.png
+filename:8,gui_kit/logo_magnolius_grey.png
+filename:9,Magnolius_ChannelDynamics.help.txt
+
+@init
+gk_init();
+gk_img_field = 1; gk_img_header = 2; gk_img_panel = 3;
+gk_img_dropdown = 4; gk_img_button = 5;
+IMG_COUNT = 9;                  // slots 0..8 are images; 9 is the help file
+KNOB_CYAN = 0; KNOB_GREEN = 6;
+BTN_CYAN = 5; BTN_GREEN = 7;
+LOGO_IMG = 8;
+LOGO_ASPECT = 512/101;
+
+// Grid-packed filmstrip: 8 columns x 8 rows, 64 frames.
+gk_knob_cols = 8; gk_knob_frames = 64;
+
+// ---- design size ----
+// REAPER opens at the @gfx size, which is a compile-time literal, so keep
+// these in step with the "@gfx 720 484" line.
+UI_W = 720; UI_H = 484;
+
+// ---- interface scale ----
+GM_UI_SCALE = 0;
+UI_SCALE_DEFAULT = 0;           // 0 = Fit, else an entry in ui_scale()
+initdone != 20261023 ? (
+  initdone = 20261023;
+  gui_scale_idx = UI_SCALE_DEFAULT;
+  help_open = 0; help_lines = 0;
+  ms_det = 0; fast_gr = 0; slow_gr = 0; comp_gr = 0;
+  gt_c9 = 0; gt_closed = 0; gate_gr = 0;
+  mtr_gr = 0; mtr_gate = 0; disp_lvl = -120; disp_closed = 0;
+);
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// ---- help ----
+HELP_FILE = 9; HELP_BASE = 300; HELP_MAX = 600;
+
+// ---- constants ----
+DB2LOG  = 0.11512925464970229;  // ln(10)/20
+LOG2DB  = 8.6858896380650366;   // 20/ln(10)
+TINY_E  = 10^(-12);             // power floor, -120 dB.  NOT 1e-12.
+// detector
+TAU_RMS   = 0.00008;            // s
+// compressor knee: GR = A x + B ln(1 + exp((x - C)/D)) - OFF
+KNEE_A = 0.45; KNEE_B = 1.012; KNEE_C = 9.8; KNEE_D = 1.84;
+KNEE_OFF = KNEE_B*log(1 + exp(-KNEE_C/KNEE_D));   // makes the knee exactly 0 at x = 0
+ATK_TAU_AUTO = 0.033;           // s
+ATK_TAU_FAST = 0.001;           // s
+REL_FAST_K = 0.25;              // FIT: fast release tau = REL_FAST_K * Release
+REL_SLOW_X = 6.7;               // slow tau = 6.7 x fast (22 uF / 3.3 uF)
+SLOW_ATK_X = 4;                 // FIT: the slow state charges this much slower
+K_SLOW     = 0.6;               // FIT: weight of the slow state
+MU_K       = 1;                 // FIT: make-up scale, 1 = full make-up at the Reference level
+// gate / expander
+GATE_HYS_CLOSE = 11.6;          // dB below Threshold
+GATE_HYS_OPEN  = 2.2;
+GATE_EXP_SLOPE = 1.1;
+GATE_ATK_SLOW  = 0.00068;       // s
+GATE_ATK_FAST  = 0.00004;       // s (FIT)
+GATE_REL_MIN   = 0.068;         // s, tau at the 0.1 s end of the Release knob
+GATE_REL_MAX   = 1.768;         // s, tau at the 4 s end
+ext_gr_meter = 0;
+
+// Everything derived from the sliders and srate, in one place.  Called from
+// @slider, from @init and from @gfx.
+//
+// *** DO NOT ADD local() OR PARAMETERS TO THIS FUNCTION. ***  See THREADING.
+function recalc()
+(
+  s_slope  = ratio >= 19.995 ? 1 : 1 - 1/max(ratio, 1);
+  thr_eff  = ref_db + thr_db;
+  mk_x     = max(0, -thr_db)*s_slope;
+  mk_db    = auto_mu > 0.5 && mk_x > 0 ?
+               MU_K*max(0, KNEE_A*mk_x + KNEE_B*log(1 + exp((mk_x - KNEE_C)/KNEE_D)) - KNEE_OFF) : 0;
+  gain_db0 = out_db + mk_db;
+  use_avg  = link_mode > 0.5;
+  rms_a    = 1 - exp(-1/(TAU_RMS*srate));
+  atk_tau  = fast_att > 0.5 ? ATK_TAU_FAST : ATK_TAU_AUTO;
+  atk_c    = exp(-1/(atk_tau*srate));
+  atk_cs   = exp(-1/(atk_tau*SLOW_ATK_X*srate));
+  rel_tf   = max(rel_s, 0.001)*REL_FAST_K;
+  rel_cf   = exp(-1/(rel_tf*srate));
+  rel_cs   = exp(-1/(rel_tf*REL_SLOW_X*srate));
+  // gate
+  gt_on    = gate_on > 0.5;
+  gt_gate  = gate_mode > 0.5;
+  gt_thr   = ref_db + gate_thr;
+  gt_range = gate_range;
+  gt_tau   = GATE_REL_MIN*exp(log(max(gate_rel, 0.1)/0.1)/log(40)*log(GATE_REL_MAX/GATE_REL_MIN));
+  gt_rel_c = exp(-1/(gt_tau*srate));
+  gt_atk_t = gate_fast > 0.5 ? GATE_ATK_FAST : GATE_ATK_SLOW;
+  gt_atk_c = exp(-1/(gt_atk_t*srate));
+  MTR_REL  = exp(-1/(0.30*srate));                               // GR ladder fall-back, 300 ms
+);
+recalc();
+
+// Compressor gain computer, dB in (level) -> dB out (gain reduction, >= 0).
+// AUDIO THREAD ONLY - @gfx has its own copy, g_gr.
+function gr_calc(x) local(o)
+(
+  o = max(0, x - thr_eff)*s_slope;
+  o > 0 ? max(0, KNEE_A*o + KNEE_B*log(1 + exp((o - KNEE_C)/KNEE_D)) - KNEE_OFF) : 0;
+);
+
+@slider
+recalc();
+
+@serialize
+// GUI-only state: saved with the project, never in automation.
+// APPEND new values, never insert.
+file_var(0, gui_scale_idx);
+
+@sample
+al = spl0; ar = spl1;
+
+// shared detector
+ae = use_avg ? (al*al + ar*ar)*0.5 : max(al*al, ar*ar);
+ms_det += rms_a*(ae - ms_det);
+ms_det = max(ms_det, TINY_E);
+alvl = 0.5*LOG2DB*log(ms_det);
+
+// compressor: RC attack, two-state release
+atgt = gr_calc(alvl);
+atgt > fast_gr ? ( fast_gr = atgt + (fast_gr - atgt)*atk_c; )
+               : ( fast_gr = atgt + (fast_gr - atgt)*rel_cf; );
+atgt > slow_gr ? ( slow_gr = atgt + (slow_gr - atgt)*atk_cs; )
+               : ( slow_gr = atgt + (slow_gr - atgt)*rel_cs; );
+fast_gr < 0.000000001 ? fast_gr = 0;
+slow_gr < 0.000000001 ? slow_gr = 0;
+comp_gr = max(fast_gr, slow_gr*K_SLOW);
+
+// gate / expander: the timing cap gt_c9 is charged toward Range and pulled
+// down toward the target
+gt_on ? (
+  gt_gate ? (
+    gt_closed ? (
+      alvl > gt_thr - GATE_HYS_OPEN ? gt_closed = 0;
+    ) : (
+      alvl < gt_thr - GATE_HYS_CLOSE ? gt_closed = 1;
+    );
+    agt = gt_closed ? 1000 : 0;
+  ) : (
+    gt_closed = 0;
+    agt = max(0, gt_thr - alvl)*GATE_EXP_SLOPE;
+  );
+  gt_c9 = gt_range + (gt_c9 - gt_range)*gt_rel_c;
+  gt_c9 > agt ? gt_c9 = agt + (gt_c9 - agt)*gt_atk_c;
+  gt_c9 < 0.000000001 ? gt_c9 = 0;
+  gate_gr = max(0, gt_c9);
+) : (
+  gt_closed = 0; gt_c9 = 0; gate_gr = 0;
+);
+
+agr = max(comp_gr, gate_gr);
+ag = exp((gain_db0 - agr)*DB2LOG);
+spl0 = al*ag; spl1 = ar*ag;
+
+ext_gr_meter = -agr;
+
+// published for @gfx, which only READS these scalars
+mtr_gr = comp_gr > mtr_gr ? comp_gr : mtr_gr*MTR_REL;
+mtr_gate = gate_gr > mtr_gate ? gate_gr : mtr_gate*MTR_REL;
+disp_lvl = alvl; disp_closed = gt_on && gt_gate && gt_closed;
+
+@gfx 720 484
+// ---------------------------------------------------------------------------
+// UI THREAD ONLY.  See THREADING at the top.  No audio-side function is
+// called from here except recalc().
+// ---------------------------------------------------------------------------
+gk_begin();
+g_chg = 0;
+
+// Shared scale: read it, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
+
+// gk_begin set gk_S from gfx_ext_retina (1 or 2).  A fixed percentage is
+// relative to that; Fit divides the window by the design size.
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret * g_sc : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(3, gk_font, 9*gk_S);
+gfx_setfont(1);
+
+function g_accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+
+function g_count_missing(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+// Ratio and the two Release knobs run on a position p in 0..1; the slider
+// keeps the real value.  Ratio: 1/(1 - 0.95 p), top stop = infinity.
+// Release: log, 0.1-4 s.
+function g_r2p(r) ( min(1, max(0, (1 - 1/max(r, 1))/0.95)); );
+function g_p2r(p) ( p >= 0.9999 ? 20 : 1/(1 - 0.95*p); );
+function g_t2p(t) ( min(1, max(0, log(t/0.1)/log(40))); );
+function g_p2t(p) ( 0.1*exp(p*log(40)); );
+
+// Toggle button bound to slider sidx.  Returns 1 when it changed.
+function g_tog(id, x, y, w, h, sidx, label)
+(
+  gk_button(id, x, y, w, h, slider(sidx) > 0.5, label) ? (
+    slider(sidx) = slider(sidx) > 0.5 ? 0 : 1;
+    slider_automate(2^(sidx-1));
+    1;
+  ) : 0;
+);
+
+// Dropdown with two entries bound to slider sidx.  Returns 1 when it changed.
+function g_dd2(id, x, y, w, h, sidx, menu, l0, l1) local(i)
+(
+  i = gk_dropdown(id, x, y, w, h, slider(sidx) > 0.5, menu, slider(sidx) > 0.5 ? l1 : l0);
+  i != (slider(sidx) > 0.5) ? ( slider(sidx) = i; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// Compressor gain computer for the curve - a copy of gr_calc, kept for the UI thread.
+function g_gr(x) local(o)
+(
+  o = max(0, x - thr_eff)*s_slope;
+  o > 0 ? max(0, KNEE_A*o + KNEE_B*log(1 + exp((o - KNEE_C)/KNEE_D)) - KNEE_OFF) : 0;
+);
+
+// Text at a logical x, vertically centred on logical cy.
+function g_text_r(rx, cy, str) local(tw, th)
+(
+  gfx_measurestr(str, tw, th);
+  gfx_x = rx*gk_S - tw; gfx_y = cy*gk_S - th*0.5;
+  gfx_drawstr(str);
+);
+function g_text_l(x, cy, str) local(tw, th)
+(
+  gfx_measurestr(str, tw, th);
+  gfx_x = x*gk_S; gfx_y = cy*gk_S - th*0.5;
+  gfx_drawstr(str);
+);
+
+// 12-LED gain-reduction ladder, 26 px wide, labels on its left, top at logical y0.
+// mode 0: compressor, 1 2 3 4 6 .. 20 dB, yellow with red from 14.
+// mode 1: gate, 1 2 3 5 7 10 15 20 25 30 35 40 dB, green; grey when the gate is out.
+function g_ladder(y0, mode, val) local(i, lv, y, lab)
+(
+  gfx_setfont(1);
+  gk_text_c(681, y0 - 14, "GR", 1);
+  i = 0;
+  loop(12,
+    lv = mode == 0 ? (i < 4 ? i + 1 : 4 + (i - 3)*2) :
+         (i == 0 ? 1 : i == 1 ? 2 : i == 2 ? 3 : i == 3 ? 5 : i == 4 ? 7 : i == 5 ? 10 :
+          i == 6 ? 15 : i == 7 ? 20 : i == 8 ? 25 : i == 9 ? 30 : i == 10 ? 35 : 40);
+    y = y0 + i*10.2;
+    val >= lv - 0.5 ? (
+      mode == 0 ? ( lv >= 14 ? gfx_set(1, 0.31, 0.27, 1) : gfx_set(0.96, 0.77, 0.26, 1); )
+                : ( gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1); );
+    ) : gfx_set(0.20, 0.21, 0.235, 1);
+    gfx_rect(668*gk_S, y*gk_S, 26*gk_S, 8*gk_S);
+    lab = mode == 0 ? (lv == 3 || lv == 6 || lv == 10 || lv == 14 || lv == 20)
+                    : (lv == 3 || lv == 10 || lv == 20 || lv == 30 || lv == 40);
+    lab ? (
+      gfx_setfont(3);
+      gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+      sprintf(#g_n, "%d", lv);
+      g_text_r(662, y + 4, #g_n);
+      gfx_setfont(1);
+    );
+    i += 1;
+  );
+  sprintf(#g_s, "-%.1f dB", val);
+  gk_field(656, y0 + 130, 44, 16, #g_s);
+);
+
+// Rectangle outline of 1 logical px.
+function g_frame(x, y, w, h)
+(
+  gfx_rect(x*gk_S, y*gk_S, w*gk_S, max(1, gk_S));
+  gfx_rect(x*gk_S, (y + h)*gk_S, w*gk_S, max(1, gk_S));
+  gfx_rect(x*gk_S, y*gk_S, max(1, gk_S), h*gk_S);
+  gfx_rect((x + w)*gk_S, y*gk_S, max(1, gk_S), h*gk_S);
+);
+
+// Detector level strip with the gate's threshold marks.  -60 .. 0 dBFS.
+function g_strip(sx, sy, sw, sh) local(k, yy, yo, yc, yl, on)
+(
+  on = gate_on > 0.5;
+  k = sh/60;
+  gfx_set(0.102, 0.106, 0.118, 1);
+  gfx_rect(sx*gk_S, sy*gk_S, sw*gk_S, sh*gk_S);
+  gfx_setfont(3);
+  gj = -50;
+  loop(5,
+    yy = sy + sh - (gj + 60)*k;
+    gfx_set(0.18, 0.19, 0.21, 1);
+    gfx_rect(sx*gk_S, yy*gk_S, sw*gk_S, max(1, gk_S*0.5));
+    gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    sprintf(#g_n, "%d", gj);
+    g_text_r(sx - 4, yy, #g_n);
+    gj += 10;
+  );
+  // live level
+  yl = sy + sh - (min(max(disp_lvl, -60), 0) + 60)*k;
+  on ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1) : gfx_set(0.31, 0.33, 0.36, 1);
+  gfx_rect((sx + 6)*gk_S, yl*gk_S, (sw - 12)*gk_S, (sy + sh - yl)*gk_S);
+  on ? gfx_set(0.745, 1, 0.843, 1) : gfx_set(0.45, 0.47, 0.50, 1);
+  gfx_rect((sx + 6)*gk_S, yl*gk_S, (sw - 12)*gk_S, max(1, 2*gk_S));
+  // threshold marks
+  on ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1) : gfx_set(0.31, 0.33, 0.36, 1);
+  gate_mode > 0.5 ? (
+    yo = sy + sh - (min(max(gt_thr - GATE_HYS_OPEN, -60), 0) + 60)*k;
+    yc = sy + sh - (min(max(gt_thr - GATE_HYS_CLOSE, -60), 0) + 60)*k;
+    on ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.19) : gfx_set(0.31, 0.33, 0.36, 0.19);
+    gfx_rect(sx*gk_S, yo*gk_S, sw*gk_S, (yc - yo)*gk_S);
+    on ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1) : gfx_set(0.31, 0.33, 0.36, 1);
+    gfx_rect(sx*gk_S, yo*gk_S, sw*gk_S, max(1, gk_S));
+    gfx_rect(sx*gk_S, yc*gk_S, sw*gk_S, max(1, gk_S));
+    g_text_l(sx + sw + 6, yo, "open");
+    g_text_l(sx + sw + 6, yc, "close");
+    gfx_setfont(2);
+    on && !disp_closed ? gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1) : gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    gfx_x = (sx + sw + 8)*gk_S; gfx_y = (sy + 4)*gk_S;
+    gfx_drawstr(!on ? "OFF" : disp_closed ? "CLOSED" : "OPEN");
+    gfx_setfont(3);
+  ) : (
+    yo = sy + sh - (min(max(gt_thr, -60), 0) + 60)*k;
+    gfx_rect(sx*gk_S, yo*gk_S, sw*gk_S, max(1, gk_S));
+    g_text_l(sx + sw + 6, yo, "thr");
+  );
+  gfx_set(0.31, 0.33, 0.36, 1);
+  g_frame(sx, sy, sw, sh);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = sx*gk_S; gfx_y = (sy + sh + 4)*gk_S;
+  gfx_drawstr("level (dBFS)");
+  gfx_setfont(1);
+);
+
+// ---------------------------------------------------------------- header
+gk_header(0, 10, 10, UI_W - 20, 22, "CHANNEL DYNAMICS", -1, 0);
+g_r  = min(UI_W - 20, gfx_w/gk_S - 10);
+g_sx = g_r - 86;
+g_i = gk_dropdown(40, g_sx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
+);
+// Must come after the header controls and before every other widget.
+help_open ? gk_help_input(40, 41);
+
+// ---------------------------------------------------------------- compressor
+gk_img_button = BTN_CYAN;
+gk_panel(10, 40, 450, 200);
+gk_header(0, 10, 40, 450, 22, "COMPRESSOR", -1, 0);
+g_accent(0.149, 0.784, 0.902);
+
+// Ratio (id 10, slider 2)
+g_p = g_r2p(ratio);
+g_np = gk_knob(10, KNOB_CYAN, 35, 70, 64, g_p, 0, 1, g_r2p(4));
+g_np != g_p ? (
+  ratio = g_p2r(g_np); slider_automate(2^1); g_chg = 1;
+);
+// Threshold (id 11, slider 1)
+g_chg |= gk_knob_slider(11, KNOB_CYAN, 147, 70, 64, 1, -30, 10, 0);
+// Release (id 12, slider 3)
+g_p = g_t2p(rel_s);
+g_np = gk_knob(12, KNOB_CYAN, 259, 70, 64, g_p, 0, 1, g_t2p(0.4));
+g_np != g_p ? (
+  rel_s = g_p2t(g_np); slider_automate(2^2); g_chg = 1;
+);
+// Output (id 13, slider 4)
+g_chg |= gk_knob_slider(13, KNOB_CYAN, 371, 70, 64, 4, -12, 12, 0);
+
+gk_text_c( 67, 144, "Ratio", 1);
+gk_text_c(179, 144, "Threshold", 1);
+gk_text_c(291, 144, "Release", 1);
+gk_text_c(403, 144, "Output", 1);
+
+ratio >= 19.995 ? (#g_s = "inf : 1") : sprintf(#g_s, "%.1f : 1", ratio);
+g_chg |= gk_field_edit_slider(50,  37, 158, 60, 16, 2, 1, 20, 4, #g_s);
+sprintf(#g_s, "%+.1f dB", thr_db);
+g_chg |= gk_field_edit_slider(51, 149, 158, 60, 16, 1, -30, 10, 0, #g_s);
+sprintf(#g_s, "%.2f s", rel_s);
+g_chg |= gk_field_edit_slider(52, 261, 158, 60, 16, 3, 0.1, 4, 0.4, #g_s);
+sprintf(#g_s, "%+.1f dB", out_db);
+g_chg |= gk_field_edit_slider(53, 373, 158, 60, 16, 4, -12, 12, 0, #g_s);
+
+g_chg |= g_tog(20, 131, 182, 96, 18, 5, "Fast Att");
+g_chg |= g_tog(23, 243, 182, 96, 18, 6, "Auto Make-up");
+
+gk_text( 31, 208, "Stereo link");
+g_chg |= g_dd2(24, 96, 207, 70, 16, 7, "Max|Avg", "Max", "Avg");
+gk_text(190, 208, "Reference");
+sprintf(#g_s, "%.1f dBFS", ref_db);
+g_chg |= gk_field_edit_slider(54, 246, 207, 70, 16, 8, -30, -6, -18, #g_s);
+
+// ---------------------------------------------------------------- transfer / GR
+gk_panel(470, 40, 240, 200);
+gk_header(0, 470, 40, 240, 22, "TRANSFER  /  GAIN REDUCTION", -1, 0);
+
+g_px = 486; g_py = 72; g_pw = 140; g_ph = 140;       // logical
+g_lo = -60; g_hi = 0;                               // dBFS, both axes
+g_k = g_pw/(g_hi - g_lo);
+gfx_set(0.102, 0.106, 0.118, 1);
+gfx_rect(g_px*gk_S, g_py*gk_S, g_pw*gk_S, g_ph*gk_S);
+gfx_set(0.18, 0.19, 0.21, 1);
+gi = -50;
+loop(5,
+  gfx_line((g_px + (gi - g_lo)*g_k)*gk_S, g_py*gk_S, (g_px + (gi - g_lo)*g_k)*gk_S, (g_py + g_ph)*gk_S, 0);
+  gfx_line(g_px*gk_S, (g_py + g_ph - (gi - g_lo)*g_k)*gk_S, (g_px + g_pw)*gk_S, (g_py + g_ph - (gi - g_lo)*g_k)*gk_S, 0);
+  gi += 10;
+);
+gfx_set(0.31, 0.33, 0.36, 1);                        // unity
+gfx_line(g_px*gk_S, (g_py + g_ph)*gk_S, (g_px + g_pw)*gk_S, g_py*gk_S, 1);
+gfx_set(0.43, 0.35, 0.16, 1);                        // threshold marker
+g_tx = g_px + (min(max(thr_eff, g_lo), g_hi) - g_lo)*g_k;
+gfx_line(g_tx*gk_S, g_py*gk_S, g_tx*gk_S, (g_py + g_ph)*gk_S, 0);
+
+gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+gi = 0; g_have = 0;
+loop(g_pw + 1,
+  g_xi = g_lo + gi/g_k;
+  g_yo = g_xi - g_gr(g_xi) + mk_db;
+  g_cx = (g_px + gi)*gk_S;
+  g_cy = (g_py + g_ph - (min(max(g_yo, g_lo), g_hi) - g_lo)*g_k)*gk_S;
+  g_have ? gfx_line(g_ox, g_oy, g_cx, g_cy, 1);
+  g_ox = g_cx; g_oy = g_cy; g_have = 1;
+  gi += 1;
+);
+// the level dot rides the static curve at the detector's current reading
+g_dx = min(max(disp_lvl, g_lo), g_hi);
+g_dy = g_dx - g_gr(g_dx) + mk_db;
+g_dsx = (g_px + (g_dx - g_lo)*g_k)*gk_S;
+g_dsy = (g_py + g_ph - (min(max(g_dy, g_lo), g_hi) - g_lo)*g_k)*gk_S;
+gfx_set(1, 1, 1, 1);
+gfx_circle(g_dsx, g_dsy, 3.5*gk_S, 1, 1);
+gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+gfx_circle(g_dsx, g_dsy, 3.5*gk_S, 0, 1);
+gfx_set(0.31, 0.33, 0.36, 1);
+g_frame(g_px, g_py, g_pw, g_ph);
+gfx_setfont(3);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = (g_px + 3)*gk_S; gfx_y = (g_py + 2)*gk_S; gfx_drawstr("out");
+gfx_x = (g_px + 44)*gk_S; gfx_y = (g_py + g_ph + 3)*gk_S; gfx_drawstr("in (dBFS)");
+gfx_setfont(1);
+
+g_ladder(82, 0, mtr_gr);
+
+// ---------------------------------------------------------------- gate / expander
+// Green section.  Same layout as the compressor row, 210 px lower.
+gk_img_button = BTN_GREEN;
+gk_panel(10, 250, 450, 200);
+gk_header(0, 10, 250, 450, 22, "GATE  /  EXPANDER", -1, 0);
+g_accent(0.239, 0.863, 0.518);
+
+// Threshold (id 14, slider 11)
+g_chg |= gk_knob_slider(14, KNOB_GREEN, 35, 280, 64, 11, -30, 10, -20);
+// Range (id 15, slider 12)
+g_chg |= gk_knob_slider(15, KNOB_GREEN, 147, 280, 64, 12, 0, 40, 20);
+// Release (id 16, slider 13)
+g_p = g_t2p(gate_rel);
+g_np = gk_knob(16, KNOB_GREEN, 259, 280, 64, g_p, 0, 1, g_t2p(0.4));
+g_np != g_p ? (
+  gate_rel = g_p2t(g_np); slider_automate(2^12); g_chg = 1;
+);
+
+gk_text_c( 67, 354, "Threshold", 1);
+gk_text_c(179, 354, "Range", 1);
+gk_text_c(291, 354, "Release", 1);
+
+sprintf(#g_s, "%+.1f dB", gate_thr);
+g_chg |= gk_field_edit_slider(55,  37, 368, 60, 16, 11, -30, 10, -20, #g_s);
+sprintf(#g_s, "%.1f dB", gate_range);
+g_chg |= gk_field_edit_slider(56, 149, 368, 60, 16, 12, 0, 40, 20, #g_s);
+sprintf(#g_s, "%.2f s", gate_rel);
+g_chg |= gk_field_edit_slider(57, 261, 368, 60, 16, 13, 0.1, 4, 0.4, #g_s);
+
+g_chg |= g_tog(25, 343, 286, 96, 18, 9, "In");
+gk_text(343, 317, "Mode");
+g_chg |= g_dd2(26, 375, 316, 64, 16, 10, "Expand|Gate", "Expand", "Gate");
+g_chg |= g_tog(27, 343, 340, 96, 18, 14, "Fast Att");
+
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+g_text_l(31, 418, gate_mode > 0.5 ? "Closes 11.6 dB below Threshold, opens 2.2 dB below"
+                                  : "Expands about 2 : 1 below Threshold");
+
+// ---------------------------------------------------------------- gate level / GR
+gk_panel(470, 250, 240, 200);
+gk_header(0, 470, 250, 240, 22, "GATE  LEVEL  /  GR", -1, 0);
+g_strip(508, 282, 44, 140);
+g_ladder(292, 1, gt_on ? mtr_gate : 0);
+
+// ---------------------------------------------------------------- help
+help_open ? gk_help_draw(10, 40, UI_W - 20, UI_H - 64, "Help  -  Channel Dynamics",
+                         HELP_BASE, help_lines);
+
+// ---------------------------------------------------------------- footer
+// Version label: bump on EVERY change - REAPER caches the compiled JSFX per
+// open instance, so a stale instance is otherwise invisible.
+gfx_setfont(3);
+gfx_set(0.35, 0.37, 0.40, 1);
+gfx_x = 10*gk_S; gfx_y = (UI_H - 22)*gk_S;
+gfx_drawstr("v0.1");
+gfx_setfont(1);
+gk_strip(LOGO_IMG, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = g_count_missing(IMG_COUNT);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+g_chg ? recalc();
+gk_end();
