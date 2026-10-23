@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""GUI smoke test for Magnolius_ChannelCompressor.jsfx.
+"""GUI smoke test for Magnolius_ChannelDynamics.jsfx.
 
 @gfx runs on the UI thread and NEVER runs in an offline render, so
 render_test.py cannot reach the panel at all -- a @gfx section with a syntax
@@ -17,7 +17,7 @@ What it pins:
     slider_automate() nor sliderchange() re-runs @slider, and @block never
     runs on a stopped track, so the panel calls recalc() itself.  Reading the
     slider back would pass even with a dead DSP; this reads back audio-side
-    DERIVED values (thr_eff, s_slope, use_peak, mk_db) instead.
+    DERIVED values (thr_eff, s_slope, gt_on, gt_thr, mk_db) instead.
 
 What it does NOT pin: whether anything is legible or correctly laid out.  Ask
 for a screenshot for that.
@@ -25,7 +25,7 @@ for a screenshot for that.
 Runs in an isolated resource directory (-cfgfile), so your REAPER config is
 untouched.  Needs a graphical session.
 
-Usage: gfx_test.py            (CHCOMP_KEEP_DBG=1 keeps the generated build)
+Usage: gfx_test.py            (CHDYN_KEEP_DBG=1 keeps the generated build)
 """
 import os
 import shutil
@@ -33,20 +33,24 @@ import subprocess
 import sys
 import time
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import model                                                    # noqa: E402
+
 HERE = os.path.dirname(os.path.abspath(__file__))
-SRC = os.path.join(HERE, "..", "Magnolius_ChannelCompressor.jsfx")
+SRC = os.path.join(HERE, "..", "Magnolius_ChannelDynamics.jsfx")
 RES = os.path.expanduser("~/.config/REAPER")
-WORK = os.environ.get("CHCOMP_WORK", os.path.expanduser("~/.cache/chcomp-rendertest"))
+WORK = os.environ.get("CHDYN_WORK", os.path.expanduser("~/.cache/chdyn-rendertest"))
 # Written next to the real plugin's gui_kit/ so the image paths resolve.
 DBG_DIR = os.path.join(RES, "Effects", "Magnolius")
-DBG = "_ChannelCompGfxDbg.jsfx"
+DBG = "_ChannelDynGfxDbg.jsfx"
 
 DBG_SLIDERS = """slider20:dbg_alive=-1<-1,99999,1>-dbg alive
 slider21:dbg_thr=-999<-999,999,0.001>-dbg thr
 slider22:dbg_slope=-999<-999,999,0.001>-dbg slope
-slider23:dbg_peak=-999<-999,999,1>-dbg peak
+slider23:dbg_gon=-999<-999,999,1>-dbg gon
 slider24:dbg_mk=-999<-999,999,0.001>-dbg mk
 slider25:dbg_done=-1<-1,9999,1>-dbg done
+slider26:dbg_gthr=-999<-999,999,0.001>-dbg gthr
 """
 
 # Appended to the END of @gfx.  Does what a knob drag does: write the slider,
@@ -57,22 +61,28 @@ gdbg_f += 1;
 gdbg_f == 10 ? (
   thr_db = -24; slider_automate(2^0);
   ratio = 20;   slider_automate(2^1);
-  hard_knee = 1; slider_automate(2^5);
+  gate_on = 1;  slider_automate(2^8);
+  gate_thr = -30; slider_automate(2^10);
   recalc();
 );
 gdbg_f == 25 ? (
   // extremes, then keep drawing: NaN/inf in the scaling would show up as a
   // dead panel
-  thr_db = 10; ratio = 1; rel_s = 4; out_db = -12; ref_db = -30; lin_rel = 1;
-  link_mode = 1; fast_att = 1; auto_mu = 0; recalc();
-  thr_db = -24; ratio = 20; rel_s = 0.1; out_db = 12; ref_db = -18; lin_rel = 0;
-  link_mode = 0; fast_att = 0; auto_mu = 1; hard_knee = 1; recalc();
+  thr_db = 10; ratio = 1; rel_s = 4; out_db = -12; ref_db = -30;
+  link_mode = 1; fast_att = 1; auto_mu = 0;
+  gate_on = 1; gate_mode = 1; gate_thr = 10; gate_range = 40; gate_rel = 4; gate_fast = 1;
+  recalc();
+  thr_db = -24; ratio = 20; rel_s = 0.1; out_db = 12; ref_db = -18;
+  link_mode = 0; fast_att = 0; auto_mu = 1;
+  gate_on = 1; gate_mode = 0; gate_thr = -30; gate_range = 30; gate_rel = 0.1; gate_fast = 0;
+  recalc();
 );
 gdbg_f == 45 ? (
   dbg_alive = gdbg_f; dbg_thr = thr_eff; dbg_slope = s_slope;
-  dbg_peak = use_peak; dbg_mk = mk_db; dbg_done = 1;
+  dbg_gon = gt_on; dbg_mk = mk_db; dbg_gthr = gt_thr; dbg_done = 1;
   slider_automate(2^19); slider_automate(2^20); slider_automate(2^21);
   slider_automate(2^22); slider_automate(2^23); slider_automate(2^24);
+  slider_automate(2^25);
 );
 """
 
@@ -128,9 +138,9 @@ local function poll()
   tries = tries + 1
   if get("dbg done") >= 0 or tries > 400 then
     local f = io.open(OUT, "w")
-    f:write(string.format("alive=%%d thr=%%.3f slope=%%.3f peak=%%d mk=%%.3f done=%%d tries=%%d\\n",
-      get("dbg alive"), get("dbg thr"), get("dbg slope"), get("dbg peak"),
-      get("dbg mk"), get("dbg done"), tries))
+    f:write(string.format("alive=%%d thr=%%.3f slope=%%.3f gon=%%d mk=%%.3f gthr=%%.3f done=%%d tries=%%d\\n",
+      get("dbg alive"), get("dbg thr"), get("dbg slope"), get("dbg gon"),
+      get("dbg mk"), get("dbg gthr"), get("dbg done"), tries))
     f:close()
     return
   end
@@ -153,7 +163,7 @@ poll()
             proc.wait(timeout=10)
         except subprocess.TimeoutExpired:
             proc.kill()
-        if not os.environ.get("CHCOMP_KEEP_DBG"):
+        if not os.environ.get("CHDYN_KEEP_DBG"):
             os.remove(os.path.join(DBG_DIR, DBG))
 
     if not os.path.exists(out):
@@ -170,9 +180,12 @@ poll()
          abs(float(kv["thr"]) + 42.0) < 0.01),
         ("Ratio 20 reaches the audio path (slope == 1)",
          abs(float(kv["slope"]) - 1.0) < 0.001),
-        ("Hard Knee reaches the audio path (peak detector on)",
-         abs(float(kv["peak"]) - 1) < 0.01),
-        ("Auto make-up follows (mk == 24 dB)", abs(float(kv["mk"]) - 24.0) < 0.01),
+        ("Gate In reaches the audio path (gt_on == 1)",
+         abs(float(kv["gon"]) - 1) < 0.01),
+        ("Gate Threshold reaches the audio path (gt_thr == -48)",
+         abs(float(kv["gthr"]) + 48.0) < 0.01),
+        ("Auto make-up follows (mk == knee(24) = %.3f dB)" % model.knee(24.0),
+         abs(float(kv["mk"]) - model.knee(24.0)) < 0.01),
     ]
     bad = [n for n, ok in checks if not ok]
     print("gfx            %s  %s" % ("PASS" if not bad else "FAIL", txt))
