@@ -17,7 +17,7 @@ What it pins:
     slider_automate() nor sliderchange() re-runs @slider, and @block never
     runs on a stopped track, so the panel calls recalc() itself.  Reading the
     slider back would pass even with a dead DSP; this reads back audio-side
-    DERIVED values (s_slope, auto_t, hp_tgt, mk_t, mix_t) instead.
+    DERIVED values (eta, l_k, hp_tgt, mk_t, mix_t) instead.
 
 What it does NOT pin: whether anything is legible or correctly laid out.  Ask
 for a screenshot for that.
@@ -77,7 +77,7 @@ gdbg_f == 25 ? (
   colour = 50; mix = 50; recalc();
 );
 gdbg_f == 45 ? (
-  dbg_alive = gdbg_f; dbg_hp = hp_tgt; dbg_slope = s_slope; dbg_auto = auto_t;
+  dbg_alive = gdbg_f; dbg_hp = hp_tgt; dbg_slope = eta; dbg_auto = l_k == 4 ? 1 : 0;
   dbg_mk = mk_t; dbg_mix = mix_t; dbg_done = 1;
   slider_automate(2^19); slider_automate(2^20); slider_automate(2^21);
   slider_automate(2^22); slider_automate(2^23); slider_automate(2^24);
@@ -175,8 +175,8 @@ poll()
     kv = dict(p.split("=") for p in txt.split())
     checks = [
         ("@gfx compiles and runs", float(kv["alive"]) >= 45),
-        ("Ratio idx 2 reaches the audio path (slope == 0.9)",
-         abs(float(kv["slope"]) - 0.9) < 0.001),
+        ("Ratio idx 2 reaches the audio path (eta == 9/1.1513 == 7.817)",
+         abs(float(kv["slope"]) - 7.8171) < 0.001),
         ("Release idx 4 reaches the audio path (Auto on)",
          abs(float(kv["auto"]) - 1) < 0.01),
         ("HPF 120 Hz reaches the audio path (log(120) == 4.7875)",
