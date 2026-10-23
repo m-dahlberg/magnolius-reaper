@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="860b1302392aee58b215debed0f705a2f0f8e89a">
+<index version="1" name="Magnolius" commit="9e097a819cf8be49b9d9c0a1a7071ff31a5ffab9">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -157,32 +157,34 @@ dropdown; it is the one to use if REAPER restores a smaller FX window.]]></chang
       </version>
     </reapack>
   </category>
-  <category name="JSFX/channel-compressor">
-    <reapack name="Magnolius_ChannelCompressor.jsfx" type="effect" desc="Channel Compressor (Magnolius)">
+  <category name="JSFX/channel-dynamics">
+    <reapack name="Magnolius_ChannelDynamics.jsfx" type="effect" desc="Channel Dynamics (Magnolius)">
       <metadata>
         <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
 {\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
 \widowctrl\hyphauto
 
-{\pard \ql \f0 \sa180 \li0 \fi0 A behavioural model of the SSL SL 4000 E channel-strip compressor: the attack that takes longer the harder it is pushed, Over Easy and Hard Knee voicings, logarithmic or linear release, and the automatic make-up gain that keeps a compressed signal at a steady level.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 A behavioural model of a classic console channel-strip dynamics section: a compressor and an expander / gate that share one detector and one gain stage. Over-easy knee, program-dependent release, automatic make-up gain, and a gate with fixed hysteresis whose Range sets how far it closes.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Zero latency, no lookahead, no PDC.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
 }
 ]]></description>
         <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
       </metadata>
-      <version name="0.1" author="Magnolius" time="2026-10-22T14:34:26Z">
+      <version name="0.1" author="Magnolius" time="2026-10-23T09:54:28Z">
         <changelog><![CDATA[First release.]]></changelog>
-        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/Magnolius_ChannelCompressor.jsfx</source>
-        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/gui_kit.jsfx-inc</source>
-        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/button_cyan.png</source>
-        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/dropdown.png</source>
-        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/header_bar.png</source>
-        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/knob_cyan_grid.png</source>
-        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/logo_magnolius_grey.png</source>
-        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/panel_tile.png</source>
-        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/gui_kit/value_field.png</source>
-        <source file="Magnolius_ChannelCompressor.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/6717c43fb3d4d786dd57bc417f4effd2bd963e3d/JSFX/channel-compressor/Magnolius_ChannelCompressor.help.txt</source>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/Magnolius_ChannelDynamics.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/button_green.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/button_green.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_green_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/knob_green_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/value_field.png</source>
+        <source file="Magnolius_ChannelDynamics.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/Magnolius_ChannelDynamics.help.txt</source>
       </version>
     </reapack>
   </category>
