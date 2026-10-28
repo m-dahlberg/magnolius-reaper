@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="9e097a819cf8be49b9d9c0a1a7071ff31a5ffab9">
+<index version="1" name="Magnolius" commit="0c92bb7ec8038478f2fa59ec5cc958b9977a6dd4">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -185,6 +185,40 @@ dropdown; it is the one to use if REAPER restores a smaller FX window.]]></chang
         <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/panel_tile.png</source>
         <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/gui_kit/value_field.png</source>
         <source file="Magnolius_ChannelDynamics.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/7a42e32aca92c79060d3425956bd23c12f4fce20/JSFX/channel-dynamics/Magnolius_ChannelDynamics.help.txt</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/channel-eq">
+    <reapack name="Magnolius_ChannelEQ.jsfx" type="effect" desc="Channel EQ (Magnolius)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 A channel-strip equaliser: an 18 dB/oct high-pass, a 12 dB/oct low-pass and four bands (LF shelf, LMF bell, HMF bell, HF shelf), modelled from the transfer functions of a console-style circuit. Gain-dependent shelf corners, cut that is the exact mirror of boost, and bell widths that narrow as the gain rises come from the model, not from fitted curves. A live response curve can be shown or hidden.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Zero latency, no PDC. The saturation controls are placeholders for now.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="0.1" author="Magnolius" time="2026-10-23T20:39:52Z">
+        <changelog><![CDATA[First release.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/Magnolius_ChannelEQ.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/button_green.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/button_green.png</source>
+        <source file="gui_kit/button_orange.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/button_orange.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/knob_cyan_bipolar_grid.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_green_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/knob_green_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/gui_kit/value_field.png</source>
+        <source file="Magnolius_ChannelEQ.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/4c484e8fff09c3b40a4afdaacb93735c8a48ecbd/JSFX/channel-eq/Magnolius_ChannelEQ.help.txt</source>
       </version>
     </reapack>
   </category>
@@ -1088,7 +1122,7 @@ ReaImGui
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel1 \b \fs32 What's here\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 JSFX\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Each appears in REAPER's FX browser with a {\f1 (Magnolius)} suffix, so typing {\f1 magnolius} in the FX add dialog lists the whole set.\par}
-{\pard \ql \f0 \sa180 \li0 \fi0 | Plugin | What it does | | --- | --- | | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. | | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. | | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. | | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. | | DeNoise | Spectral noise reduction, ported from libspecbleach. | | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. | | LUFS Limiter | LUFS-S leveler into a true peak limiter. | | Match EQ | Pulls the input spectrum toward a pink-noise reference. | | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. | | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. | | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. | | Variable Ratio Compressor | Solves for the ratio each passage needs, instead of being told one. | | Variable Ratio Compressor MB | The same core in four bands, with a ceiling that tilts across frequency. | | Vocal Rider | Automatic gain riding with sidechain ducking. |\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 | Plugin | What it does | | --- | --- | | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. | | Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. | | Channel EQ | Channel-strip EQ: 18 dB/oct high-pass, 12 dB/oct low-pass, two shelves and two bells, modelled from circuit transfer functions, with a live response curve. | | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. | | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. | | DeNoise | Spectral noise reduction, ported from libspecbleach. | | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. | | LUFS Limiter | LUFS-S leveler into a true peak limiter. | | Match EQ | Pulls the input spectrum toward a pink-noise reference. | | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. | | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. | | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. | | Variable Ratio Compressor | Solves for the ratio each passage needs, instead of being told one. | | Variable Ratio Compressor MB | The same core in four bands, with a ceiling that tilts across frequency. | | Vocal Rider | Automatic gain riding with sidechain ducking. |\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 \outlinelevel2 \b \fs28 Scripts\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 | Script | What it does | | --- | --- | | Auto Tilt | Matches one clip's spectral balance to another and renders a new take. | | DeClick | Click repair with the threshold derived from each file's own distribution. | | DeNoise | Offline denoising with the profile derived from the whole file. | | DeResonate | Finds room resonances using the singer's pitch to separate them from harmonics. | | Note Leveling | Levels a vocal per sung note, written as Pre-FX volume automation. | | Track Manager | Nine named track groups on a numpad-driven panel. | | Vocal Normalizer | Normalises through the melody's fundamental range, not K-weighted. | | Vocal Splitter | Segments a take into phrases, breaths, consonants and sibilance. |\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Four of these exist as both a plugin and a script \u8212- {\b Auto Tilt}, {\b DeClick}, {\b DeNoise} and {\b Vocal Splitter}. The plugin is real-time; the script is offline and can analyse the whole file before deciding anything, which usually means less tuning. ReaPack's Type column tells them apart.\par}
