@@ -28,9 +28,12 @@ audibly delayed.
 To use the side chain, send the reference or trigger signal to this
 track's channels 3/4 - on the sending track, Track Send with
 Audio channels 1/2 -> 3/4 - and set this FX's pin connector if it
-does not line up by itself. The side-chain channels are used for
-analysis only and are not passed to the output. Every side-chain
-mode other than "No side chain" needs that routing.
+does not line up by itself. The side chain is only analysed, never
+mixed into the output, and channels 3/4 pass through unchanged, so
+later FX on the track - another Match EQ included - still receive
+it. Every side-chain
+mode other than "No side chain" needs that routing - except a
+frozen Reference, which no longer listens to the side chain.
 
 
 THE DISPLAY
@@ -39,8 +42,10 @@ Everything is plotted against pink noise, so a source that already
 matches pink reads as a flat line at 0 dB.
 
   Cyan     the measured input spectrum, relative to pink.
-  Yellow   in Reference mode, the side-chain spectrum, also
-           relative to pink - this is what you are matching to.
+  Yellow   in Reference mode, the side-chain reference spectrum,
+           also relative to pink - this is what you are matching
+           to. The legend says when it is learning (and for how
+           many seconds so far) or frozen.
            The vertical gap between cyan and yellow is the
            correction being computed, before Tilt and Amount.
   Orange   the correction curve currently being applied.
@@ -113,6 +118,27 @@ SIDE CHAIN
                               until a side-chain signal arrives.
              The correction is always applied to the main input.
 
+             By default the reference follows the side chain live,
+             averaged over SC Speed.
+
+  Learn      Reference mode only. Switching it on clears the
+             reference and learns it from scratch: an average of
+             all of the side chain since then, so the curve gets
+             steadier the longer it learns. Play a whole reference
+             song through to capture its overall balance.
+             Switching it off goes back to live, and switching it
+             on again starts a new learn.
+
+  Freeze     Reference mode only. Holds the reference as it is,
+             live or learned. The side chain is no longer needed,
+             and the frozen curve is saved with the project and
+             presets. Switching Freeze off carries on from there;
+             switching Learn off releases it as well.
+
+             The reference follows Bands, Min/Max Freq and sample
+             rate changes even when frozen, and survives stopping
+             and starting playback.
+
   SC Gain    -60 to +24 dB. Applied to the side chain before it is
              analysed.
 
@@ -122,8 +148,8 @@ SIDE CHAIN
 
   SC Speed   0.1-10 s. Averaging time of the side-chain analysis,
              independent of Speed. Used in Only side chain and for
-             the reference spectrum in Reference mode; Combined
-             mode uses the main Speed.
+             the live reference in Reference mode; not while
+             learning or frozen. Combined mode uses the main Speed.
 
 A label is dimmed when the current mode ignores that control.
 
@@ -170,7 +196,8 @@ WHEN SOMETHING LOOKS WRONG
 Correction stays at 0 dB
   Amount is at 0%, or the input is below the -70 dBFS analysis
   gate ("waiting for signal..."), or in Reference mode nothing has
-  arrived on the side chain yet.
+  arrived on the side chain yet - or it was frozen or learning
+  before any signal arrived.
 
 The curve is chasing the material
   Speed is too short, or Bands is too high. Both make the matcher

@@ -1,7 +1,7 @@
 desc:Match EQ (Magnolius)
 // @description Match EQ (Magnolius)
 // @author Magnolius
-// @version 1.3
+// @version 1.4
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @provides
 //   gui_kit/gui_kit.jsfx-inc
@@ -18,17 +18,22 @@ desc:Match EQ (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Custom GUI, replacing the generic sliders:
-//   - the analyser fills the window: input, correction and (in Reference mode)
-//     the side-chain spectrum, all plotted against pink
-//   - controls grouped into Match / Target / Side Chain panels plus an Output
-//     column, each knob with an editable number box: click to type, or drag
-//   - the five log-scaled parameters (Speed, Tilt Center, Min/Max Frequency,
-//     Side Chain Speed) now scrub logarithmically on their knobs
-//   - interface scale control, shared by every open instance; opens at
-//     100%, where the artwork is blitted pixel for pixel
-//   - built-in user guide behind the ? button
-//   The DSP is unchanged, and every parameter still automates as before.
+//   Learn / Freeze for the Reference side-chain mode:
+//   - by default the reference still follows the side chain live, timed by
+//     Side Chain Speed
+//   - Learn builds it instead as a running average of the side chain since
+//     Learn went on, so it gets steadier the longer it learns; switching
+//     Learn off goes back to live
+//   - Freeze holds the current reference, live or learned: the side chain is
+//     no longer needed, and the frozen reference is saved with the project
+//     and presets
+//   - the reference follows Bands, Min/Max Frequency and sample rate changes,
+//     even when frozen
+//   - new automatable parameters: Reference Learn, Reference Freeze
+//   - stopping and starting playback no longer restarts the reference
+//   Fix: the side-chain channels (3/4) now pass through instead of being
+//   zeroed, so a later FX - such as a second Match EQ in Reference mode -
+//   still receives the side chain
 
 //tags: EQ spectral matching analysis
 // Real-time spectral matcher: continuously measures the input spectrum and
@@ -65,6 +70,8 @@ slider11:sc_gain_db=0<-60,24,0.1>-Side Chain Gain (dB)
 slider12:sc_amount=100<0,100,1>-Side Chain Amount (%)
 slider13:eq_dir=0<0,1,1{Counteract (balance),Mimic (invert)}>-EQ Direction
 slider14:sc_speed=1<0.1,10,0.01:log>-Side Chain Speed (s)
+slider15:ref_learn=0<0,1,1{Off,On}>-Reference Learn
+slider16:ref_frz=0<0,1,1{Off,On}>-Reference Freeze
 
 in_pin:left input
 in_pin:right input
@@ -133,7 +140,9 @@ bandE_sc= scbufR  + FFTSIZE;       // MAXBANDS smoothed SC band power (Reference
 bandDB_sc=bandE_sc+ MAXBANDS;      // MAXBANDS SC reference dB per band
 gfxD_sc = bandDB_sc+ MAXBANDS;      // MAXBANDS display scratch, SC reference
 bands_shadow=gfxD_sc+MAXBANDS;      // 1 slot: unrounded EQ Bands knob position
-plot_y  = bands_shadow+1;          // 640: one plotted polyline, device px y
+binE_ref= bands_shadow+1;          // HALF+1 SC reference: averaged bin power
+bandW_sc= binE_ref+(HALF+1);       // MAXBANDS reference bins per band (ref mapping)
+plot_y  = bandW_sc+MAXBANDS;       // 640: one plotted polyline, device px y
                                    // (PLW/PLOT_STEP+1 = 589 at the design size)
 
 // periodic sqrt-Hann window
@@ -190,12 +199,13 @@ function measure_bands(destE, have, a) local(b, k, bi) (
   );
 );
 
-// band power (destE domain) -> per-band dB, interpolating bands owning no bins
-function bands_to_db(srcE, destDB) local(lv, b, bb, fr) (
+// band power (destE domain) -> per-band dB, interpolating bands owning no bins.
+// wbuf holds the bin count per band for the mapping srcE was summed with.
+function bands_to_db(srcE, destDB, wbuf) local(lv, b, bb, fr) (
   lv = -1; b = 0;
   loop(nbands,
-    bandW[b] > 0 ? (
-      destDB[b] = 10*log10(srcE[b]/bandW[b] + 0.000000000000001);
+    wbuf[b] > 0 ? (
+      destDB[b] = 10*log10(srcE[b]/wbuf[b] + 0.000000000000001);
       lv >= 0 && lv < b-1 ? (
         bb = lv+1;
         while (bb < b) (
@@ -217,8 +227,47 @@ function bands_to_db(srcE, destDB) local(lv, b, bb, fr) (
   );
 );
 
+// ---- side-chain reference (Reference mode) ----
+// The reference is kept per FFT bin rather than per band, so a frozen curve
+// still lines up after Bands, Min/Max Freq or the sample rate change: it is
+// re-binned into whatever band layout is current on every hop.
+// fold current fftbuf bin powers into dest with coefficient a: alpha_sc for
+// the live moving average, 1/n for the running mean while learning
+function measure_bins(dest, a) local(k, p) (
+  k = 1;
+  loop(HALF-1,
+    p = sqr(fftbuf[2*k]) + sqr(fftbuf[2*k+1])
+      + sqr(fftbuf[2*(FFTSIZE-k)]) + sqr(fftbuf[2*(FFTSIZE-k)+1]);
+    dest[k] += a*(p - dest[k]);
+    k += 1;
+  );
+);
+
+// binE_ref -> bandDB_sc, mapping bins by the rate they were learned at
+function ref_to_bands() local(k, f, bi) (
+  memset(bandE_sc, 0, nbands);
+  memset(bandW_sc, 0, nbands);
+  k = 1;
+  loop(HALF-1,
+    f = k*ref_srate/FFTSIZE;
+    (f >= fminp && f <= fmaxp) ? (
+      bi = min(floor(nbands*log(f/fminp)/logr), nbands-1);
+      bandE_sc[bi] += binE_ref[k];
+      bandW_sc[bi] += 1;
+    );
+    k += 1;
+  );
+  bands_to_db(bandE_sc, bandDB_sc, bandW_sc);
+);
+
 pos = 0; hopcount = 0; have_data = 0;
-have_ref = 0; sc_mode_prev = -1;
+sc_mode_prev = -1; ref_learn_prev = -1;
+// The SC reference (binE_ref, ref_n, ref_srate) is deliberately NOT reset
+// here. @init reruns on every transport start, and because @serialize is
+// non-empty REAPER does not zero plugin RAM before a rerun, so a reference
+// being learned or frozen survives stopping and starting playback. On a fresh
+// load everything starts at zero and @serialize then restores a saved one.
+ref_tag = FFTSIZE;                 // @serialize format check for binE_ref
 compgain = 1;
 nbands_prev = 0; srate_prev = 0;
 
@@ -248,8 +297,19 @@ scamt  = sc_amount*0.01;                // 0..1 analysis weight (Only SC / Combi
 scw    = scgain*scamt;                  // side-chain weight in the analysis mix
 eqsign = eq_dir ? -1 : 1;               // Counteract=+1 (default), Mimic=-1 (invert)
 
-// analysis source changed -> re-adapt the smoothed spectra
-sc_mode != sc_mode_prev ? ( have_data = 0; have_ref = 0; sc_mode_prev = sc_mode; );
+// analysis source changed -> re-adapt the smoothed spectra. Switching INTO
+// Reference restarts the reference unless it is frozen, and switching Learn
+// on starts the learn from scratch. Both _prev values are -1 after @init, so
+// a transport start never counts as a switch.
+sc_mode != sc_mode_prev ? (
+  have_data = 0;
+  sc_mode == 3 && sc_mode_prev >= 0 && !ref_frz ? ref_reset = 1;
+  sc_mode_prev = sc_mode;
+);
+ref_learn != ref_learn_prev ? (
+  ref_learn && ref_learn_prev >= 0 ? ref_reset = 1;
+  ref_learn_prev = ref_learn;
+);
 
 // effective processing range (sanitized so the log mapping stays valid)
 fminp = max(20, min(minf, srate*0.25));
@@ -493,7 +553,9 @@ inbufL[pos] = spl0;
 inbufR[pos] = spl1;
 scbufL[pos] = spl2;
 scbufR[pos] = spl3;
-spl2 = 0; spl3 = 0;                   // consume side-chain channels (analysis only)
+// spl2/spl3 are left untouched so the side chain passes on down the chain:
+// zeroing them here (as before 1.4) silenced the side chain for any later
+// FX, including a second Match EQ in Reference mode.
 outL = olaL[pos];
 outR = olaR[pos];
 olaL[pos] = 0;
@@ -531,11 +593,27 @@ hopcount >= HOP ? (
   );
 
   // ---- reference pass (Reference mode): SC spectrum replaces the pink target ----
+  // Live (default): a moving average timed by SC Speed, snapped on the first
+  // frame. Learn: a running mean of every gated SC frame since Learn went on,
+  // so the curve settles the longer it learns. Freeze: the SC is not even
+  // analysed; the held binE_ref keeps feeding the target. ref_reset is the
+  // request flag set by switching Learn on and by switching into Reference
+  // mode - the array is only ever cleared here, on the audio thread.
+  ref_reset ? ( memset(binE_ref, 0, HALF+1); ref_n = 0; ref_reset = 0; );
   sc_mode == 3 ? (
-    rms_sc = fill_fft(0, scgain);
-    rms_sc > GATE_RMS ? ( measure_bands(bandE_sc, have_ref, alpha_sc); have_ref = 1; );
-    have_ref ? bands_to_db(bandE_sc, bandDB_sc);
+    !ref_frz ? (
+      ref_n > 0 && ref_srate != srate ? (       // rate changed: start over
+        memset(binE_ref, 0, HALF+1); ref_n = 0;
+      );
+      rms_sc = fill_fft(0, scgain);
+      rms_sc > GATE_RMS ? (
+        ref_n += 1; ref_srate = srate;
+        measure_bins(binE_ref, ref_learn ? 1/ref_n : (ref_n == 1 ? 1 : alpha_sc));
+      );
+    );
+    ref_n > 0 ? ref_to_bands();
   );
+  have_ref = ref_n > 0;
 
   // ---- processing pass: FFT the main input (also measures it in modes 0 & 3) ----
   rms = fill_fft(1, 0);
@@ -546,7 +624,7 @@ hopcount >= HOP ? (
   // ---- correction curve (also recomputed on gated frames so slider
   //      changes take effect while the analysis is frozen) ----
   have_data ? (
-    bands_to_db(bandE, bandDB);           // measured dB (interpolates empty bands)
+    bands_to_db(bandE, bandDB, bandW);    // measured dB (interpolates empty bands)
 
     // target: pink density (bandTDB) normally, or the SC reference spectrum in
     // Reference mode when available. Zero-mean normalized (shape-only); the tilt
@@ -709,7 +787,7 @@ gfx_set(0.8, 0.42, 0.42, 0.9);
 gfx_set(0.55, 0.5, 0.5, 0.9);
 stroke_cur(fill_tilt_curve());
 
-g_showref = (sc_mode == 3 && have_ref);
+g_showref = (sc_mode == 3 && ref_n > 0);
 
 have_data ? (
   // Both spectra are plotted against pink and centred on their own mean, so
@@ -743,12 +821,18 @@ stroke_cur(fill_corr_curve());
 // ---- legend ----
 gfx_set(0.149, 0.784, 0.902, 1);
 gfx_x = (PLX + 6)*gk_S; gfx_y = (PLY + 4)*gk_S; gfx_drawstr("input");
+gfx_x = (PLX + 50)*gk_S;
 g_showref ? (
+  // while learning: seconds of above-gate side chain averaged in so far
+  ref_frz ? sprintf(#s, "SC reference (frozen)") : (
+    ref_learn ? sprintf(#s, "SC reference (learning %.0f s)", ref_n*HOP/ref_srate)
+              : sprintf(#s, "SC reference");
+  );
   gfx_set(0.941, 0.784, 0.235, 1);
-  gfx_x = (PLX + 50)*gk_S; gfx_y = (PLY + 4)*gk_S; gfx_drawstr("SC reference");
+  gfx_drawstr(#s);
+  gfx_x += 20*gk_S;           // the reference label's length varies
 );
 gfx_set(0.941, 0.588, 0.157, 1);
-gfx_x = (PLX + (g_showref ? 140 : 50))*gk_S; gfx_y = (PLY + 4)*gk_S;
 gfx_drawstr("correction");
 
 !have_data ? gk_text_c(PLX + PLW*0.5, PLY + PLH*0.5 - 6, "waiting for signal...", 1);
@@ -824,10 +908,10 @@ g_chg |= gk_knob_slider (18, IMG_SC, 623, 300, 64, 12, 0, 100, 100);
 g_chg |= knob_log_slider(19, IMG_SC, 699, 300, 64, 14, 0.1, 10, 1);
 // A control that the current mode ignores gets a dimmed label: Amount feeds
 // only the analysis mix (Only SC / Combined), and Speed times only the
-// side-chain average (Only SC / Reference).
+// side-chain average (Only SC / live Reference - not learning or frozen).
 gk_text_c(579, 366, "SC Gain",   sc_mode == 0);
 gk_text_c(655, 366, "SC Amount", sc_mode != 1 && sc_mode != 2);
-gk_text_c(731, 366, "SC Speed",  sc_mode != 1 && sc_mode != 3);
+gk_text_c(731, 366, "SC Speed",  sc_mode == 3 ? ref_learn || ref_frz : sc_mode != 1);
 sprintf(#s, "%+.1f dB", sc_gain_db);
 g_chg |= gk_field_edit_slider(57, 549, 380, 60, 16, 11, -60, 24, 0, #s);
 sprintf(#s, "%.0f %%", sc_amount);
@@ -840,6 +924,22 @@ g_chg |= dropdown_slider(32, 565, 452, 180, 20, 10,
          "No side chain|Only side chain|Combined|Reference",
          sc_mode == 0 ? "No side chain" : sc_mode == 1 ? "Only side chain" :
          sc_mode == 2 ? "Combined" : "Reference");
+
+// Learn / Freeze for the reference, under the mode dropdown. Both are
+// toggles; with both off the reference follows the side chain live. Learn on
+// starts a fresh learn (update_params sees the switch and raises ref_reset,
+// so the UI never writes binE_ref); Learn off goes back to live, releasing
+// Freeze too. Freeze holds whichever curve is showing, live or learned.
+sc_mode == 3 ? (
+  gk_button(33, 565, 482, 86, 18, ref_learn, "Learn") ? (
+    ref_learn = !ref_learn;
+    !ref_learn ? ref_frz = 0;
+    slider_automate(2^14 + 2^15); g_chg = 1;
+  );
+  gk_button(34, 659, 482, 86, 18, ref_frz, "Freeze") ? (
+    ref_frz = !ref_frz; slider_automate(2^15); g_chg = 1;
+  );
+);
 
 // ==================================================================== help ==
 help_open ? gk_help_draw(10, 40, 770, 472, "Help  -  Match EQ", HELP_BASE, help_lines);
@@ -863,3 +963,23 @@ gk_end();
 @serialize
 // GUI-only state, so it is serialised rather than made a slider
 file_var(0, gui_scale_idx);
+
+// The SC reference (v1.4), so a frozen one works after reopening with no
+// side chain routed. file_avail(0) is < 0 on the write pass and >= 0 on the
+// read pass, but it is NOT a count of what is left (it read 1 with 2053
+// values to come - verified), so a pre-1.4 state is told apart by the tag
+// instead: ref_tag is zeroed first and only a real v1.4 block sets it back to
+// the FFT size. Data from any other FFT size is discarded the same way.
+ser_rd = file_avail(0) >= 0;
+ser_rd ? ref_tag = 0;
+!ser_rd || file_avail(0) > 0 ? (
+  file_var(0, ref_tag);
+  file_var(0, ref_srate);
+  file_var(0, ref_n);
+  file_mem(0, binE_ref, HALF+1);
+);
+ser_rd ? (
+  ref_tag != FFTSIZE || ref_srate <= 0 ? ( memset(binE_ref, 0, HALF+1); ref_n = 0; );
+  ref_tag = FFTSIZE;
+  ref_reset = 0;
+);
