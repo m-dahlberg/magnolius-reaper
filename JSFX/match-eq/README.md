@@ -44,7 +44,9 @@ Then in Reaper: FX browser → refresh (F5) → search for "PinkMatch EQ"
 | Side Chain Gain | −60…+24 dB | Gain applied to the side-chain signal before it is used for analysis. |
 | Side Chain Amount | 0–100 % | How much side chain is fed into the analysis in *Only side chain* and *Combined* modes. Ignored in *Reference* mode. |
 | EQ Direction | Counteract / Mimic | **Counteract** (default) pulls the input *toward* the target — the current, corrective behavior. **Mimic** inverts the whole curve, pushing the input *away* from the target and exaggerating its deviations. |
-| Side Chain Speed | 0.1–10 s | Averaging time of the side-chain spectrum analysis, independent of the main Speed. Used in *Only side chain* mode and for the reference spectrum in *Reference* mode; *Combined* mode uses the main Speed. |
+| Side Chain Speed | 0.1–10 s | Averaging time of the side-chain spectrum analysis, independent of the main Speed. Used in *Only side chain* mode and for the live reference in *Reference* mode (not while learning or frozen); *Combined* mode uses the main Speed. |
+| Reference Learn | Off / On | The **Learn** button in *Reference* mode (see below). Switching it on, by hand or by automation, starts a fresh learn. |
+| Reference Freeze | Off / On | The **Freeze** button in *Reference* mode. |
 
 ### Side-chain modes
 
@@ -54,6 +56,27 @@ Then in Reaper: FX browser → refresh (F5) → search for "PinkMatch EQ"
 | Only side chain | Side chain × Amount | Pink noise (+ tilt) |
 | Combined | Main input + Side chain × Amount | Pink noise (+ tilt) |
 | Reference | Main input | **Side-chain spectrum** (+ tilt) — the main input is pulled toward the side chain's own tonal balance instead of pink. Falls back to pink until a side-chain signal is present. |
+
+### Learning and freezing the reference
+
+In *Reference* mode two toggle buttons appear under the mode selector. With
+both off the reference follows the side chain live, averaged over Side Chain
+Speed.
+
+- **Learn** on clears the reference and learns it from scratch: a running
+  average of everything above the −70 dBFS gate since then, so the curve gets
+  steadier the longer it learns. Let a whole reference song play through to
+  capture its overall tonal balance. Learn off goes back to live; switching it
+  on again starts a new learn.
+- **Freeze** holds the reference as it is, live or learned. The side chain is
+  no longer analysed or needed, and the frozen curve is saved with the project
+  and presets, so the side-chain routing can be removed. Freeze off carries on
+  from the held curve; switching Learn off releases Freeze as well.
+
+The reference is stored per FFT bin, so it follows changes to EQ Bands,
+Min/Max Frequency and the sample rate, even when frozen. Stopping and starting
+playback keeps it. The analyser legend shows when it is learning (and how many
+seconds of side chain it has learned so far) or frozen.
 
 ## Interface
 
@@ -82,8 +105,8 @@ Everything is plotted against pink noise, so a source that already matches pink
 reads as a flat line at 0 dB.
 
 - **Cyan** — the measured input spectrum, relative to pink.
-- **Yellow** — in *Reference* mode only, the side-chain spectrum, also relative
-  to pink. This is what you are matching *to*, and the vertical gap between the
+- **Yellow** — in *Reference* mode only, the side-chain reference spectrum
+  (live, learned or frozen), also relative to pink. This is what you are matching *to*, and the vertical gap between the
   cyan and yellow traces is the correction being computed, before Target Tilt
   and Amount are applied.
 - **Orange** — the correction curve currently being applied.
@@ -110,8 +133,10 @@ than only the error against it.
 - **Side-chain routing:** the plugin exposes 4 input channels. Send the
   trigger/reference signal to the track's channels 3/4 (e.g. a track send with
   *Audio → channels 1/2 → 3/4*, and set the FX's pin connector if needed). The
-  side-chain channels are consumed for analysis and are not passed to the
-  output. Any side-chain mode other than *No side chain* needs this routing.
+  side chain is only analysed, never mixed into the output, and channels 3/4
+  pass through unchanged, so later FX on the track (including another Match
+  EQ) still receive it. Any side-chain mode other than *No side chain* needs
+  this routing.
 
 ## Quick sanity checks
 
@@ -119,3 +144,6 @@ than only the error against it.
 2. Feed it **white noise** → correction settles to a −3 dB/octave tilt.
 3. Amount = 0 % → output nulls against the dry signal (offset by the 4096-sample latency).
 4. Stop playback → curves freeze rather than drift.
+5. *Reference* mode with **pink noise** on the side chain → Learn for a few
+   seconds, Freeze, then mute the side chain: white noise on the main input
+   still gets the −3 dB/octave correction.
