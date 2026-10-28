@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="0c92bb7ec8038478f2fa59ec5cc958b9977a6dd4">
+<index version="1" name="Magnolius" commit="be9509040bc7e046e4080003960644e9b38d1200">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -479,6 +479,40 @@ The DSP is unchanged, and every parameter still automates as before.]]></changel
         <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/b871804c82cba6cadd905c9baea178815a2dedd0/JSFX/match-eq/gui_kit/value_field.png</source>
         <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/b871804c82cba6cadd905c9baea178815a2dedd0/JSFX/match-eq/gui_kit/wave_frame_9slice.png</source>
         <source file="Magnolius_MatchEQ.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/b871804c82cba6cadd905c9baea178815a2dedd0/JSFX/match-eq/Magnolius_MatchEQ.help.txt</source>
+      </version>
+      <version name="1.4" author="Magnolius" time="2026-10-28T10:40:52Z">
+        <changelog><![CDATA[Learn / Freeze for the Reference side-chain mode:
+- by default the reference still follows the side chain live, timed by
+  Side Chain Speed
+- Learn builds it instead as a running average of the side chain since
+  Learn went on, so it gets steadier the longer it learns; switching
+  Learn off goes back to live
+- Freeze holds the current reference, live or learned: the side chain is
+  no longer needed, and the frozen reference is saved with the project
+  and presets
+- the reference follows Bands, Min/Max Frequency and sample rate changes,
+  even when frozen
+- new automatable parameters: Reference Learn, Reference Freeze
+- stopping and starting playback no longer restarts the reference
+Fix: the side-chain channels (3/4) now pass through instead of being
+zeroed, so a later FX - such as a second Match EQ in Reference mode -
+still receives the side chain]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/Magnolius_MatchEQ.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_orange_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/knob_orange_bipolar_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/knob_yellow_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/knob_yellow_bipolar_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/toggle_yellow.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/toggle_yellow.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_MatchEQ.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/7b8021db3f6a1ec643139807558926cc4281c654/JSFX/match-eq/Magnolius_MatchEQ.help.txt</source>
       </version>
     </reapack>
   </category>
