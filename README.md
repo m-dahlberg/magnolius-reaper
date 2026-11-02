@@ -40,6 +40,7 @@ Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
 | LUFS Limiter | LUFS-S leveler into a true peak limiter. |
 | Match EQ | Pulls the input spectrum toward a pink-noise reference. |
 | Mix Reference | Six reference slots, tonal and per-band dynamics comparison. |
+| Saturator | Odd and even harmonics dialled separately, with slew softening, a Knee switch and anti-aliased oversampling. |
 | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. |
 | Vari-Mu Compressor | F670-style variable-mu compressor/limiter. |
 | Variable Ratio Compressor | Solves for the ratio each passage needs, instead of being told one. |

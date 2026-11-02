@@ -1,0 +1,86 @@
+SATURATOR
+
+Adds harmonics in two independent flavours. Symmetric adds odd
+harmonics (3rd, 5th, 7th): it rounds peaks evenly and sounds denser
+and louder. Asymmetric adds even harmonics (2nd, 4th): it warms and
+thickens, the tube or transformer colour. Turn up one, the other or
+both, and pick the colour yourself instead of choosing a preset curve.
+
+With every amount at 0 % the plugin is transparent, so start there
+and bring things in until you hear them.
+
+DRIVE
+
+  Input       -18 to +18 dB. How hard the signal hits the curves.
+              The main way to push harder. With Auto Gain on, it
+              changes the amount of saturation, not the level.
+  Slew        0 to 100 %. Softens fast, loud changes: transients
+              and loud high frequencies round off, like an op-amp
+              or tape running out of speed. Quiet material and low
+              frequencies pass untouched. It runs first, so the
+              level stages below never see the sharpest edges.
+  IN meter    The level after Input, i.e. what drives the curves.
+              -60 to +6 dBFS with a peak-hold line.
+
+COLOUR
+
+  Asymmetric  0 to 100 %. Amount of even-harmonic saturation.
+  Symmetric   0 to 100 %. Amount of odd-harmonic saturation.
+  Knee        Where the Symmetric curve starts to bend.
+              Soft    saturates early and gently.
+              Medium  in between (the default).
+              Hard    stays clean, then bends near full scale.
+              All three have the same level for quiet signals and
+              only add odd harmonics; Knee changes the feel, not
+              the colour. Switching crossfades, so it can be
+              automated without clicks. At heavy settings Hard
+              bends the most once it gets there.
+
+OUTPUT
+
+  Mix         0 to 100 %. Parallel saturation: blends the dry
+              signal back in, lined up in time so nothing combs.
+  Output      -18 to +18 dB. Final level trim.
+  Auto Gain   On by default. Compensates the level change from
+              Input and the colour controls, so you judge the
+              colour and not the loudness. It is a fixed table
+              (measured on pink noise at -18 dBFS RMS), not an
+              envelope follower: within about 1 dB at sensible
+              levels, less exact on very loud or very quiet
+              material.
+  Delta       Output level minus input level over the last 300 ms.
+              Near 0 dB means Auto Gain is holding the level.
+  OUT meter   The final output level.
+
+HEADER
+
+  Oversampling  1x, 2x or 4x. Runs the saturation at a higher rate
+              so its harmonics do not fold back as harsh, unrelated
+              tones (aliasing). 2x is the default and is clean at
+              any setting; 4x is cleaner still. 1x uses no extra CPU
+              and adds no latency, but it is for gentle settings
+              only and loses a little top end when driven.
+              Latency: 0 / 43 / 46 samples, compensated by REAPER.
+              Changing it may click once: set it and leave it.
+  Scale       Interface size. Fit follows the window.
+
+QUICK CHECKS
+
+  * All amounts at 0 %, Mix 100 %, Input and Output 0 dB: the
+    output is the input.
+  * Symmetric alone on a sine adds only odd harmonics; Asymmetric
+    alone gives a strong 2nd harmonic.
+  * Slew at 100 % takes a lot off a loud 10 kHz tone and almost
+    nothing off a loud 1 kHz tone.
+
+WHEN SOMETHING LOOKS WRONG
+
+  * "images failed to load" in the header: the gui_kit folder is
+    missing next to the plugin. Reinstall it with ReaPack.
+  * It sounds louder or quieter than bypass at extreme settings:
+    expected, Auto Gain is a fixed compensation. Use Output.
+  * A thud or click when changing Oversampling: expected, the
+    oversampler restarts.
+
+Curves and ideas from Airwindows by Chris Johnson (MIT licence):
+Console, Mojo, Spiral, Dyno, Coils and Desk.
