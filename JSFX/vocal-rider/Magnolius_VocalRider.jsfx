@@ -1,7 +1,7 @@
 desc:Vocal Rider (Magnolius)
 // @description Vocal Rider (Magnolius)
 // @author Magnolius
-// @version 1.2
+// @version 2.3
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @about
 //   Automatic gain riding for vocals, with sidechain ducking so the vocal can
@@ -9,21 +9,56 @@ desc:Vocal Rider (Magnolius)
 //
 //   Rides level toward a target rather than compressing toward a threshold, so
 //   the result reads as a performance that was sung evenly rather than one
-//   that was compressed.
+//   that was compressed. The target can be automated: the Loudness Envelope
+//   script writes a phrase-level Target lane for it.
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Restore the tags: header, so the FX browser can search these by category again
+//   Tail lift (%): how much the rider may raise the gain while the level is
+//   falling, at the end of a long note or the softer last words of a phrase.
+//   100 % (the default) is the same as 2.2. 0 % keeps those fades as sung.
+//
+//   v2.2:
+//   Breath guard gets a No boost mode: a breath after a boosted note drops
+//   to 0 dB, and one after a cut is frozen as before. Freeze stays the
+//   default, and existing projects keep it.
+//   The guard ramps in over 10 ms, starting 20 ms ahead of the breath.
+//
+//   v2.1:
+//   Breath guard: breaths get no say in the gain, and the gain is frozen
+//   through them, so they are no longer boosted. Breath threshold sets how
+//   noise-like a quiet frame must be to count as a breath.
+//   The fast-fall rule now scales with the Vocal loudness window. With a long
+//   window it never fired, and the tail of each phrase pushed the gain up.
+//
+//   v2.0:
+//   Correction amount (%), and independent Max boost and Max cut. Ride range
+//   becomes Max boost, and an existing project keeps its value there.
+//   Holds the gain through gaps, so a phrase no longer swells in from 0 dB;
+//   the gate has hysteresis and a hold time, and only a boost is released
+//   after a long pause.
+//   Two-pole gain smoothing, without a kink in the gain at each word.
+//   Quiet frames (consonants, breaths, tails) move the gain less.
+//   Optional lookahead, reported to the host as latency.
 
 //tags: dynamics gain vocal
+// Slider numbers 1, 4 and 6 are part of an interface: the Loudness Envelope
+// script automates parameter 0 (Target level) and reads 3 (Noise floor) and
+// 5 (Vocal loudness window). Do not renumber them; append new sliders.
 slider1:-18<-40,0,0.1>Target level (dB)
-slider2:6<0,12,0.1>Ride range (+/- dB)
+slider2:6<0,24,0.1>Max boost (dB)
 slider3:300<20,2000,1>Ride speed (ms)
 slider4:-50<-80,-20,0.5>Noise floor (dB)
 slider5:0<0,6,0.1>Sidechain influence (dB)
 slider6:50<5,500,1>Vocal loudness window (ms)
 slider7:200<5,1000,1>Sidechain loudness window (ms)
 slider8:0<-12,12,0.1>Output trim (dB)
+slider9:6<0,24,0.1>Max cut (dB)
+slider10:100<0,100,1>Correction amount (%)
+slider11:0<0,500,1>Lookahead (ms - adds latency)
+slider12:1<0,2,1{Off,Freeze,No boost}>Breath guard
+slider13:-8<-20,10,0.5>Breath threshold (dB)
+slider14:100<0,100,1>Tail lift (%)
 
 in_pin:Vocal L
 in_pin:Vocal R
@@ -32,24 +67,111 @@ in_pin:Sidechain R
 out_pin:Vocal L
 out_pin:Vocal R
 
+// Threading: @gfx runs on the UI thread. Every variable written in @gfx is
+// prefixed g_ (do not undo this), and @gfx only reads the audio-side scalars
+// voc_db, gain_db, gated, bs, L and slider*. Nothing is named in both.
+//
+// tools/model.py mirrors @init/@slider/@sample sample for sample. Edit the
+// two together.
+
 @init
 EPS = 0.000000000001;   // 1e-12, keeps log() finite on silence (EEL2 has no exponent literals)
 LOG10 = log(10);
-rms_v = rms_sc = 0;
-gain_db = 0;
 
-function db2x(db) ( bar_x + bar_w * min(max((db - DB_LO) / -DB_LO, 0), 1) );
+// Lookahead ring, one per channel. A power of two holds 500 ms at 384 kHz.
+RING = 262144;
+MASK = RING - 1;
+BUF_L = 0;
+BUF_R = RING;
+BUF_B = 2 * RING;       // breath flags, delayed with the audio
+memset(0, 0, 3 * RING);
+wp = 0;
+
+// Gate and weighting constants (documented in the README).
+GATE_HYST = 3;          // dB under the noise floor before the gate may close
+GATE_HOLD = 0.15;       // s the level must stay under that before it closes
+GAP_RELEASE = 2;        // s of gap before a held boost starts to release
+REL_TAU = 1;            // s, the release of a held boost toward 0 dB
+W_KNEE = 6;             // dB under the phrase level: frames above this vote fully
+W_GATE = 12;            // dB under the phrase level: frames below this do not vote
+PK_TAU = 0.5;           // s, release of the phrase level (instant attack)
+SLOPE_TAU = 0.02;       // s, smoothing of the level slope
+S_FULL50 = -30;         // dB/s at a 50 ms window: falling slower votes fully
+S_ZERO50 = -60;         // dB/s at a 50 ms window: falling faster (a tail) does not
+                        // vote. Both scale with 50 / window, since a detector's
+                        // free decay is 4.34 dB / tau per second.
+TAIL_FALL = 0.2;        // a frame counts as fully falling, for Tail lift, at this
+                        // fraction of the S_FULL rate (6 dB/s at 50 ms, 1 at 300)
+TAIL_POW = 2.5;         // slider curve: makes 50 % give about half the lift
+BR_LP = 1500;           // Hz, the voiced band
+BR_HP = 3000;           // Hz, the breath band
+BR_TAU = 0.01;          // s, band energy smoothing
+BR_DEPTH = 12;          // dB under the phrase level before a frame can be a breath
+BR_ATT = 0.01;          // s, the guard engages
+BR_REL = 0.05;          // s, freeze lets go
+BR_ANTIC = 0.02;        // s the guard leads the breath, when Lookahead allows
+
+rms_v = rms_sc = 0;
+g1 = g2 = gain_db = 0;
+gated = 1;
+pk = -150;
+slope = 0;
+voc_prev = 10 * log(EPS) / LOG10;
+lx1 = lx2 = ly1 = ly2 = hx1 = hx2 = hy1 = hy2 = 0;
+e_lo = e_hi = e_sh = 0;
+breath = 0;
+bs = 0;
+ghold = 0;
+below_n = 0;
+gap_n = 0;
+
+function recalc() (
+  k_v  = 1 - exp(-1 / (srate * slider6 * 0.001));
+  k_sc = 1 - exp(-1 / (srate * slider7 * 0.001));
+  // two stages of tau = speed/2 reach ~59 % at t = speed, near a one-pole's 63 %
+  k_cut   = 1 - exp(-1 / (srate * slider3 * 0.001 * 0.5));
+  k_boost = 1 - exp(-1 / (srate * slider3 * 0.001 * 0.5 * 1.5)); // boost slower than cut
+  k_rel   = 1 - exp(-1 / (srate * REL_TAU));
+  k_pk    = 1 - exp(-1 / (srate * PK_TAU));
+  k_sl    = 1 - exp(-1 / (srate * SLOPE_TAU));
+  s_zero = S_ZERO50 * 50 / slider6;
+  s_full = S_FULL50 * 50 / slider6;
+  // breath detector: RBJ Butterworth low-pass and high-pass
+  br_w = 2 * $pi * min(BR_LP, srate * 0.45) / srate;
+  br_c = cos(br_w); br_al = sin(br_w) / (2 * 0.7071); br_a0 = 1 + br_al;
+  lb0 = (1 - br_c) / 2 / br_a0; lb1 = (1 - br_c) / br_a0; lb2 = lb0;
+  la1 = -2 * br_c / br_a0; la2 = (1 - br_al) / br_a0;
+  br_w = 2 * $pi * min(BR_HP, srate * 0.45) / srate;
+  br_c = cos(br_w); br_al = sin(br_w) / (2 * 0.7071); br_a0 = 1 + br_al;
+  hb0 = (1 + br_c) / 2 / br_a0; hb1 = -(1 + br_c) / br_a0; hb2 = hb0;
+  ha1 = -2 * br_c / br_a0; ha2 = (1 - br_al) / br_a0;
+  k_br  = 1 - exp(-1 / (srate * BR_TAU));
+  k_bsa = 1 - exp(-1 / (srate * BR_ATT));
+  k_bsr = 1 - exp(-1 / (srate * BR_REL));
+  hold_n    = floor(GATE_HOLD * srate + 0.5);
+  release_n = floor(GAP_RELEASE * srate + 0.5);
+  amt  = slider10 * 0.01;
+  tail_w = (slider14 * 0.01) ^ TAIL_POW;
+  trim = 10^(slider8/20);
+  L = min(floor(slider11 * 0.001 * srate + 0.5), RING - 1);
+  A = min(L, floor(BR_ANTIC * srate + 0.5));
+);
+recalc();
+
+// UI only (defined here, called from @gfx)
+function g_db2x(db) ( g_bar_x + g_bar_w * min(max((db - g_db_lo) / -g_db_lo, 0), 1) );
 
 @slider
-k_v  = 1 - exp(-1 / (srate * slider6 * 0.001));
-k_sc = 1 - exp(-1 / (srate * slider7 * 0.001));
-k_cut   = 1 - exp(-1 / (srate * slider3 * 0.001));
-k_boost = 1 - exp(-1 / (srate * slider3 * 0.001 * 1.5)); // boost slightly slower than cut
-k_gate  = 1 - exp(-1 / srate);                           // ~1 s glide to unity when gated
-trim = 10^(slider8/20);
+recalc();
+
+@block
+pdc_delay = L;
+pdc_bot_ch = 0;
+pdc_top_ch = 2;
 
 @sample
-// one-pole RMS detectors (energy domain), louder channel wins
+// one-pole RMS detectors (energy domain), louder channel wins. They read the
+// undelayed input; the gain lands on the output L samples later.
 e_v  = max(spl0*spl0, spl1*spl1);
 e_sc = max(spl2*spl2, spl3*spl3);
 rms_v  += k_v  * (e_v  - rms_v);
@@ -58,79 +180,177 @@ rms_sc += k_sc * (e_sc - rms_sc);
 voc_db = 10 * log(rms_v  + EPS) / LOG10;
 sc_db  = 10 * log(rms_sc + EPS) / LOG10;
 
-gated = voc_db <= slider4;
+// level slope in dB/s, smoothed past the detector's ripple
+slope += k_sl * ((voc_db - voc_prev) * srate - slope);
+voc_prev = voc_db;
+
+// breath detector: a quiet frame whose energy sits above 3 kHz rather than
+// below 1.5 kHz is breath, not voice. "Quiet" is BR_DEPTH under the phrase
+// level, so a sibilant inside a word is never one.
+br_x = (spl0 + spl1) * 0.5;
+br_y = lb0 * br_x + lb1 * lx1 + lb2 * lx2 - la1 * ly1 - la2 * ly2;
+lx2 = lx1; lx1 = br_x; ly2 = ly1; ly1 = br_y;
+e_lo += k_br * (br_y * br_y - e_lo);
+br_y = hb0 * br_x + hb1 * hx1 + hb2 * hx2 - ha1 * hy1 - ha2 * hy2;
+hx2 = hx1; hx1 = br_x; hy2 = hy1; hy1 = br_y;
+e_hi += k_br * (br_y * br_y - e_hi);
+e_sh += k_br * (e_v - e_sh);
+sh_db = 10 * log(e_sh + EPS) / LOG10;
+breath = slider12 >= 0.5 && sh_db < pk - BR_DEPTH && sh_db > -90 &&
+         10 * log((e_hi + EPS) / (e_lo + EPS)) / LOG10 > slider13;
+
+// gate: opens above the noise floor, closes only after GATE_HOLD seconds
+// spent GATE_HYST dB under it
+voc_db > slider4 ? (
+  gated = 0;
+  below_n = 0;
+) : gated == 0 ? (
+  voc_db < slider4 - GATE_HYST ? (below_n += 1;) : (below_n = 0;);
+  below_n >= hold_n ? (
+    gated = 1;
+    gap_n = 0;
+  );
+);
+
 gated ? (
-  // below noise floor: glide back to unity, never boost silence/breaths
-  gain_db += k_gate * (0 - gain_db);
+  // gap: hold the gain, so the next phrase starts where this one ended.
+  // After a long pause a boost releases toward 0 dB (no lifted room noise);
+  // a cut is held.
+  gap_n += 1;
+  gap_n > release_n ? (
+    g1 > 0 ? (g1 -= k_rel * g1;);
+    g2 > 0 ? (g2 -= k_rel * g2;);
+  );
 ) : (
   // sidechain raises the target, reaching full influence when the
   // music is 12 dB above the vocal target
   sc_amt = min(max((sc_db - slider1) / 12, 0), 1);
   eff_target = slider1 + slider5 * sc_amt;
 
-  want = eff_target - voc_db;
-  want = min(max(want, -slider2), slider2);
+  err = eff_target - voc_db;
+  want = min(max(amt * err, -slider9), slider2);
 
-  gain_db += (want < gain_db ? k_cut : k_boost) * (want - gain_db);
+  // level weighting. A frame votes by how close it is to the phrase level
+  // (a peak follower: instant attack, PK_TAU release) and by whether it is
+  // falling fast. A consonant, a breath or the release of a phrase gets
+  // little or no vote; a sustained vowel gets a full one. The phrase level
+  // follows the take itself, so a take that sits low overall still climbs.
+  // A breath gets no vote and does not move the phrase level.
+  breath ? (
+    w = 0;
+  ) : (
+    pk = voc_db > pk ? voc_db : pk + k_pk * (voc_db - pk);
+    d = pk - voc_db;
+    w = d <= W_KNEE ? 1 : d >= W_GATE ? 0
+      : 0.5 + 0.5 * cos($pi * (d - W_KNEE) / (W_GATE - W_KNEE));
+    w *= min(max((slope - s_zero) / (s_full - s_zero), 0), 1);
+  );
+
+  // Tail lift: while the level is falling, the gain's upward motion is
+  // slowed by the slider. That is the end of a long note, or the softer
+  // last words of a phrase. Cuts, and rising or steady frames, are untouched,
+  // so a quieter note is still brought up once it settles. At 100 % the
+  // factor is exactly 1.
+  want > g1 ? (
+    fall = min(max(slope / (s_full * TAIL_FALL), 0), 1);
+    w *= 1 - (1 - tail_w) * fall;
+  );
+
+  // two-pole smoother; each stage picks cut/boost speed from its own error
+  g1 += (want < g1 ? k_cut : k_boost) * w * (want - g1);
+  g2 += (g1 < g2 ? k_cut : k_boost) * (g1 - g2);
 );
+gain_db = g2;
 
-g = 10^(gain_db/20) * trim;
-spl0 *= g;
-spl1 *= g;
+// lookahead delay; with L = 0 the sample read is the one just written
+BUF_L[wp] = spl0;
+BUF_R[wp] = spl1;
+BUF_B[wp] = breath;
+rp = (wp - L + RING) & MASK;
 
-@gfx 460 132
-DB_LO = -60;
-bar_x = 52;
-bar_w = gfx_w - bar_x - 84;
-bar_h = 22;
-y_in = 22; y_ride = 82;
+// Freeze through a breath: the gain may fall but not rise above what it was
+// when the breath began. The flag travels with the audio, read BR_ANTIC
+// early so the freeze is in place before the breath arrives.
+br_f = BUF_B[(wp - L + A + RING) & MASK];
+bs += (br_f > bs ? k_bsa : k_bsr) * (br_f - bs);
+bs < 0.01 ? (ghold = gain_db;);
+// Freeze caps the breath at the gain it began with. No boost also caps it
+// at 0 dB, so a breath after a boosted note is left at unity; after a cut it
+// is frozen the same way.
+br_cap = slider12 >= 1.5 ? min(ghold, 0) : ghold;
+g_out = gain_db - bs * max(gain_db - br_cap, 0);
+
+g = 10^(g_out/20) * trim;
+spl0 = BUF_L[rp] * g;
+spl1 = BUF_R[rp] * g;
+wp = (wp + 1) & MASK;
+
+@gfx 460 150
+g_db_lo = -60;
+g_bar_x = 52;
+g_bar_w = gfx_w - g_bar_x - 84;
+g_bar_h = 22;
+g_y_top = 8; g_y_in = 34; g_y_ride = 94;
 
 gfx_setfont(1, "Arial", 14);
 
 gfx_r = 0.09; gfx_g = 0.09; gfx_b = 0.11; gfx_a = 1;
 gfx_rect(0, 0, gfx_w, gfx_h);
 
+// ---- status line: the target moves with its automation lane ----
+gfx_r = gfx_g = gfx_b = 0.85;
+gfx_x = 8; gfx_y = g_y_top;
+gfx_printf("Target %5.1f dB    Amount %d %%", slider1, slider10);
+L > 0 ? gfx_printf("    Lookahead %d ms", slider11);
+gfx_r = gfx_g = gfx_b = 0.45;
+gfx_x = gfx_w - 34; gfx_y = g_y_top; gfx_drawstr("v2.3");
+
 // ---- input level bar ----
 gfx_r = 0.16; gfx_g = 0.17; gfx_b = 0.20;
-gfx_rect(bar_x, y_in, bar_w, bar_h);
+gfx_rect(g_bar_x, g_y_in, g_bar_w, g_bar_h);
 gfx_r = 0.30; gfx_g = 0.62; gfx_b = 0.90;
-gfx_rect(bar_x, y_in, db2x(voc_db) - bar_x, bar_h);
+gfx_rect(g_bar_x, g_y_in, g_db2x(voc_db) - g_bar_x, g_bar_h);
 
 // noise floor tick (grey) and target tick (yellow)
 gfx_r = gfx_g = gfx_b = 0.45;
-gfx_rect(db2x(slider4), y_in - 4, 1, bar_h + 8);
+gfx_rect(g_db2x(slider4), g_y_in - 4, 1, g_bar_h + 8);
 gfx_r = 1; gfx_g = 0.85; gfx_b = 0.30;
-gfx_rect(db2x(slider1), y_in - 4, 2, bar_h + 8);
+gfx_rect(g_db2x(slider1), g_y_in - 4, 2, g_bar_h + 8);
 
 gfx_r = gfx_g = gfx_b = 0.85;
-gfx_x = 8; gfx_y = y_in + 4; gfx_drawstr("IN");
-gfx_x = bar_x + bar_w + 8; gfx_y = y_in + 4; gfx_printf("%5.1f dB", max(voc_db, DB_LO));
+gfx_x = 8; gfx_y = g_y_in + 4; gfx_drawstr("IN");
+gfx_x = g_bar_x + g_bar_w + 8; gfx_y = g_y_in + 4; gfx_printf("%5.1f dB", max(voc_db, g_db_lo));
 
 gfx_r = gfx_g = gfx_b = 0.5;
-gfx_x = bar_x; gfx_y = y_in + bar_h + 4; gfx_printf("%d", DB_LO);
-gfx_x = bar_x + bar_w - 8; gfx_y = y_in + bar_h + 4; gfx_drawstr("0");
+gfx_x = g_bar_x; gfx_y = g_y_in + g_bar_h + 4; gfx_printf("%d", g_db_lo);
+gfx_x = g_bar_x + g_bar_w - 8; gfx_y = g_y_in + g_bar_h + 4; gfx_drawstr("0");
 
-// ---- ride gain bar (center = 0 dB, extends to +/- ride range) ----
-cx = bar_x + bar_w * 0.5;
-half = bar_w * 0.5;
+// ---- ride gain bar: left half spans Max cut, right half Max boost ----
+g_cx = g_bar_x + g_bar_w * 0.5;
+g_half = g_bar_w * 0.5;
 gfx_r = 0.16; gfx_g = 0.17; gfx_b = 0.20;
-gfx_rect(bar_x, y_ride, bar_w, bar_h);
+gfx_rect(g_bar_x, g_y_ride, g_bar_w, g_bar_h);
 
-ext = slider2 > 0 ? gain_db / slider2 * half : 0;
-ext = min(max(ext, -half), half);
-gated ? ( gfx_r = 0.35; gfx_g = 0.35; gfx_b = 0.38; )        // dim while gated
-: ext >= 0 ? ( gfx_r = 0.35; gfx_g = 0.80; gfx_b = 0.40; )   // boosting
-: ( gfx_r = 0.95; gfx_g = 0.55; gfx_b = 0.30; );             // cutting
-ext >= 0 ? gfx_rect(cx, y_ride, ext, bar_h)
-         : gfx_rect(cx + ext, y_ride, -ext, bar_h);
+g_ext = gain_db >= 0 ? (slider2 > 0 ? gain_db / slider2 * g_half : 0)
+                     : (slider9 > 0 ? gain_db / slider9 * g_half : 0);
+g_ext = min(max(g_ext, -g_half), g_half);
+gated ? ( gfx_r = 0.35; gfx_g = 0.35; gfx_b = 0.38; )          // dim while holding
+: g_ext >= 0 ? ( gfx_r = 0.35; gfx_g = 0.80; gfx_b = 0.40; )   // boosting
+: ( gfx_r = 0.95; gfx_g = 0.55; gfx_b = 0.30; );               // cutting
+g_ext >= 0 ? gfx_rect(g_cx, g_y_ride, g_ext, g_bar_h)
+           : gfx_rect(g_cx + g_ext, g_y_ride, -g_ext, g_bar_h);
 
 gfx_r = gfx_g = gfx_b = 0.7;
-gfx_rect(cx, y_ride - 4, 1, bar_h + 8);
+gfx_rect(g_cx, g_y_ride - 4, 1, g_bar_h + 8);
 
 gfx_r = gfx_g = gfx_b = 0.85;
-gfx_x = 8; gfx_y = y_ride + 4; gfx_drawstr("RIDE");
-gfx_x = bar_x + bar_w + 8; gfx_y = y_ride + 4; gfx_printf("%+5.1f dB", gain_db);
+gfx_x = 8; gfx_y = g_y_ride + 4; gfx_drawstr(gated ? "HOLD" : "RIDE");
+bs > 0.5 ? (
+  gfx_r = 0.55; gfx_g = 0.75; gfx_b = 1;
+  gfx_x = g_bar_x + 4; gfx_y = g_y_ride - 18; gfx_drawstr("BREATH");
+);
+gfx_x = g_bar_x + g_bar_w + 8; gfx_y = g_y_ride + 4; gfx_printf("%+5.1f dB", gain_db);
 
 gfx_r = gfx_g = gfx_b = 0.5;
-gfx_x = bar_x; gfx_y = y_ride + bar_h + 4; gfx_printf("-%.0f", slider2);
-gfx_x = bar_x + bar_w - 16; gfx_y = y_ride + bar_h + 4; gfx_printf("+%.0f", slider2);
+gfx_x = g_bar_x; gfx_y = g_y_ride + g_bar_h + 4; gfx_printf("-%.1f", slider9);
+gfx_x = g_bar_x + g_bar_w - 24; gfx_y = g_y_ride + g_bar_h + 4; gfx_printf("+%.1f", slider2);
