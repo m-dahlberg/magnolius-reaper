@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="80d786d56b42e0e13ddf6cacaba179185ed04b5d">
+<index version="1" name="Magnolius" commit="5c0acde96325b851e373acd2726dd34e1796df0c">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -885,7 +885,7 @@ That is unavoidable when a parameter is removed.]]></changelog>
 \widowctrl\hyphauto
 
 {\pard \ql \f0 \sa180 \li0 \fi0 Automatic gain riding for vocals, with sidechain ducking so the vocal can hold its place against a backing track.\par}
-{\pard \ql \f0 \sa180 \li0 \fi0 Rides level toward a target rather than compressing toward a threshold, so the result reads as a performance that was sung evenly rather than one that was compressed.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Rides level toward a target rather than compressing toward a threshold, so the result reads as a performance that was sung evenly rather than one that was compressed. The target can be automated: the Loudness Envelope script writes a phrase-level Target lane for it.\par}
 {\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
 }
 ]]></description>
@@ -902,6 +902,35 @@ That is unavoidable when a parameter is removed.]]></changelog>
       <version name="1.2" author="Magnolius" time="2026-09-16T11:57:40Z">
         <changelog><![CDATA[Restore the tags: header, so the FX browser can search these by category again]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/d47b02f4375a1210fab5668e5414566ecdeb9d1e/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
+      </version>
+      <version name="2.3" author="Magnolius" time="2026-11-05T10:06:53Z">
+        <changelog><![CDATA[Tail lift (%): how much the rider may raise the gain while the level is
+falling, at the end of a long note or the softer last words of a phrase.
+100 % (the default) is the same as 2.2. 0 % keeps those fades as sung.
+
+v2.2:
+Breath guard gets a No boost mode: a breath after a boosted note drops
+to 0 dB, and one after a cut is frozen as before. Freeze stays the
+default, and existing projects keep it.
+The guard ramps in over 10 ms, starting 20 ms ahead of the breath.
+
+v2.1:
+Breath guard: breaths get no say in the gain, and the gain is frozen
+through them, so they are no longer boosted. Breath threshold sets how
+noise-like a quiet frame must be to count as a breath.
+The fast-fall rule now scales with the Vocal loudness window. With a long
+window it never fired, and the tail of each phrase pushed the gain up.
+
+v2.0:
+Correction amount (%), and independent Max boost and Max cut. Ride range
+becomes Max boost, and an existing project keeps its value there.
+Holds the gain through gaps, so a phrase no longer swells in from 0 dB;
+the gate has hysteresis and a hold time, and only a boost is released
+after a long pause.
+Two-pole gain smoothing, without a kink in the gain at each word.
+Quiet frames (consonants, breaths, tails) move the gain less.
+Optional lookahead, reported to the host as latency.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/8b7c92780b6d39decbac354563b02bc5258ef43a/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
       </version>
     </reapack>
   </category>
