@@ -1,8 +1,12 @@
 desc:Vocal Rider (Magnolius)
 // @description Vocal Rider (Magnolius)
 // @author Magnolius
-// @version 2.3
+// @version 2.4
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_VocalRider.help.txt
 // @about
 //   Automatic gain riding for vocals, with sidechain ducking so the vocal can
 //   hold its place against a backing track.
@@ -14,6 +18,14 @@ desc:Vocal Rider (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
+//   New interface. A scrolling display shows the vocal's level in dB with the
+//   Target (as it really is, lane plus sidechain push), the noise floor, the
+//   sidechain level and the gain the rider applied, with HOLD and breath
+//   marked. History is 4, 8, 16 or 32 s. Every parameter is a knob with a
+//   value field you can type into, and a built-in help page (?) explains
+//   them. The audio is unchanged from 2.3.
+//
+//   v2.3:
 //   Tail lift (%): how much the rider may raise the gain while the level is
 //   falling, at the end of a long note or the softer last words of a phrase.
 //   100 % (the default) is the same as 2.2. 0 % keeps those fades as sung.
@@ -42,23 +54,31 @@ desc:Vocal Rider (Magnolius)
 //   Optional lookahead, reported to the host as latency.
 
 //tags: dynamics gain vocal
+
+// Shared memory, namespaced to the vendor so it cannot collide with other
+// plugins' gmem. Every Magnolius plugin shares this slot map:
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
+
 // Slider numbers 1, 4 and 6 are part of an interface: the Loudness Envelope
 // script automates parameter 0 (Target level) and reads 3 (Noise floor) and
 // 5 (Vocal loudness window). Do not renumber them; append new sliders.
-slider1:-18<-40,0,0.1>Target level (dB)
-slider2:6<0,24,0.1>Max boost (dB)
-slider3:300<20,2000,1>Ride speed (ms)
-slider4:-50<-80,-20,0.5>Noise floor (dB)
-slider5:0<0,6,0.1>Sidechain influence (dB)
-slider6:50<5,500,1>Vocal loudness window (ms)
-slider7:200<5,1000,1>Sidechain loudness window (ms)
-slider8:0<-12,12,0.1>Output trim (dB)
-slider9:6<0,24,0.1>Max cut (dB)
-slider10:100<0,100,1>Correction amount (%)
-slider11:0<0,500,1>Lookahead (ms - adds latency)
-slider12:1<0,2,1{Off,Freeze,No boost}>Breath guard
-slider13:-8<-20,10,0.5>Breath threshold (dB)
-slider14:100<0,100,1>Tail lift (%)
+// The leading "-" hides a slider from REAPER's generic list (the panel below
+// replaces it); it stays an automatable parameter under the same name.
+slider1:-18<-40,0,0.1>-Target level (dB)
+slider2:6<0,24,0.1>-Max boost (dB)
+slider3:300<20,2000,1>-Ride speed (ms)
+slider4:-50<-80,-20,0.5>-Noise floor (dB)
+slider5:0<0,6,0.1>-Sidechain influence (dB)
+slider6:50<5,500,1>-Vocal loudness window (ms)
+slider7:200<5,1000,1>-Sidechain loudness window (ms)
+slider8:0<-12,12,0.1>-Output trim (dB)
+slider9:6<0,24,0.1>-Max cut (dB)
+slider10:100<0,100,1>-Correction amount (%)
+slider11:0<0,500,1>-Lookahead (ms - adds latency)
+slider12:1<0,2,1{Off,Freeze,No boost}>-Breath guard
+slider13:-8<-20,10,0.5>-Breath threshold (dB)
+slider14:100<0,100,1>-Tail lift (%)
 
 in_pin:Vocal L
 in_pin:Vocal R
@@ -67,12 +87,41 @@ in_pin:Sidechain R
 out_pin:Vocal L
 out_pin:Vocal R
 
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 knob, Detection   1 knob, Ride   2 knob, Breath   3 knob, Sidechain
+//   4 knob, Trim (bipolar)   12 help text (last, after every image)
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/knob_green_grid.png
+filename:3,gui_kit/knob_yellow_grid.png
+filename:4,gui_kit/knob_yellow_bipolar_grid.png
+filename:5,gui_kit/value_field.png
+filename:6,gui_kit/header_bar.png
+filename:7,gui_kit/panel_tile.png
+filename:8,gui_kit/dropdown.png
+filename:9,gui_kit/button_cyan.png
+filename:10,gui_kit/wave_frame_9slice.png
+filename:11,gui_kit/logo_magnolius_grey.png
+filename:12,Magnolius_VocalRider.help.txt
+
 // Threading: @gfx runs on the UI thread. Every variable written in @gfx is
-// prefixed g_ (do not undo this), and @gfx only reads the audio-side scalars
-// voc_db, gain_db, gated, bs, L and slider*. Nothing is named in both.
+// prefixed g_ (do not undo this), and every display variable written on the
+// audio side is prefixed d_. @gfx only reads the audio side (voc_db, sc_db,
+// gain_out, bs, d_*, H_* columns, slider*). Nothing is named in both.
+// recalc() is the one function both threads call: it has no parameters, no
+// locals and no loops, and each temporary belongs to one filter, so two
+// concurrent calls write identical values.
 //
 // tools/model.py mirrors @init/@slider/@sample sample for sample. Edit the
-// two together.
+// two together. The display code (d_*) feeds nothing back into the audio.
+//
+// Widget ids: 10-29 knobs, 30 breath guard dropdown, 40 scale dropdown,
+// 41 help button, 42 history dropdown, 50-69 value fields.
+// String slots 300+ hold the help text.
 
 @init
 EPS = 0.000000000001;   // 1e-12, keeps log() finite on silence (EEL2 has no exponent literals)
@@ -84,7 +133,8 @@ MASK = RING - 1;
 BUF_L = 0;
 BUF_R = RING;
 BUF_B = 2 * RING;       // breath flags, delayed with the audio
-memset(0, 0, 3 * RING);
+BUF_G = 3 * RING;       // gate state, delayed with the audio (display only)
+memset(0, 0, 4 * RING);
 wp = 0;
 
 // Gate and weighting constants (documented in the README).
@@ -124,6 +174,7 @@ bs = 0;
 ghold = 0;
 below_n = 0;
 gap_n = 0;
+gain_out = 0;
 
 function recalc() (
   k_v  = 1 - exp(-1 / (srate * slider6 * 0.001));
@@ -136,15 +187,17 @@ function recalc() (
   k_sl    = 1 - exp(-1 / (srate * SLOPE_TAU));
   s_zero = S_ZERO50 * 50 / slider6;
   s_full = S_FULL50 * 50 / slider6;
-  // breath detector: RBJ Butterworth low-pass and high-pass
-  br_w = 2 * $pi * min(BR_LP, srate * 0.45) / srate;
-  br_c = cos(br_w); br_al = sin(br_w) / (2 * 0.7071); br_a0 = 1 + br_al;
-  lb0 = (1 - br_c) / 2 / br_a0; lb1 = (1 - br_c) / br_a0; lb2 = lb0;
-  la1 = -2 * br_c / br_a0; la2 = (1 - br_al) / br_a0;
-  br_w = 2 * $pi * min(BR_HP, srate * 0.45) / srate;
-  br_c = cos(br_w); br_al = sin(br_w) / (2 * 0.7071); br_a0 = 1 + br_al;
-  hb0 = (1 + br_c) / 2 / br_a0; hb1 = -(1 + br_c) / br_a0; hb2 = hb0;
-  ha1 = -2 * br_c / br_a0; ha2 = (1 - br_al) / br_a0;
+  // breath detector: RBJ Butterworth low-pass and high-pass. Each filter has
+  // its own temporaries, so a call from @gfx racing one from @slider cannot
+  // design one filter with the other's frequency.
+  lp_w = 2 * $pi * min(BR_LP, srate * 0.45) / srate;
+  lp_c = cos(lp_w); lp_al = sin(lp_w) / (2 * 0.7071); lp_a0 = 1 + lp_al;
+  lb0 = (1 - lp_c) / 2 / lp_a0; lb1 = (1 - lp_c) / lp_a0; lb2 = lb0;
+  la1 = -2 * lp_c / lp_a0; la2 = (1 - lp_al) / lp_a0;
+  hp_w = 2 * $pi * min(BR_HP, srate * 0.45) / srate;
+  hp_c = cos(hp_w); hp_al = sin(hp_w) / (2 * 0.7071); hp_a0 = 1 + hp_al;
+  hb0 = (1 + hp_c) / 2 / hp_a0; hb1 = -(1 + hp_c) / hp_a0; hb2 = hb0;
+  ha1 = -2 * hp_c / hp_a0; ha2 = (1 - hp_al) / hp_a0;
   k_br  = 1 - exp(-1 / (srate * BR_TAU));
   k_bsa = 1 - exp(-1 / (srate * BR_ATT));
   k_bsr = 1 - exp(-1 / (srate * BR_REL));
@@ -158,8 +211,109 @@ function recalc() (
 );
 recalc();
 
-// UI only (defined here, called from @gfx)
-function g_db2x(db) ( g_bar_x + g_bar_w * min(max((db - g_db_lo) / -g_db_lo, 0), 1) );
+// ---------------------------------------------------------------- display
+// History for the scrolling display, one value per column, filled in @sample
+// from the DELAYED signal so it lines up with what leaves the plugin: the
+// input level, the gain applied to it, HOLD and breath all describe the same
+// sample. Target and sidechain are recorded as they are at write time; an
+// automation lane plays on the output timeline anyway.
+//   H_PK   peak level, dB          H_RMS  detector level (Vocal window), dB
+//   H_TGT  effective target, dB    H_SC   sidechain level, dB
+//   H_GAIN gain applied, dB        H_HOLD gate held (0/1)   H_BR breath guard (0..1)
+// The first four start at NO_DATA so an empty column draws nothing.
+HCOLS = 1024;           // power of two: the write position wraps with & (HCOLS-1)
+H_PK   = 4 * RING;
+H_RMS  = H_PK  + HCOLS;
+H_TGT  = H_RMS + HCOLS;
+H_SC   = H_TGT + HCOLS;
+H_GAIN = H_SC  + HCOLS;
+H_HOLD = H_GAIN + HCOLS;
+H_BR   = H_HOLD + HCOLS;
+NO_DATA = -1000;
+DB_FLOOR = -60;         // bottom of the display's dB scale
+
+// @init re-runs on every transport start; the GUI choices must survive that.
+// (They also survive because @serialize is non-empty, so REAPER no longer
+// zeroes the plugin's memory before @init.)
+vr_ui_init != 1 ? (
+  vr_ui_init = 1;
+  g_hist_idx = 1;       // 4 / 8 / 16 / 32 s; written by @gfx and @serialize
+  gui_scale_idx = 1;    // UI_SCALE_DEFAULT, see below
+);
+d_hist_idx = -1;        // makes @block (re)size and clear the history
+d_rms = 0;
+d_col = 0; d_n = 0;
+d_pkacc = d_rmacc = d_hacc = d_bacc = 0;
+d_in_db = d_out_db = NO_DATA;
+d_tgt = slider1;
+d_gate_now = 1;
+
+// ---------------------------------------------------------------- interface
+gk_init();
+gk_img_field = 5; gk_img_header = 6; gk_img_panel = 7;
+gk_img_dropdown = 8; gk_img_button = 9; gk_img_wave_frame = 10;
+// The knob strips are 64 frames packed in 8 columns (1024 x 1024): REAPER
+// refuses images taller than about 6144 px, silently.
+gk_knob_cols = 8; gk_knob_frames = 64;
+IMG_COUNT = 12;
+
+// Counts image slots REAPER would not load. It reports a zero-size image and
+// no error, and every knob then falls back to vector drawing, so without this
+// a failed load is silent and passes for working art. The likeliest cause is a
+// bad path; a trailing comment on a filename: line breaks it too.
+function count_missing_images(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? bad += 1; i += 1;);
+  bad;
+);
+
+HELP_FILE = 12;
+HELP_BASE = 300;        // first string slot used for help text
+HELP_MAX  = 600;        // most lines kept
+help_open = 0; help_lines = 0;
+
+// Layout is authored at UI_W x UI_H logical px; every coordinate runs through
+// gk_S, so the scale selector scales drawing, blits and hit-testing together.
+UI_W = 786; UI_H = 576;
+COL = 92;               // knob column pitch, the same in every panel
+PY = 280; PH = 260;     // panels: top, height (they end 12 px above the logo)
+ROW0 = PY + 22 + 17;    // knob row 1: equal space above row 1 and below row 2
+ROW1 = ROW0 + 108;      // knob row 2
+RY = 252; RH = 18;      // readout row
+WAVE_H = 132;           // level plot height inside the display; the gain lane
+                        // takes the rest
+LOGO_ASPECT = 512/101;
+GM_UI_SCALE = 0;        // gmem slot holding the shared scale
+// The scale is shared by every Magnolius plugin through gmem, and each
+// instance serialises its own copy to seed it in a fresh session. 100 % is the
+// default because the @gfx line asks for exactly the design size.
+UI_SCALE_DEFAULT = 1;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+// UI-only helpers (called from @gfx only)
+function g_ydb(db) ( g_wb - min(max((db - DB_FLOOR) / -DB_FLOOR, 0), 1) * g_wsp; );
+function g_ygain(gdb) ( g_gcy - min(max(gdb / g_gmax, -1), 1) * g_ghalf; );
+// (Parameter names avoid the audio side's w, g, b: EEL2 names are
+// case-insensitive and a reader should never have to wonder.)
+function g_label(lx, ly, str) (
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = lx * gk_S; gfx_y = ly * gk_S;
+  gfx_drawstr(str, 4, (lx + 200) * gk_S, (ly + RH) * gk_S);
+);
+function g_chip(cx, cw, str, on, cr, cg, cb) (
+  on ? (
+    gfx_set(cr, cg, cb, 1);
+    gfx_rect(cx * gk_S, RY * gk_S, cw * gk_S, RH * gk_S);
+    gfx_set(0.10, 0.105, 0.11, 1);
+  ) : (
+    gfx_set(0.28, 0.29, 0.31, 1);
+    gfx_rect(cx * gk_S, RY * gk_S, cw * gk_S, RH * gk_S, 0);
+    gfx_set(0.38, 0.39, 0.41, 1);
+  );
+  gfx_x = cx * gk_S; gfx_y = RY * gk_S;
+  gfx_drawstr(str, 1|4, (cx + cw) * gk_S, (RY + RH) * gk_S);
+);
 
 @slider
 recalc();
@@ -168,6 +322,19 @@ recalc();
 pdc_delay = L;
 pdc_bot_ch = 0;
 pdc_top_ch = 2;
+
+// Display history: (re)size and clear it when the History choice or the
+// sample rate changes. @block only runs while audio flows, which is the only
+// time the history fills anyway.
+d_hist_idx != g_hist_idx || d_srate != srate ? (
+  d_hist_idx = g_hist_idx;
+  d_srate = srate;
+  d_spc = max(1, floor(4 * 2^d_hist_idx * srate / HCOLS + 0.5));   // samples per column
+  memset(H_PK, NO_DATA, 4 * HCOLS);
+  memset(H_GAIN, 0, 3 * HCOLS);
+  d_col = 0; d_n = 0;
+  d_pkacc = d_rmacc = d_hacc = d_bacc = 0;
+);
 
 @sample
 // one-pole RMS detectors (energy domain), louder channel wins. They read the
@@ -266,6 +433,7 @@ gain_db = g2;
 BUF_L[wp] = spl0;
 BUF_R[wp] = spl1;
 BUF_B[wp] = breath;
+BUF_G[wp] = gated;
 rp = (wp - L + RING) & MASK;
 
 // Freeze through a breath: the gain may fall but not rise above what it was
@@ -278,79 +446,362 @@ bs < 0.01 ? (ghold = gain_db;);
 // at 0 dB, so a breath after a boosted note is left at unity; after a cut it
 // is frozen the same way.
 br_cap = slider12 >= 1.5 ? min(ghold, 0) : ghold;
-g_out = gain_db - bs * max(gain_db - br_cap, 0);
+gain_out = gain_db - bs * max(gain_db - br_cap, 0);
 
-g = 10^(g_out/20) * trim;
-spl0 = BUF_L[rp] * g;
-spl1 = BUF_R[rp] * g;
+g = 10^(gain_out/20) * trim;
+d_x0 = BUF_L[rp];
+d_x1 = BUF_R[rp];
+spl0 = d_x0 * g;
+spl1 = d_x1 * g;
 wp = (wp + 1) & MASK;
 
-@gfx 460 150
-g_db_lo = -60;
-g_bar_x = 52;
-g_bar_w = gfx_w - g_bar_x - 84;
-g_bar_h = 22;
-g_y_top = 8; g_y_in = 34; g_y_ride = 94;
-
-gfx_setfont(1, "Arial", 14);
-
-gfx_r = 0.09; gfx_g = 0.09; gfx_b = 0.11; gfx_a = 1;
-gfx_rect(0, 0, gfx_w, gfx_h);
-
-// ---- status line: the target moves with its automation lane ----
-gfx_r = gfx_g = gfx_b = 0.85;
-gfx_x = 8; gfx_y = g_y_top;
-gfx_printf("Target %5.1f dB    Amount %d %%", slider1, slider10);
-L > 0 ? gfx_printf("    Lookahead %d ms", slider11);
-gfx_r = gfx_g = gfx_b = 0.45;
-gfx_x = gfx_w - 34; gfx_y = g_y_top; gfx_drawstr("v2.3");
-
-// ---- input level bar ----
-gfx_r = 0.16; gfx_g = 0.17; gfx_b = 0.20;
-gfx_rect(g_bar_x, g_y_in, g_bar_w, g_bar_h);
-gfx_r = 0.30; gfx_g = 0.62; gfx_b = 0.90;
-gfx_rect(g_bar_x, g_y_in, g_db2x(voc_db) - g_bar_x, g_bar_h);
-
-// noise floor tick (grey) and target tick (yellow)
-gfx_r = gfx_g = gfx_b = 0.45;
-gfx_rect(g_db2x(slider4), g_y_in - 4, 1, g_bar_h + 8);
-gfx_r = 1; gfx_g = 0.85; gfx_b = 0.30;
-gfx_rect(g_db2x(slider1), g_y_in - 4, 2, g_bar_h + 8);
-
-gfx_r = gfx_g = gfx_b = 0.85;
-gfx_x = 8; gfx_y = g_y_in + 4; gfx_drawstr("IN");
-gfx_x = g_bar_x + g_bar_w + 8; gfx_y = g_y_in + 4; gfx_printf("%5.1f dB", max(voc_db, g_db_lo));
-
-gfx_r = gfx_g = gfx_b = 0.5;
-gfx_x = g_bar_x; gfx_y = g_y_in + g_bar_h + 4; gfx_printf("%d", g_db_lo);
-gfx_x = g_bar_x + g_bar_w - 8; gfx_y = g_y_in + g_bar_h + 4; gfx_drawstr("0");
-
-// ---- ride gain bar: left half spans Max cut, right half Max boost ----
-g_cx = g_bar_x + g_bar_w * 0.5;
-g_half = g_bar_w * 0.5;
-gfx_r = 0.16; gfx_g = 0.17; gfx_b = 0.20;
-gfx_rect(g_bar_x, g_y_ride, g_bar_w, g_bar_h);
-
-g_ext = gain_db >= 0 ? (slider2 > 0 ? gain_db / slider2 * g_half : 0)
-                     : (slider9 > 0 ? gain_db / slider9 * g_half : 0);
-g_ext = min(max(g_ext, -g_half), g_half);
-gated ? ( gfx_r = 0.35; gfx_g = 0.35; gfx_b = 0.38; )          // dim while holding
-: g_ext >= 0 ? ( gfx_r = 0.35; gfx_g = 0.80; gfx_b = 0.40; )   // boosting
-: ( gfx_r = 0.95; gfx_g = 0.55; gfx_b = 0.30; );               // cutting
-g_ext >= 0 ? gfx_rect(g_cx, g_y_ride, g_ext, g_bar_h)
-           : gfx_rect(g_cx + g_ext, g_y_ride, -g_ext, g_bar_h);
-
-gfx_r = gfx_g = gfx_b = 0.7;
-gfx_rect(g_cx, g_y_ride - 4, 1, g_bar_h + 8);
-
-gfx_r = gfx_g = gfx_b = 0.85;
-gfx_x = 8; gfx_y = g_y_ride + 4; gfx_drawstr(gated ? "HOLD" : "RIDE");
-bs > 0.5 ? (
-  gfx_r = 0.55; gfx_g = 0.75; gfx_b = 1;
-  gfx_x = g_bar_x + 4; gfx_y = g_y_ride - 18; gfx_drawstr("BREATH");
+// ---- display history (UI only: nothing below feeds the audio) ----
+// The same detector as voc_db, run on the delayed input, is voc_db delayed by
+// exactly L samples.
+d_e = max(d_x0*d_x0, d_x1*d_x1);
+d_rms += k_v * (d_e - d_rms);
+d_tgt = slider1 + slider5 * min(max((sc_db - slider1) / 12, 0), 1);
+d_gate_now = BUF_G[rp];
+d_pkacc = max(d_pkacc, d_e);
+d_rmacc = max(d_rmacc, d_rms);
+d_hacc = max(d_hacc, d_gate_now);
+d_bacc = max(d_bacc, bs);
+d_n += 1;
+d_n >= d_spc ? (
+  d_in_db = 10 * log(d_rmacc + EPS) / LOG10;
+  d_out_db = d_in_db + gain_out + slider8;
+  H_PK[d_col]   = 10 * log(d_pkacc + EPS) / LOG10;
+  H_RMS[d_col]  = d_in_db;
+  H_TGT[d_col]  = d_tgt;
+  H_SC[d_col]   = sc_db;
+  H_GAIN[d_col] = gain_out;
+  H_HOLD[d_col] = d_hacc;
+  H_BR[d_col]   = d_bacc;
+  // after the write, d_col is the oldest column: @gfx draws from there
+  d_col = (d_col + 1) & (HCOLS - 1);
+  d_n = 0;
+  d_pkacc = d_rmacc = d_hacc = d_bacc = 0;
 );
-gfx_x = g_bar_x + g_bar_w + 8; gfx_y = g_y_ride + 4; gfx_printf("%+5.1f dB", gain_db);
 
-gfx_r = gfx_g = gfx_b = 0.5;
-gfx_x = g_bar_x; gfx_y = g_y_ride + g_bar_h + 4; gfx_printf("-%.1f", slider9);
-gfx_x = g_bar_x + g_bar_w - 24; gfx_y = g_y_ride + g_bar_h + 4; gfx_printf("+%.1f", slider2);
+// The size REAPER opens the FX window at, and the only way to set it: a JSFX
+// cannot resize its own window. Keep UI_W/UI_H in step. Equivalent sizes:
+//   100%  786 576     125%  983 720     150% 1179 864     200% 1572 1152
+@gfx 786 576
+gk_begin();
+g_chg = 0;
+
+// Take the scale from the shared global, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
+// gk_begin set gk_S from gfx_ext_retina (1 or 2). Fixed percentages are taken
+// relative to that, so 100% stays pixel-exact on HiDPI; Fit divides the
+// physical window by the design size.
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret * g_sc : min(gfx_w / UI_W, gfx_h / UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(3, gk_font, 9*gk_S);
+gfx_setfont(1);
+
+// ---------------------------------------------------------------- header
+gk_header(0, 10, 10, UI_W - 20, 22, "VOCAL RIDER", -1, 0);
+// Pinned to the right edge of what is actually visible, so a scale too large
+// for the window cannot push these out of reach.
+g_r = min(UI_W - 20, gfx_w/gk_S - 10);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = (g_r - 120) * gk_S; gfx_y = 10 * gk_S;
+gfx_drawstr("v2.4", 4, (g_r - 90) * gk_S, 32 * gk_S);
+g_i = gk_dropdown(40, g_r - 86, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
+);
+// Freeze the controls underneath while the help is open, keeping the two
+// header controls live so it can be closed again.
+help_open ? gk_help_input(40, 41);
+
+// ---------------------------------------------------------------- display
+gk_nine(gk_img_wave_frame, 16, 8, 10, 40, UI_W - 20, 204);
+gk_wave_geom(10, 40, UI_W - 20, 204);      // inner plot, device px: gk_wv_ix/iy/iw/ih
+g_dpr = gk_S;
+g_ix = gk_wv_ix; g_iy = gk_wv_iy; g_iw = gk_wv_iw; g_ih = gk_wv_ih;
+g_wb  = g_iy + (WAVE_H - 1) * g_dpr;         // level plot baseline (DB_FLOOR)
+g_wsp = (WAVE_H - 6) * g_dpr;                // DB_FLOOR .. 0 dB
+g_gy0 = g_iy + (WAVE_H + 4) * g_dpr;         // gain lane
+g_gh  = g_ih - (WAVE_H + 4) * g_dpr;
+g_gcy = g_gy0 + g_gh * 0.5;
+g_ghalf = g_gh * 0.5 - 3 * g_dpr;
+// The gain scale steps (6 / 12 / 24 dB) rather than following the limits
+// exactly, so moving Max boost or Max cut does not redraw the same gain at a
+// different height on every tick.
+g_gmax = max(slider2, slider9);
+g_gmax = g_gmax <= 6 ? 6 : g_gmax <= 12 ? 12 : 24;
+
+// grid: dB lines in the level plot, 0 and +-half in the gain lane
+gfx_set(1, 1, 1, 0.05);
+g_db = -12;
+loop(4, g_y = g_ydb(g_db); gfx_line(g_ix, g_y, g_ix + g_iw, g_y); g_db -= 12;);
+gfx_set(0, 0, 0, 0.45);
+gfx_rect(g_ix, g_gy0 - 3 * g_dpr, g_iw, max(1, g_dpr));
+gfx_set(1, 1, 1, 0.05);
+g_y = g_ygain(g_gmax * 0.5); gfx_line(g_ix, g_y, g_ix + g_iw, g_y);
+g_y = g_ygain(-g_gmax * 0.5); gfx_line(g_ix, g_y, g_ix + g_iw, g_y);
+gfx_set(1, 1, 1, 0.16);
+gfx_line(g_ix, g_gcy, g_ix + g_iw, g_gcy);
+
+// One device pixel per step; several history columns fold into one pixel
+// when the plot is narrower than the history (levels take the max, lines the
+// last value). The oldest column is at the left.
+g_iwi = floor(g_iw);
+g_px = 0;
+g_ptg = g_psc = g_pgn = -1;
+loop(g_iwi,
+  g_c0 = floor(g_px * HCOLS / g_iwi);
+  g_c1 = max(g_c0 + 1, floor((g_px + 1) * HCOLS / g_iwi));
+  g_pkv = g_rmv = NO_DATA; g_hv = g_bv = 0;
+  g_c = g_c0;
+  while (g_c < g_c1) (
+    g_k = (d_col + g_c) & (HCOLS - 1);
+    g_pkv = max(g_pkv, H_PK[g_k]);
+    g_rmv = max(g_rmv, H_RMS[g_k]);
+    g_hv = max(g_hv, H_HOLD[g_k]);
+    g_bv = max(g_bv, H_BR[g_k]);
+    g_c += 1;
+  );
+  g_tg = H_TGT[g_k]; g_scv = H_SC[g_k]; g_gn = H_GAIN[g_k];
+  g_colx = g_ix + g_px;
+  g_fade = 0.45 + 0.55 * g_px / g_iwi;
+
+  g_pkv > NO_DATA ? (
+    // HOLD band and breath tint behind everything
+    g_hv > 0.5 ? (
+      gfx_set(1, 1, 1, 0.055);
+      gfx_rect(g_colx, g_iy, 1, WAVE_H * g_dpr);
+      gfx_rect(g_colx, g_gy0, 1, g_gh);
+    );
+    g_bv > 0.5 ? (
+      gfx_set(0.55, 0.75, 1, 0.22);
+      gfx_rect(g_colx, g_iy, 1, WAVE_H * g_dpr);
+    );
+    // input level: peak (dim) with the detector level (bright) in front
+    g_y = g_ydb(g_pkv);
+    gfx_set(0.149, 0.784, 0.902, 0.6 * g_fade);
+    gfx_rect(g_colx, g_y, 1, g_wb - g_y + 1);
+    g_y = g_ydb(g_rmv);
+    gfx_set(0.62, 0.93, 0.98, 0.9 * g_fade);
+    gfx_rect(g_colx, g_y, 1, g_wb - g_y + 1);
+
+    // sidechain (dim) and effective target (yellow), joined to the last pixel
+    g_y = g_ydb(g_scv);
+    g_psc >= 0 ? ( gfx_set(0.78, 0.78, 0.82, 0.38); gfx_line(g_colx - 1, g_psc, g_colx, g_y); );
+    g_psc = g_y;
+    g_y = g_ydb(g_tg);
+    g_ptg >= 0 ? (
+      gfx_set(1, 0.85, 0.30, 1);
+      gfx_line(g_colx - 1, g_ptg, g_colx, g_y);
+      g_dpr > 1.25 ? gfx_line(g_colx - 1, g_ptg + 1, g_colx, g_y + 1);
+    );
+    g_ptg = g_y;
+
+    // gain lane: fill from 0 dB, orange while riding, grey while held
+    g_y = g_ygain(g_gn);
+    g_hv > 0.5 ? gfx_set(0.47, 0.48, 0.50, 0.35) : gfx_set(0.941, 0.588, 0.157, 0.42);
+    gfx_rect(g_colx, min(g_y, g_gcy), 1, abs(g_y - g_gcy) + 1);
+    g_pgn >= 0 ? (
+      g_hv > 0.5 ? gfx_set(0.62, 0.63, 0.66, 1) : gfx_set(0.941, 0.588, 0.157, 1);
+      gfx_line(g_colx - 1, g_pgn, g_colx, g_y);
+    );
+    g_pgn = g_y;
+  ) : (
+    g_ptg = g_psc = g_pgn = -1;
+  );
+  g_px += 1;
+);
+
+// noise floor, dashed
+gfx_set(0.67, 0.67, 0.71, 0.45);
+g_y = g_ydb(slider4);
+g_x = g_ix;
+while (g_x < g_ix + g_iw) (
+  gfx_line(g_x, g_y, min(g_x + 4 * g_dpr, g_ix + g_iw) - 1, g_y);
+  g_x += 8 * g_dpr;
+);
+
+// "now": newest column at the right edge
+gfx_set(0.149, 0.784, 0.902, 1);
+gfx_rect(g_ix + g_iw - max(1, g_dpr), g_iy, max(1, g_dpr), g_ih);
+
+// scale labels and legend
+gfx_setfont(3);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+g_db = -12;
+loop(4,
+  gfx_x = g_ix + 4 * g_dpr; gfx_y = g_ydb(g_db) - 11 * g_dpr;
+  gfx_printf("%d", g_db);
+  g_db -= 12;
+);
+gfx_x = g_ix + 4 * g_dpr; gfx_y = g_gy0 + 1 * g_dpr;   gfx_printf("+%d", g_gmax);
+gfx_x = g_ix + 4 * g_dpr; gfx_y = g_gy0 + g_gh - 11 * g_dpr; gfx_printf("-%d", g_gmax);
+gfx_x = g_ix + 30 * g_dpr; gfx_y = g_gy0 + 1 * g_dpr;  gfx_drawstr("GAIN");
+
+g_x = g_ix + g_iw - 204 * g_dpr; g_y = g_iy + 7 * g_dpr;
+gfx_set(1, 0.85, 0.30, 1);       gfx_line(g_x, g_y, g_x + 11 * g_dpr, g_y);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = g_x + 14 * g_dpr; gfx_y = g_y - 5 * g_dpr; gfx_drawstr("Target");
+g_x = gfx_x + 10 * g_dpr;
+gfx_set(0.78, 0.78, 0.82, 1);    gfx_line(g_x, g_y, g_x + 11 * g_dpr, g_y);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = g_x + 14 * g_dpr; gfx_y = g_y - 5 * g_dpr; gfx_drawstr("Sidechain");
+g_x = gfx_x + 10 * g_dpr;
+gfx_set(0.67, 0.67, 0.71, 1);
+gfx_line(g_x, g_y, g_x + 4 * g_dpr, g_y); gfx_line(g_x + 7 * g_dpr, g_y, g_x + 11 * g_dpr, g_y);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = g_x + 14 * g_dpr; gfx_y = g_y - 5 * g_dpr; gfx_drawstr("Noise floor");
+gfx_setfont(1);
+
+// ---------------------------------------------------------------- readouts
+// In and Out are on the output timeline (after Lookahead), like the display.
+g_label(12, RY, "Target");
+sprintf(#g_s, "%.1f dB", d_tgt);                     gk_field(50, RY, 64, RH, #g_s);
+g_label(124, RY, "Gain");
+sprintf(#g_s, "%+.1f dB", gain_out);                 gk_field(152, RY, 64, RH, #g_s);
+g_label(226, RY, "In");
+d_in_db > -120 ? sprintf(#g_s, "%.1f dB", d_in_db) : strcpy(#g_s, "-inf");
+gk_field(242, RY, 64, RH, #g_s);
+g_label(316, RY, "Out");
+d_in_db > -120 ? sprintf(#g_s, "%.1f dB", d_out_db) : strcpy(#g_s, "-inf");
+gk_field(338, RY, 64, RH, #g_s);
+g_label(412, RY, "SC");
+sc_db > -120 ? sprintf(#g_s, "%.1f dB", sc_db) : strcpy(#g_s, "-inf");
+gk_field(430, RY, 64, RH, #g_s);
+
+g_chip(506, 40, "RIDE", d_gate_now < 0.5, 0.941, 0.588, 0.157);
+g_chip(550, 40, "HOLD", d_gate_now >= 0.5, 0.67, 0.68, 0.71);
+g_chip(594, 52, "BREATH", bs > 0.5, 0.55, 0.75, 1);
+
+g_label(UI_W - 126, RY, "History");
+sprintf(#g_hs, "%d s", 4 * 2^g_hist_idx);
+g_i = gk_dropdown(42, UI_W - 82, RY + 1, 72, 16, g_hist_idx, "4 s|8 s|16 s|32 s", #g_hs);
+g_hist_idx = g_i;
+
+// ---------------------------------------------------------------- panels
+// Columns are COL px wide in every panel; a 64 px knob sits centred in its
+// column, its label 66 px below its top and its value field 80 px below.
+gk_panel(10, PY, 2*COL, PH);  gk_header(0, 10, PY, 2*COL, 22, "DETECTION", -1, 0);
+gk_panel(204, PY, 3*COL, PH); gk_header(0, 204, PY, 3*COL, 22, "RIDE", -1, 0);
+gk_panel(490, PY, COL, PH);   gk_header(0, 490, PY, COL, 22, "BREATH", -1, 0);
+gk_panel(592, PY, 2*COL, PH); gk_header(0, 592, PY, 2*COL, 22, "SIDECHAIN & OUTPUT", -1, 0);
+
+// DETECTION (cyan)
+gk_ac_r = 0.149; gk_ac_g = 0.784; gk_ac_b = 0.902;
+g_x = 10 + 14;
+g_chg |= gk_knob_slider(10, 0, g_x, ROW0, 64, 6, 5, 500, 50);
+gk_text_c(g_x + 32, ROW0 + 66, "Vocal window", 1);
+sprintf(#g_s, "%d ms", slider6);
+g_chg |= gk_field_edit_slider(50, g_x + 2, ROW0 + 80, 60, 16, 6, 5, 500, 50, #g_s);
+g_chg |= gk_knob_slider(11, 0, g_x + COL, ROW0, 64, 4, -80, -20, -50);
+gk_text_c(g_x + COL + 32, ROW0 + 66, "Noise floor", 1);
+sprintf(#g_s, "%.1f dB", slider4);
+g_chg |= gk_field_edit_slider(51, g_x + COL + 2, ROW0 + 80, 60, 16, 4, -80, -20, -50, #g_s);
+g_chg |= gk_knob_slider(12, 0, g_x, ROW1, 64, 11, 0, 500, 0);
+gk_text_c(g_x + 32, ROW1 + 66, "Lookahead", 1);
+sprintf(#g_s, "%d ms", slider11);
+g_chg |= gk_field_edit_slider(52, g_x + 2, ROW1 + 80, 60, 16, 11, 0, 500, 0, #g_s);
+
+// RIDE (orange)
+gk_ac_r = 0.941; gk_ac_g = 0.588; gk_ac_b = 0.157;
+g_x = 204 + 14;
+g_chg |= gk_knob_slider(13, 1, g_x, ROW0, 64, 1, -40, 0, -18);
+gk_text_c(g_x + 32, ROW0 + 66, "Target", 1);
+sprintf(#g_s, "%.1f dB", slider1);
+g_chg |= gk_field_edit_slider(53, g_x + 2, ROW0 + 80, 60, 16, 1, -40, 0, -18, #g_s);
+g_chg |= gk_knob_slider(14, 1, g_x + COL, ROW0, 64, 10, 0, 100, 100);
+gk_text_c(g_x + COL + 32, ROW0 + 66, "Amount", 1);
+sprintf(#g_s, "%d %%", slider10);
+g_chg |= gk_field_edit_slider(54, g_x + COL + 2, ROW0 + 80, 60, 16, 10, 0, 100, 100, #g_s);
+g_chg |= gk_knob_slider(15, 1, g_x + 2*COL, ROW0, 64, 3, 20, 2000, 300);
+gk_text_c(g_x + 2*COL + 32, ROW0 + 66, "Speed", 1);
+sprintf(#g_s, "%d ms", slider3);
+g_chg |= gk_field_edit_slider(55, g_x + 2*COL + 2, ROW0 + 80, 60, 16, 3, 20, 2000, 300, #g_s);
+g_chg |= gk_knob_slider(16, 1, g_x, ROW1, 64, 2, 0, 24, 6);
+gk_text_c(g_x + 32, ROW1 + 66, "Max boost", 1);
+sprintf(#g_s, "+%.1f dB", slider2);
+g_chg |= gk_field_edit_slider(56, g_x + 2, ROW1 + 80, 60, 16, 2, 0, 24, 6, #g_s);
+g_chg |= gk_knob_slider(17, 1, g_x + COL, ROW1, 64, 9, 0, 24, 6);
+gk_text_c(g_x + COL + 32, ROW1 + 66, "Max cut", 1);
+// Max cut shows as a negative number but the slider holds its size. The
+// field works on the shown value, so typing "-6" or "6" both mean 6 dB of
+// cut; a drag cannot cross 0.
+sprintf(#g_s, "-%.1f dB", slider9);
+g_v = gk_field_edit(57, g_x + COL + 2, ROW1 + 80, 60, 16, -slider9, -24, 24, -6, #g_s);
+g_v = (gk_active == 57 && (mouse_cap & 1)) ? max(-g_v, 0) : min(abs(g_v), 24);
+g_v != slider9 ? ( slider9 = g_v; slider_automate(slider9); g_chg = 1; );
+g_chg |= gk_knob_slider(18, 1, g_x + 2*COL, ROW1, 64, 14, 0, 100, 100);
+gk_text_c(g_x + 2*COL + 32, ROW1 + 66, "Tail lift", 1);
+sprintf(#g_s, "%d %%", slider14);
+g_chg |= gk_field_edit_slider(58, g_x + 2*COL + 2, ROW1 + 80, 60, 16, 14, 0, 100, 100, #g_s);
+
+// BREATH (green): threshold on top, guard mode below
+gk_ac_r = 0.25; gk_ac_g = 0.80; gk_ac_b = 0.40;
+g_x = 490 + 14;
+g_chg |= gk_knob_slider(19, 2, g_x, ROW0, 64, 13, -20, 10, -8);
+gk_text_c(g_x + 32, ROW0 + 66, "Threshold", 1);
+sprintf(#g_s, "%.1f dB", slider13);
+g_chg |= gk_field_edit_slider(59, g_x + 2, ROW0 + 80, 60, 16, 13, -20, 10, -8, #g_s);
+g_i = floor(slider12 + 0.5);
+g_v = gk_dropdown(30, g_x - 2, ROW1 + 23, 68, 18, g_i, "Off|Freeze|No boost",
+      g_i == 0 ? "Off" : g_i == 1 ? "Freeze" : "No boost");
+g_v != g_i ? ( slider12 = g_v; slider_automate(slider12); g_chg = 1; );
+gk_text_c(g_x + 32, ROW1 + 66, "Guard", 1);
+
+// SIDECHAIN & OUTPUT (yellow)
+gk_ac_r = 0.941; gk_ac_g = 0.784; gk_ac_b = 0.235;
+g_x = 592 + 14;
+g_chg |= gk_knob_slider(20, 3, g_x, ROW0, 64, 5, 0, 6, 0);
+gk_text_c(g_x + 32, ROW0 + 66, "Influence", 1);
+sprintf(#g_s, "%.1f dB", slider5);
+g_chg |= gk_field_edit_slider(60, g_x + 2, ROW0 + 80, 60, 16, 5, 0, 6, 0, #g_s);
+g_chg |= gk_knob_slider(21, 3, g_x + COL, ROW0, 64, 7, 5, 1000, 200);
+gk_text_c(g_x + COL + 32, ROW0 + 66, "SC window", 1);
+sprintf(#g_s, "%d ms", slider7);
+g_chg |= gk_field_edit_slider(61, g_x + COL + 2, ROW0 + 80, 60, 16, 7, 5, 1000, 200, #g_s);
+g_chg |= gk_knob_slider(22, 4, g_x, ROW1, 64, 8, -12, 12, 0);
+gk_text_c(g_x + 32, ROW1 + 66, "Trim", 1);
+sprintf(#g_s, "%+.1f dB", slider8);
+g_chg |= gk_field_edit_slider(62, g_x + 2, ROW1 + 80, 60, 16, 8, -12, 12, 0, #g_s);
+
+help_open ? gk_help_draw(10, 40, UI_W - 20, UI_H - 64, "Help  -  Vocal Rider", HELP_BASE, help_lines);
+
+// Wordmark, bottom right, its right edge on the panels' 10 px margin.
+gk_strip(11, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = count_missing_images(IMG_COUNT);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 180*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+// A widget wrote a slider: slider_automate does not re-run @slider, so apply
+// it here (recalc is safe to call from this thread, see the top of the file).
+g_chg ? recalc();
+gk_end();
+
+@serialize
+// GUI-only state, so it is serialised rather than made a slider. Append-only:
+// a new value goes AFTER these or every project saved with the old order reads
+// back wrong. Stored as index + 1 so that 0 (nothing saved, a project from
+// before 2.4) keeps the defaults.
+s_scale = gui_scale_idx + 1;
+s_hist = g_hist_idx + 1;
+file_var(0, s_scale);
+file_var(0, s_hist);
+file_avail(0) >= 0 ? (
+  s_scale >= 1 && s_scale <= 5 ? gui_scale_idx = s_scale - 1;
+  s_hist >= 1 && s_hist <= 4 ? g_hist_idx = s_hist - 1;
+);
