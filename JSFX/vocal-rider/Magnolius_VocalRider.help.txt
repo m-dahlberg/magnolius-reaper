@@ -1,0 +1,132 @@
+VOCAL RIDER
+
+Rides the vocal's gain toward a target level, smoothly, the way an
+engineer rides a fader. It is gentler than a compressor: the result
+sounds like an even performance, not a compressed one. Optionally it
+listens to the music on a sidechain and raises the target when the
+music gets loud.
+
+The Target can be automated. The Loudness Envelope script writes a
+phrase-level Target lane; the rider then only has to bring the vocal
+onto that lane smoothly.
+
+Every knob: drag up/down, Shift drags finely, the wheel nudges and
+Ctrl-click resets. Click a value field to type a number (Enter
+commits, Esc cancels), or drag it like a knob.
+
+
+READING THE DISPLAY
+
+Time runs right to left: the newest audio is at the cyan line on the
+right. Choose 4, 8, 16 or 32 s with History.
+
+Upper plot, in dBFS from -60 at the bottom to 0 at the top:
+  Cyan, dim      peak level of the vocal input
+  Cyan, bright   the vocal's loudness as the rider measures it
+                 (Vocal window). This is what it compares with the
+                 Target.
+  Yellow line    the Target as it really is: the knob or lane, plus
+                 the sidechain push
+  Grey line      the sidechain (music) level
+  Dashed line    the Noise floor
+  Grey band      HOLD: the vocal was under the noise floor, so the
+                 gain was held
+  Blue band      a breath the breath guard caught
+
+GAIN lane, below: the gain the rider applied. Up is a boost, down a
+cut. Orange while riding, grey while held. The scale is +-6, 12 or
+24 dB, whichever covers Max boost and Max cut.
+
+Everything in the display is drawn after Lookahead, so the gain lines
+up with the audio it was applied to.
+
+Readouts: Target (now), Gain (now), In and Out (vocal loudness before
+and after the rider, including Trim) and SC (sidechain loudness).
+RIDE, HOLD and BREATH light up for what the rider is doing now.
+
+
+DETECTION
+
+Vocal window   RMS window of the vocal level detector. Shorter is
+               snappier, longer smoother. Loudness Envelope measures
+               with the same window.
+Noise floor    Below this level the rider stops riding and holds its
+               gain, so a phrase starts where the last one ended. It
+               closes 150 ms after the level has dropped 3 dB under
+               the floor. After 2 s of gap a boost releases toward
+               0 dB, so long pauses do not lift room noise; a cut is
+               held.
+Lookahead      Delays the audio and reports it to REAPER as latency,
+               so the gain moves before a loud word instead of after
+               it. Set and forget: changing it re-syncs the track.
+               0 = no latency. Leave at 0 while tracking.
+
+
+RIDE
+
+Target         The loudness the rider steers the vocal toward.
+               Automate it, or let Loudness Envelope write the lane.
+Amount         How much of the distance to the Target is corrected.
+               100 % lands on it; 50 % goes halfway, so the vocal
+               keeps half of its own phrasing.
+Speed          How quickly the gain moves. Low follows word by word,
+               high phrase by phrase. Cuts react a little faster
+               than boosts, to avoid pumping.
+Max boost      The most the rider may raise the vocal.
+Max cut        The most the rider may lower it. Typing -6 or 6 both
+               give 6 dB of cut.
+Tail lift      How much the rider may raise the gain while the
+               level is falling: the end of a long note, or the
+               softer last words of a phrase. 100 % lifts them like
+               any quiet part, 0 % leaves those fades as sung.
+
+
+BREATH
+
+Threshold      How noise-like a quiet frame must be to count as a
+               breath (energy above 3 kHz minus energy below
+               1.5 kHz, in dB). Lower catches more. Watch the blue
+               bands and the BREATH light while you set it.
+Guard          What happens to a breath. In every mode but Off, a
+               breath gets no say in the gain.
+                 Freeze    the gain stays where it was when the
+                           breath began
+                 No boost  as Freeze, but a breath after a boosted
+                           note is left at 0 dB
+               Neither mode turns a breath down below 0 dB: this is
+               not a de-breather.
+
+
+SIDECHAIN & OUTPUT
+
+Influence      How many dB the Target rises when the music is loud.
+               The full amount applies when the music is 12 dB above
+               the Target. 0 = off.
+SC window      RMS window of the sidechain detector.
+Trim           Fixed gain after the rider.
+
+To feed the sidechain: set the vocal track to 4 channels, send the
+music to it on channels 3/4, and check the plugin's pins map
+Sidechain L/R to 3/4. The sidechain is never heard.
+
+
+RIDING A LOUDNESS ENVELOPE LANE
+
+Amount 100 %, Speed 200-400 ms, Lookahead 100-200 ms for mixing, and
+Max boost / Max cut at least the level difference between the takes
+plus the ride you want.
+
+
+WHEN SOMETHING LOOKS WRONG
+
+Always HOLD         the Noise floor is above the vocal. Lower it
+                    until the cyan body sits above the dashed line.
+Gain pinned at a    Max boost or Max cut is too small for the
+limit               distance to the Target.
+Breaths lifted      set Guard to No boost, or lower Threshold until
+                    the breaths show blue.
+Phrase ends lifted  lower Tail lift.
+Nothing moves       the window is empty: audio is not playing
+                    through the plugin.
+"images failed to   the gui_kit folder is missing next to the
+load" in the header plugin file.

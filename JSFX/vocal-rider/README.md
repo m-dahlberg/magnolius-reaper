@@ -13,18 +13,36 @@ onto it smoothly.
 ## Install
 
 ```bash
-ln -s "$PWD/Magnolius_VocalRider.jsfx" \
-      ~/.config/REAPER/Effects/Magnolius/Magnolius_VocalRider.jsfx
+D=~/.config/REAPER/Effects/Magnolius
+ln -s "$PWD/Magnolius_VocalRider.jsfx"     "$D/"
+ln -s "$PWD/Magnolius_VocalRider.help.txt" "$D/"
+mkdir -p "$D/gui_kit"
+for f in gui_kit/*; do ln -sn "$PWD/$f" "$D/$f"; done   # skips files already there
 ```
 
-Symlink it, never copy it: a copy goes stale silently. Then in REAPER, add FX
-on the vocal track and search **vocal rider** (it is listed under JS). After
-editing the file, reopen the FX (or press Ctrl+S in REAPER's JS editor) to
-reload. The panel shows the version (v2.3) in its top-right corner.
+Symlink, never copy: a copy goes stale silently. The plugin loads its knobs
+and panels from `gui_kit/` and its help page from the `.help.txt`, both next
+to the `.jsfx` as REAPER sees it. If an image is missing, the header says
+*images failed to load*. ReaPack installs all of it.
 
-## Sliders
+Then in REAPER, add FX on the vocal track and search **vocal rider** (it is
+listed under JS). After editing the file, reopen the FX (or press Ctrl+S in
+REAPER's JS editor) to reload. The panel shows the version (v2.4) in its
+header.
 
-| Slider | What it does |
+## Controls
+
+The panel groups the controls as **Detection** (Vocal loudness window, Noise
+floor, Lookahead), **Ride** (Target, Correction amount, Ride speed, Max boost,
+Max cut, Tail lift), **Breath** (Breath threshold, Breath guard) and
+**Sidechain & Output** (Sidechain influence, Sidechain window, Output trim).
+Every knob has a value field under it: click it to type a value, drag it like
+the knob. The sliders are hidden from REAPER's generic list but stay
+automatable under the same names. The **?** button opens a help page, and
+the scale menu next to it (Fit, 100–200 %) is shared by every Magnolius
+plugin.
+
+| Control | What it does |
 |---|---|
 | Target level | The loudness the rider steers the vocal toward. Automate it, or let Loudness Envelope write it. |
 | Max boost | The most the rider may raise the vocal, in dB. (This was *Ride range* before 2.0. An older project keeps its value here.) |
@@ -176,32 +194,49 @@ about 2 dB hot, and now it starts where the last one ended.
 
 The sidechain is analysis-only; it is never mixed into the output.
 
-## Meter
+## Display
 
-- The **top line** shows the current Target (it moves with the lane), the
-  Amount, and the Lookahead when one is set.
-- **IN** shows the vocal input level (blue), with the target (yellow tick) and
-  the noise floor (grey tick).
-- **RIDE** shows the current gain. The left half spans Max cut and the right
-  half spans Max boost. Green right of center is a boost, orange left of center
-  is a cut. While the gate holds, the bar is dimmed grey and the label reads
-  **HOLD**. **BREATH** lights above the bar while the breath guard is
-  holding down the gain.
+A scrolling history, newest at the right. **History** sets its length (4, 8,
+16 or 32 s); the choice is saved with the project, not automatable.
+
+- **Level plot**, in dBFS from −60 at the bottom to 0 at the top. Dim cyan is
+  the vocal input's peak level; bright cyan is its loudness as the detector
+  measures it (Vocal loudness window), which is what the rider compares with
+  the Target. The **yellow line** is the effective Target: the slider or lane
+  plus the sidechain push. The grey line is the sidechain level, the dashed
+  line the Noise floor.
+- **HOLD** shows as a grey band where the gate held the gain, and a **blue
+  band** marks a breath the breath guard caught.
+- **Gain lane**, underneath: the gain applied, from the 0 dB line, orange
+  while riding and grey while held. Its scale is ±6, 12 or 24 dB, the first
+  that covers Max boost and Max cut. It steps rather than following the
+  sliders, so the same gain does not redraw at a new height on every tick.
+- Everything is recorded from the **delayed** signal, so with Lookahead the
+  input, the gain, HOLD and breath line up with the audio leaving the plugin.
+  (The Target and sidechain are recorded as they are at that moment; an
+  automation lane plays on the output timeline anyway.)
+- The **readout row** shows the Target and Gain now, In and Out (the
+  vocal's loudness before and after the rider, Out including Trim), and the
+  sidechain loudness. **RIDE**, **HOLD** and **BREATH** light up for what the
+  rider is doing now.
 
 ## Quick sanity checks by ear
 
 - **Amount at 0 %:** the plugin is transparent; at any Lookahead it only
   delays, and REAPER compensates that.
-- **A held note under the target:** the RIDE bar climbs smoothly to the
-  difference and stops at Max boost.
-- **A pause between phrases:** the label reads HOLD and the bar stays put. The
-  next phrase starts at the same gain.
+- **A held note under the target:** the gain lane climbs smoothly to the
+  difference and stops at Max boost; the bright cyan body settles on the
+  yellow line.
+- **A pause between phrases:** HOLD lights, the display shows a grey band and
+  the gain lane stays put. The next phrase starts at the same gain.
 
 ## Files
 
 | Path | Role |
 |---|---|
 | `Magnolius_VocalRider.jsfx` | The plugin. |
+| `Magnolius_VocalRider.help.txt` | The text of the **?** help page, read at runtime. |
+| `gui_kit/` | The Magnolius GUI kit: `gui_kit.jsfx-inc` and the PNGs this plugin uses. Keep it identical to the other plugins' copies. |
 | `tools/model.py` | Pure-Python reference that mirrors the DSP sample for sample. **Edit together with the .jsfx.** |
 | `tools/render_test.py` | Headless REAPER render tests (`render_test.py`, or named: `render_test.py hold lane_step`). |
 | `tools/render_harness.py`, `tools/wavio.py` | Shared render scaffold. |
@@ -234,4 +269,9 @@ The work dir is `~/.cache/vocal-rider-rendertest` (`VR_WORK` overrides it).
 | `lane_step` | Measures where a Target automation step lands, with and without lookahead (see above). |
 
 The render tests can't check the panel, because @gfx doesn't run in an
-offline render.
+offline render. The display code is still covered indirectly: it runs in
+@sample, and `model` and `lookahead_null` prove it changes nothing in the
+output. For the panel itself, run
+`python3 ~/.claude/skills/jsfx-gui-kit/scripts/check_jsfx.py Magnolius_VocalRider.jsfx`
+(compiles every section and checks every `filename:` path), then look at it
+in REAPER.
