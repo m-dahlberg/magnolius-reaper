@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="5c0acde96325b851e373acd2726dd34e1796df0c">
+<index version="1" name="Magnolius" commit="9acf9372f2c67faab4a3959ac6eda3e5d424cdd3">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -931,6 +931,57 @@ Two-pole gain smoothing, without a kink in the gain at each word.
 Quiet frames (consonants, breaths, tails) move the gain less.
 Optional lookahead, reported to the host as latency.]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/8b7c92780b6d39decbac354563b02bc5258ef43a/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
+      </version>
+      <version name="2.4" author="Magnolius" time="2026-11-05T12:55:34Z">
+        <changelog><![CDATA[New interface. A scrolling display shows the vocal's level in dB with the
+Target (as it really is, lane plus sidechain push), the noise floor, the
+sidechain level and the gain the rider applied, with HOLD and breath
+marked. History is 4, 8, 16 or 32 s. Every parameter is a knob with a
+value field you can type into, and a built-in help page (?) explains
+them. The audio is unchanged from 2.3.
+
+v2.3:
+Tail lift (%): how much the rider may raise the gain while the level is
+falling, at the end of a long note or the softer last words of a phrase.
+100 % (the default) is the same as 2.2. 0 % keeps those fades as sung.
+
+v2.2:
+Breath guard gets a No boost mode: a breath after a boosted note drops
+to 0 dB, and one after a cut is frozen as before. Freeze stays the
+default, and existing projects keep it.
+The guard ramps in over 10 ms, starting 20 ms ahead of the breath.
+
+v2.1:
+Breath guard: breaths get no say in the gain, and the gain is frozen
+through them, so they are no longer boosted. Breath threshold sets how
+noise-like a quiet frame must be to count as a breath.
+The fast-fall rule now scales with the Vocal loudness window. With a long
+window it never fired, and the tail of each phrase pushed the gain up.
+
+v2.0:
+Correction amount (%), and independent Max boost and Max cut. Ride range
+becomes Max boost, and an existing project keeps its value there.
+Holds the gain through gaps, so a phrase no longer swells in from 0 dB;
+the gate has hysteresis and a hold time, and only a boost is released
+after a long pause.
+Two-pole gain smoothing, without a kink in the gain at each word.
+Quiet frames (consonants, breaths, tails) move the gain less.
+Optional lookahead, reported to the host as latency.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/Magnolius_VocalRider.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_green_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/knob_green_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/knob_yellow_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/knob_yellow_bipolar_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_VocalRider.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/320d1ec23e50b94463eee2ff98e9170587fe130f/JSFX/vocal-rider/Magnolius_VocalRider.help.txt</source>
       </version>
     </reapack>
   </category>
