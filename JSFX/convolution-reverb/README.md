@@ -189,9 +189,54 @@ Details worth knowing:
 - Pre-delay changes equal-power crossfade over 512 samples between the old and
   new tap, rather than moving one read pointer (which would pitch-shift the
   tail).
-- Long IRs cost real CPU (up to 512 spectra multiplied per partition at the
-  cap). Offline renders are fine regardless; for live use with very long IRs,
-  REAPER's anticipative FX processing absorbs the per-partition spikes.
+- CPU scales with the loaded IR length, not the cap — see below.
+
+## CPU
+
+Cost is proportional to the number of partitions loaded: every 2048 samples,
+each of the four true-stereo paths multiplies every stored IR partition by the
+matching block of input history, bin by bin, and sums. At the 8.2 s cap that is
+192 partitions × 4 paths × 2048 bins per period.
+
+Up to 1.4 this was `memcpy` + `convolve_c` + an EEL loop adding the product into
+an accumulator, once per partition per path, all of it inside the one sample
+where the input ring wrapped. Profiled on an 8.5 s IR, the EEL add loop alone
+was 78 % of the cost, and the whole step took ~39 ms of every 42.7 ms period:
+**0.91 s of CPU per second of audio**, a full core for one instance, landing on
+whichever audio block held that sample. 1.5 changes three things:
+
+- **Real FFTs.** `fft_real` on the zero-padded real blocks instead of a complex
+  FFT with zero imaginary parts: 2048 bins instead of 4096, half the data.
+- **Bin-major storage, so the MAC is a native dot product.** `HSPEC` stores
+  each bin's partitions contiguously, and the input history (`XHA`/`XHB`) is a
+  mirrored ring so the partitions a sum needs are always one contiguous run.
+  The sum over partitions for one bin is then a single `mem_multiply_sum()`
+  call — two per bin and path, one for the real part and one for the imaginary,
+  thanks to the sign/order arrangement documented at `HSPEC` in `@init`. No
+  copies, no EEL inner loop.
+- **The work is spread across the period.** Every term of a step's output
+  except partition 0 depends only on input that arrived at the previous step,
+  so `rvb_slice()` computes it one bin per sample during the period before. The
+  step itself is left with the partition-0 term and four FFTs: ~1 ms, down
+  from ~39. This does not lower the average, but it is what keeps small audio
+  buffers from dropping out: no single block has to absorb the whole step.
+
+Measured with offline renders on an i7-6700 (s of CPU per s of audio; 1.0 is a
+full core):
+
+| IR | 1.4 | 1.5 | 1.5, modulation at the default 25 % |
+| --- | --- | --- | --- |
+| 8.5 s, 4-ch (capped at 8.2 s) | 0.91 | 0.24 | 0.34 |
+| 5.4 s synthetic hall (`cpu` test) | 0.62 (0.66 modulated) | 0.18 | 0.27 at 100 % |
+
+Output is the same convolution: against 1.4, a modulation-off render nulls to
+float32 precision (maximum difference 1e-13 on a 0.1 RMS signal).
+
+What is left is the dot products themselves, which `mem_multiply_sum` runs at
+about 1.3 ns per multiply-add — a plain scalar loop. The next step down would be
+non-uniform partitions (long FFT blocks for the tail, so the late IR costs a
+fraction of a partition per period); that is a redesign, especially with the
+modulation split, and is not done.
 
 ## Late-tail modulation
 
@@ -225,7 +270,7 @@ possible split points with 83 of them landing on the same one. Instead
 `rvb_split()` builds two small side stores covering just the partitions the
 crossfade touches: `EARLY` holds `ir*(1-w)` and `LATEHD` holds `ir*w`, where `w`
 ramps across a 30 ms crossfade at the detected onset. Past the fade `w` is 1, so
-the late path reads `IRSPEC` — which still holds the whole, unweighted IR. That
+the late path reads `HSPEC` — which still holds the whole, unweighted IR. That
 is what keeps Depth = Off bit-identical: the unmodulated path never learns any
 of this happened. The crossfade is amplitude-complementary rather than
 equal-power, so the two halves sum back to the original exactly and Depth just
@@ -236,9 +281,11 @@ partitions are split into four contiguous groups, each convolved into its own
 accumulator per IR path, and each group's time-domain output then runs through
 its own interpolated delay line that the LFOs move. Delaying the output of a
 linear filter *is* moving its taps, so this is the same physics as the hardware
-— and far cheaper here than rotating the stored IR partitions, which would add
-a second `convolve_c` per late partition per path to a plugin already at 0.58×
-real time on a 5.4 s IR. Measured cost of the whole feature: **+8 %**.
+— and far cheaper here than rotating the stored IR partitions, which would
+double the MAC for every late partition of every path. Measured cost of the
+whole feature: about **+0.08–0.10 s/s** (see [CPU](#cpu)) — the same number of
+multiply-adds split over 18 accumulators instead of 2, 16 more inverse FFTs per
+period, and the per-sample delay lines.
 
 Four groups is what decorrelates the tail; one delay across the whole late
 region would slide it as a block, which is audible as pitch shift. Group phases
@@ -274,6 +321,13 @@ hands the tail over exactly in both directions: going in, `OLAP_L/R` still holds
 the whole IR's overlap, which is the late tail the groups cannot supply yet;
 coming out, the group overlaps fold back into it once every delay has slewed to
 a true zero. Neither direction needs a crossfade.
+
+Because a step's MAC is computed during the period *before* it, a switch is
+decided one period ahead: `mod_run` is the structure the slices are computing
+(and the next step will run), `mod_out` the structure of the step whose block is
+playing now, which is what `@sample` reads out. Switching off, the last
+modulated block plays out with the LFO held, so the delays are still at zero
+when its group tails fold back in.
 
 The random end runs off a seeded Park–Miller LCG rather than EEL2's `rand()`,
 which cannot be seeded — two bounces of the same project have to match.
@@ -311,10 +365,16 @@ modulation tests proper are:
 | `modearly` | The central claim. Rendered as the IR itself (impulse in), everything before the crossfade is bit-identical at depth 0 and depth 100, while everything after it is not — so the test cannot pass on a build where modulation never engaged. |
 | `modlevel` | Level and spectral balance survive. The HF-weighted figure is the one that matters: broadband RMS barely moved when a Lagrange interpolator was costing 2.5 dB above 15 kHz. |
 | `modpan` | A hard-panned source does not move as depth rises. |
-| `modshort` | A 300 ms IR bypasses modulation entirely. |
+| `modshort` | A 300 ms IR bypasses modulation entirely: full depth nulls against no depth. |
 | `modonset` | The override actually moves the split, and the auto split lands where the detector said. |
-| `moddet` | Two identical renders are bit-identical. |
-| `cpu` | Cost per second of audio, unmodulated and modulated, with REAPER's startup differenced out. Fails above 1.0. |
+| `moddet` | Two identical renders match. |
+| `cpu` | Cost per second of audio, unmodulated and modulated, with REAPER's startup differenced out. Fails above 0.5 modulated — the 1.4 engine measured 0.66 here, so this catches a return to it. |
+
+`modshort` and `moddet` allow a difference of 1e-12, not 0. REAPER runs a
+varying amount of audio through the plugin ahead of the render range (6144
+samples on most runs, 14336 on some), which changes the floating-point
+round-off in the ~200 near-silent samples at the start by ~1e-16. 1.4 does
+it too; demanding an exact 0 just made the tests flaky.
 
 One more, `case`, renders nothing: it scans the source for two global
 identifiers that differ only in case. EEL2 identifiers are **case-insensitive**,

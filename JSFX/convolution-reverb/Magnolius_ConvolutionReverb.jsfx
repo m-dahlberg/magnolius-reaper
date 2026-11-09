@@ -1,7 +1,7 @@
 desc:Convolution Reverb (Magnolius)
 // @description Convolution Reverb (Magnolius)
 // @author Magnolius
-// @version 1.4
+// @version 1.5
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @provides
 //   gui_kit/gui_kit.jsfx-inc
@@ -32,51 +32,25 @@ desc:Convolution Reverb (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
-//   Two releases' worth of work: 1.3 was never published, so this carries its
-//   interface as well.
+//   CPU: about a quarter of what 1.4 used, spread evenly instead of in bursts.
 //
-//   NEW INTERFACE, built on the Magnolius GUI kit: knobs and typed value
-//   fields for every parameter, a decay view of the loaded IR with the
-//   pre-delay drawn on it, a built-in help panel and an interface scale. The
-//   IR browser is unchanged. The Reverb IR file slider stays visible in
-//   REAPER's parameter list, since only the host can drive a file slider.
-//   The IR length cap also goes up from 5.5 s to 8.2 s at 48 kHz (128 to 192
-//   partitions), which fits in the memory already reserved and costs no extra
-//   CPU unless you actually load a longer IR.
+//   1.4 spent a full CPU core on an 8 s IR (0.91 s of CPU per second of
+//   audio), and did all of it in one sample out of every 2048, so the audio
+//   block holding that sample had to absorb ~40 ms of work. That is what made
+//   playback stutter. Measured on the same 8.5 s IR, 1.5 runs at 0.24 with
+//   modulation off and 0.34 at the default depth.
 //
-//   Fixes a long-standing bug in the IR browser: the file list ignored the
-//   mouse wheel until a row had been clicked, because the keep-the-selection-
-//   visible clamp ran every frame and undid the scroll on the next one.
+//   Three changes, none of which changes the sound - with modulation off the
+//   output nulls against 1.4 to float32 precision:
+//   - real FFTs instead of complex ones, which halves the data;
+//   - the IR spectra are stored so that the sum over partitions for each
+//     frequency bin is one native dot product, replacing a per-partition copy,
+//     complex multiply and script-level add loop;
+//   - that work is spread evenly across the 2048-sample period instead of
+//     landing in one sample, so the worst single block drops from ~40 ms of
+//     work to ~1 ms.
 //
-//   LATE-TAIL MODULATION. A convolution reverb is a fixed filter, so its tail
-//   is frozen - the same comb structure on every note, which on sustained
-//   material reads as a static, glassy quality that algorithmic hardware does
-//   not have. Three new controls (Depth, Rate, Onset) add slow movement to the
-//   tail ONLY, leaving the early reflections that carry source position and
-//   room identity untouched.
-//
-//   Where "late" begins is measured per IR rather than fixed: an Abel-Huang
-//   echo-density profile finds the mixing time, which runs from ~10 ms in a
-//   small room to 150 ms in a cathedral. It converged on all 134 IRs of the
-//   Samplicity M7 set. The split is made in the IR itself, not on a partition
-//   boundary, so the detection is not quantised to 42.7 ms steps.
-//
-//   Depth at 0 is bit-identical to the unmodulated engine and costs no CPU;
-//   the whole feature costs about 10% with it on. Modulation switches itself
-//   off for IRs under half a second, which also keeps cabinet impulses and
-//   correction curves out of it. It is deterministic, so a project bounces the
-//   same way twice.
-//
-//   Depth ships at a low setting rather than Off, so the improvement is
-//   audible on first load.
-//
-//   Also fixes a pre-delay bug that predates both: the crossfade that hides a
-//   pre-delay change never ran, because EEL2 identifiers are case-insensitive
-//   and the pre_xf countdown was the same variable as the PRE_XF constant. A
-//   pre-delay change moved the read tap outright, pitch-shifting the tail.
-//
-//   The window grows to 958 px wide to fit the modulation panel; the browser
-//   and the decay view take the extra width with it.
+//   Latency (one 2048-sample partition) and memory use are unchanged.
 
 //tags: reverb convolution true-stereo
 // True-stereo convolution reverb. A 4-channel IR WAV (LL,LR,RL,RR — input
@@ -158,20 +132,17 @@ filename:10,Magnolius_ConvolutionReverb.help.txt
 
 @init
 // ---- convolution reverb memory ----
-// Allocated from 65536 upward with a running cursor. Every buffer handed to
-// fft()/ifft()/convolve_c() is exactly CONV_N2 = 8192 words and starts on a
-// multiple of 8192, so no FFT buffer ever crosses a 65536-word boundary
-// (a JSFX FFT requirement). Everything allocated after CSCR is either a
-// multiple of 8192 (the pre-delay rings) or never seen by the FFT, so the
-// alignment of the FFT-visible block above is preserved.
+// Allocated from 65536 upward with a running cursor. The FFT buffers come
+// FIRST: each is exactly CONV_N = 4096 words, so every one of them starts on a
+// multiple of 4096 and none can cross a 65536-word boundary (a JSFX FFT
+// requirement). Everything after them is either a multiple of 4096 words or
+// never handed to an FFT, so nothing later can disturb that alignment.
 CONV_P   = 2048;              // partition size (samples) = reported latency
-CONV_N   = 4096;              // FFT size (complex points), 2*CONV_P
-CONV_N2  = 8192;              // words per spectrum (interleaved re,im)
-// IR cap. Every FFT buffer is CONV_N2 words and starts on a multiple of it,
-// which holds for any integer MAXPARTS, so this is safe to change - but it
-// scales FDL_L/R, IRSPEC and IRRAW together at 65536 words per partition.
-// 192 needs 13.02M of the 16.78M words maxmem asks for. CPU is unaffected:
-// rvb_mac() loops the LOADED partition count, not this.
+CONV_N   = 4096;              // REAL FFT size, 2*CONV_P (zero-padded block)
+NBIN     = CONV_N/2;          // fft_real bins; pair 0 packs DC and Nyquist
+// IR cap. Safe to change: it scales HSPEC, XHA, XHB and IRRAW together at
+// 65536 words per partition. 192 needs 13.0M of the 16.78M words maxmem asks
+// for. CPU is unaffected: the MAC loops the LOADED partition count, not this.
 MAXPARTS = 192;               // IR cap: 192*2048 = 393216 samples (~8.2 s @48k)
 IRRAW_CAP = 8*MAXPARTS*CONV_P; // interleaved load staging (words)
 PRE_N    = 131072;            // pre-delay ring (power of two), 2.7 s @48k
@@ -188,31 +159,52 @@ MAXFLD   = 128;               // IR index: max distinct folders
 IRTXT_CAP = 65536;            // IR index: packed name characters
 SELP_CAP = 1024;              // selected-IR path, packed characters
 
-conv_alloc = 65536;
-FDL_L  = conv_alloc; conv_alloc += MAXPARTS*CONV_N2; // input spectrum history L
-FDL_R  = conv_alloc; conv_alloc += MAXPARTS*CONV_N2; // input spectrum history R
-IRSPEC = conv_alloc; conv_alloc += 4*MAXPARTS*CONV_N2; // IR spectra, path-major LL,LR,RL,RR
-ACC_L  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator L
-ACC_R  = conv_alloc; conv_alloc += CONV_N2; // frequency-domain accumulator R
-CSCR   = conv_alloc; conv_alloc += CONV_N2; // convolve_c scratch
-// ---- late-tail modulation, FFT-visible (sizes are multiples of CONV_N2, so
-// ---- the 8192-alignment argument above carries straight through) ----
-// IRSPEC keeps the WHOLE IR and is what the unmodulated path still reads, so
-// Depth = Off stays bit-identical. The split lives in two small side stores
-// covering only the partitions the crossfade touches: EARLY holds ir*(1-w),
-// LATEHD holds ir*w. Past those partitions w is 1, so the late path reads
-// IRSPEC directly and no third copy of a 6 MB IR is needed.
-// 8 partitions = 341 ms, which covers the 150 ms onset clamp stretched to
-// ~200%; beyond that rvb_split clamps the split point rather than allocate for
-// a case nobody mixes into.
-EARLYP = 8;
-EARLY  = conv_alloc; conv_alloc += EARLYP*4*CONV_N2;
-LATEHD = conv_alloc; conv_alloc += EARLYP*4*CONV_N2;
 // One frequency accumulator per (late group, IR path). The groups are what
 // decorrelate the tail: a single delay across the whole late region slides it
 // as one block, which is the audible-pitch-shift failure mode.
 NGRP   = 4;
-GACC   = conv_alloc; conv_alloc += NGRP*4*CONV_N2;
+// 8 partitions = 341 ms, which covers the 150 ms onset clamp stretched to
+// ~200%; beyond that rvb_split clamps the split point rather than allocate for
+// a case nobody mixes into.
+EARLYP = 8;
+
+conv_alloc = 65536;
+// ---- FFT-visible: CONV_N words each, all first (see above) ----
+CSCR   = conv_alloc; conv_alloc += CONV_N;  // forward-FFT scratch
+CSCR2  = conv_alloc; conv_alloc += CONV_N;  // second scratch (rvb_split)
+// Output spectra. The MAC writes them bin by bin through the partition period
+// and the partition step finishes and inverse-transforms them in place.
+PACC_L = conv_alloc; conv_alloc += CONV_N;  // wet L (or the early half, modulated)
+PACC_R = conv_alloc; conv_alloc += CONV_N;  // wet R
+GPACC  = conv_alloc; conv_alloc += NGRP*4*CONV_N; // per (late group, IR path)
+// ---- spectra, BIN-MAJOR (never handed to an FFT) ----
+// The MAC for one bin is a sum over partitions, so each bin's partitions are
+// stored contiguously and the sum is one native mem_multiply_sum() call. That
+// replaced memcpy + convolve_c + an EEL accumulate loop per partition, which
+// ran a 192-partition IR at ~0.9x real time; see "CPU" in the README.
+// Complex values are pairs, arranged so each half of a complex product is a
+// plain dot product:
+//   HSPEC [path][bin][k]    = (Hre, -Him)
+//   XHA   [chan][bin][slot] = (Xre,  Xim)   . HSPEC -> Re(H*X)
+//   XHB   [chan][bin][slot] = (Xim, -Xre)   . HSPEC -> Im(H*X)
+// Bin 0 holds the packed (DC, Nyquist) pair, both real: HSPEC stores it
+// unflipped, XHA as (DC, 0) and XHB as (0, Nyq), and the same two dot products
+// then yield DC and Nyquist with no special case anywhere.
+// The input history is a MIRRORED ring of 2*MAXPARTS slots - every spectrum is
+// written at slot s and s + MAXPARTS - so the partitions a sum needs are
+// always one contiguous run, whatever the ring position.
+XBSTR  = 4*MAXPARTS;                        // words per (chan, bin) in XHA/XHB
+HSPEC  = conv_alloc; conv_alloc += 4*NBIN*MAXPARTS*2; // IR, path-major LL,LR,RL,RR
+XHA    = conv_alloc; conv_alloc += 2*NBIN*XBSTR;      // input history, arrangement A
+XHB    = conv_alloc; conv_alloc += 2*NBIN*XBSTR;      // input history, arrangement B
+// ---- late-tail modulation side stores (bin-major like HSPEC, EARLYP deep) ----
+// HSPEC keeps the WHOLE IR and is what the unmodulated path still reads, so
+// Depth = Off is the unsplit convolution. The split lives in two small side
+// stores covering only the partitions the crossfade touches: EARLY holds
+// ir*(1-w), LATEHD holds ir*w. Past those partitions w is 1, so the late path
+// reads HSPEC directly and no third copy of the IR is needed.
+EARLY  = conv_alloc; conv_alloc += 4*NBIN*EARLYP*2;
+LATEHD = conv_alloc; conv_alloc += 4*NBIN*EARLYP*2;
 PRE_L  = conv_alloc; conv_alloc += PRE_N;   // wet-path pre-delay rings
 PRE_R  = conv_alloc; conv_alloc += PRE_N;
 OLAP_L = conv_alloc; conv_alloc += CONV_P;  // overlap-add tails
@@ -371,13 +363,16 @@ function sel_index() local(i, r, ok, j) (
 );
 
 // ---- true-stereo convolution reverb (audio thread only — never from @gfx) ----
-// Uniform partitioned FFT convolution. Spectra are kept in fft()'s permuted
-// order throughout: convolve_c is element-wise, so matching permuted order on
-// both operands is fine — only bin ORDER would need fft_permute, not products.
+// Uniform partitioned FFT convolution on real FFTs. Spectra stay in
+// fft_real()'s permuted order throughout: the MAC is element-wise, so matching
+// order on both operands is all it needs - only bin ORDER would need
+// fft_permute, not products.
 
 function rvb_clear_state() (
-  memset(FDL_L, 0, MAXPARTS*CONV_N2);
-  memset(FDL_R, 0, MAXPARTS*CONV_N2);
+  memset(XHA, 0, 2*NBIN*XBSTR);
+  memset(XHB, 0, 2*NBIN*XBSTR);
+  memset(PACC_L, 0, CONV_N); memset(PACC_R, 0, CONV_N);
+  memset(GPACC, 0, NGRP*4*CONV_N);
   memset(OLAP_L, 0, CONV_P); memset(OLAP_R, 0, CONV_P);
   memset(INB_L, 0, CONV_P);  memset(INB_R, 0, CONV_P);
   memset(OUTB_L, 0, CONV_P); memset(OUTB_R, 0, CONV_P);
@@ -388,7 +383,9 @@ function rvb_clear_state() (
   memset(GDLY,  0, NGRP*4*MOD_DN);
   memset(MDLY, 0, NGRP*2); memset(MINC, 0, NGRP*2); memset(MRW, 0, NGRP*2);
   memset(APS, 0, NGRP*4);
-  conv_pos = 0; fdl_pos = 0; pre_w = 0; pre_xf = 0;
+  // fdl_pos is the ring slot of the newest input spectrum; cv_nx is the slot
+  // the NEXT partition step will write, which is what the MAC reads against.
+  conv_pos = 0; fdl_pos = 0; cv_nx = MAXPARTS - 1; pre_w = 0; pre_xf = 0;
   hp_l1 = 0; hp_l2 = 0; hp_r1 = 0; hp_r2 = 0;
   lp_l1 = 0; lp_l2 = 0; lp_r1 = 0; lp_r2 = 0;
   // mod_run goes back to 0 with the buffers it depends on: restarting in the
@@ -397,8 +394,21 @@ function rvb_clear_state() (
   // called mod_sub IS the constant MOD_SUB. Decrementing it zeroed the update
   // interval, ran the LFO every sample and divided by a negative number, and
   // the delays ran off to -5e8 samples. DO NOT reintroduce the name.
-  mod_run = 0; mod_dep_s = 0; mod_ph = 0; mod_ctr = 0; mod_w = 0;
+  mod_run = 0; mod_out = 0; mod_dep_s = 0; mod_ph = 0; mod_ctr = 0; mod_w = 0;
   mod_settled = 1;   // nothing to hand back: the unmodulated path may run
+);
+
+// Store one fft_real() spectrum (src, CONV_N words) as partition k of IR path
+// p in a bin-major store whose depth is hstr partitions (HSPEC: MAXPARTS,
+// EARLY/LATEHD: EARLYP). Layout and sign convention: see HSPEC in @init.
+function cv_scatter(src, dst, hstr, p, k) local(h, b) (
+  h = dst + (p*NBIN*hstr + k)*2;
+  h[0] = src[0]; h[1] = src[1];          // (DC, Nyquist), both real
+  b = 1;
+  loop(NBIN - 1,
+    h[b*hstr*2] = src[2*b]; h[b*hstr*2 + 1] = -src[2*b + 1];
+    b += 1;
+  );
 );
 
 // IR sample for conv path (0=LL,1=LR,2=RL,3=RR) at output frame t, resampled
@@ -661,7 +671,7 @@ function rvb_detect() local(ch, n, nk, nt, v) (
 // Depth Off. Exact summation is worth more here than constant power.
 //
 // Only the partitions the crossfade actually touches get their own copies.
-// Past the fade w is 1, so the late path reads IRSPEC - which still holds the
+// Past the fade w is 1, so the late path reads HSPEC - which still holds the
 // whole, unweighted IR. That is also what keeps Depth = Off bit-identical:
 // the unmodulated path never learns any of this happened.
 MOD_XF_MS = 30;        // crossfade width across the onset
@@ -694,23 +704,25 @@ function rvb_split(out_frames, sc, stretch)
     loop(4,
       k = 0;
       loop(mod_nearly,
-        be = EARLY  + (p*EARLYP + k)*CONV_N2;
-        bl = LATEHD + (p*EARLYP + k)*CONV_N2;
-        memset(be, 0, CONV_N2);
-        memset(bl, 0, CONV_N2);
+        be = CSCR;
+        bl = CSCR2;
+        memset(be, 0, CONV_N);
+        memset(bl, 0, CONV_N);
         n = 0;
         loop(CONV_P,
           t = k*CONV_P + n;
           t < out_frames ? (
             v = ir_samp(p, t) * sc;
             w = t <= a ? 0 : (t >= b ? 1 : (t - a)/(b - a));
-            be[2*n] = v*(1 - w);
-            bl[2*n] = v*w;
+            be[n] = v*(1 - w);
+            bl[n] = v*w;
           );
           n += 1;
         );
-        fft(be, CONV_N);
-        fft(bl, CONV_N);
+        fft_real(be, CONV_N);
+        fft_real(bl, CONV_N);
+        cv_scatter(be, EARLY,  EARLYP, p, k);
+        cv_scatter(bl, LATEHD, EARLYP, p, k);
         k += 1;
       );
       p += 1;
@@ -746,7 +758,7 @@ function rvb_split(out_frames, sc, stretch)
 
 // Resample the staged IR to srate (scaled by the IR length slider),
 // energy-normalize (unity energy per output channel, so a unit-impulse IR at
-// 100% length passes at exactly 0 dB), partition, FFT into IRSPEC.
+// 100% length passes at exactly 0 dB), partition, FFT into HSPEC.
 // No file I/O: an IR length change re-runs only this.
 // NOTHING here clears ir_ready or env_n on the way in. Clearing them meant
 // that for the whole length of a rebuild - which is most of a second - @gfx
@@ -786,22 +798,23 @@ function rvb_build() local(out_frames, e_l, e_r, sc, p, k, t, n, buf, v, stretch
       loop(4,
         k = 0;
         loop(ir_nparts,
-          buf = IRSPEC + (p*MAXPARTS + k)*CONV_N2;
-          memset(buf, 0, CONV_N2);
+          buf = CSCR;
+          memset(buf, 0, CONV_N);
           n = 0;
           loop(CONV_P,
             t = k*CONV_P + n;
-            t < out_frames ? ( buf[2*n] = ir_samp(p, t) * sc; );
+            t < out_frames ? ( buf[n] = ir_samp(p, t) * sc; );
             n += 1;
           );
-          fft(buf, CONV_N);
+          fft_real(buf, CONV_N);
+          cv_scatter(buf, HSPEC, MAXPARTS, p, k);
           k += 1;
         );
         p += 1;
       );
       // Derive the modulation split from the IR that was just built. It reads
       // ir_nparts, so it has to come after the loop above, and it writes only
-      // its own side stores - IRSPEC is left holding the whole IR.
+      // its own side stores - HSPEC is left holding the whole IR.
       rvb_split(out_frames, sc, stretch);
       // publish the finished envelope in one go
       memcpy(ENV, ENVW, ENVN);
@@ -810,6 +823,7 @@ function rvb_build() local(out_frames, e_l, e_r, sc, p, k, t, n, buf, v, stretch
       ir_len_full = lfull;            // >= ir_len_sec; differs only when capped
       ir_nch_disp = ir_nch;
       ir_built_srate = srate;
+      ir_layout = 2;                  // see the @init guard
       // the length THIS build used, so @gfx can scale its preview of a
       // length the user is still dragging. Same idea as ir_built_srate, and
       // not l_rvb_len, which @slider moves the instant the knob does.
@@ -843,63 +857,116 @@ function rvb_load() local(i) (
   rvb_build();
 );
 
-// spectral accumulate: dst += src over one spectrum (unrolled: this is the
-// hot loop — 4 paths x ir_nparts runs per partition period)
-function rvb_acc(dst, src) local(n) (
-  n = 0;
-  loop(CONV_N2*0.125,
-    dst[n]   += src[n];   dst[n+1] += src[n+1];
-    dst[n+2] += src[n+2]; dst[n+3] += src[n+3];
-    dst[n+4] += src[n+4]; dst[n+5] += src[n+5];
-    dst[n+6] += src[n+6]; dst[n+7] += src[n+7];
-    n += 8;
+// ---- the engine: bin-major MAC, spread across the partition period --------
+// The output of a partition step is sum_k H[k]*X[newest - k]. Every term but
+// k = 0 uses input that already arrived at the PREVIOUS step, so it can be
+// computed any time during the period in between. rvb_slice() does exactly
+// that, one bin per sample (NBIN == CONV_P), and the step itself is left with
+// the k = 0 term, two forward and two inverse FFTs. Doing the whole MAC inside
+// the step instead put ~40 ms of work into one sample out of every 2048, so
+// whichever audio block held it had to absorb all of it - at small buffer
+// sizes that is a dropout every 43 ms whatever the average load says.
+
+// Sum over partitions [ka, kb) of path p (store hst, hstr partitions deep)
+// against input channel c, one bin, for the step that will write slot cv_nx.
+// Returns Re and leaves Im in cv_im. An empty range is 0 + 0i.
+function cv_dot(hst, hstr, p, c, b, ka, kb) local(h, xo, n) (
+  n = (kb - ka)*2;
+  n > 0 ? (
+    h = hst + ((p*NBIN + b)*hstr + ka)*2;
+    xo = (c*NBIN + b)*XBSTR + (cv_nx + ka)*2;
+    cv_im = mem_multiply_sum(h, XHB + xo, n);
+    mem_multiply_sum(h, XHA + xo, n);
+  ) : (
+    cv_im = 0;
+    0;
   );
 );
 
-// acc += IR-path spectra (pbase) convolved with input history (fbase)
-function rvb_mac(acc, pbase, fbase) local(k, fs) (
-  k = 0;
-  loop(ir_nparts,
-    fs = fbase + ((fdl_pos + k) % MAXPARTS)*CONV_N2;
-    memcpy(CSCR, pbase + k*CONV_N2, CONV_N2);
-    convolve_c(CSCR, fs, CONV_N);
-    rvb_acc(acc, CSCR);
-    k += 1;
+// FFT one input block into ring slot fdl_pos of channel c: both arrangements,
+// both halves of the mirror.
+function cv_xin(src, c) local(xa, xb, xo, b, re, im) (
+  memset(CSCR, 0, CONV_N);
+  memcpy(CSCR, src, CONV_P);
+  fft_real(CSCR, CONV_N);
+  xa = XHA + c*NBIN*XBSTR + fdl_pos*2;
+  xb = XHB + c*NBIN*XBSTR + fdl_pos*2;
+  xa[0] = CSCR[0]; xa[1] = 0; xb[0] = 0; xb[1] = CSCR[1];
+  xa[2*MAXPARTS] = CSCR[0]; xa[2*MAXPARTS + 1] = 0;
+  xb[2*MAXPARTS] = 0;       xb[2*MAXPARTS + 1] = CSCR[1];
+  b = 1;
+  loop(NBIN - 1,
+    xo = b*XBSTR; re = CSCR[2*b]; im = CSCR[2*b + 1];
+    xa[xo] = re; xa[xo + 1] = im; xb[xo] = im; xb[xo + 1] = -re;
+    xo += 2*MAXPARTS;
+    xa[xo] = re; xa[xo + 1] = im; xb[xo] = im; xb[xo + 1] = -re;
+    b += 1;
   );
 );
 
-// One partition step, run inline in @sample when the input ring wraps:
-// FFT both input blocks into the newest FDL slots, MAC all partitions of the
-// four true-stereo paths into two output spectra, IFFT, overlap-add.
-function rvb_process() local(sl, n) (
-  fdl_pos = fdl_pos > 0 ? fdl_pos - 1 : MAXPARTS - 1;
-  sl = FDL_L + fdl_pos*CONV_N2;
-  memset(sl, 0, CONV_N2);
-  n = 0;
-  loop(CONV_P, sl[2*n] = INB_L[n]; n += 1; );
-  fft(sl, CONV_N);
-  sl = FDL_R + fdl_pos*CONV_N2;
-  memset(sl, 0, CONV_N2);
-  n = 0;
-  loop(CONV_P, sl[2*n] = INB_R[n]; n += 1; );
-  fft(sl, CONV_N);
+// Start of a partition step: the new input blocks go into the slot the slices
+// were computed against.
+function cv_input() (
+  fdl_pos = cv_nx;
+  cv_xin(INB_L, 0);
+  cv_xin(INB_R, 1);
+);
 
-  memset(ACC_L, 0, CONV_N2);
-  memset(ACC_R, 0, CONV_N2);
-  rvb_mac(ACC_L, IRSPEC + 0*MAXPARTS*CONV_N2, FDL_L); // LL: L in -> L out
-  rvb_mac(ACC_L, IRSPEC + 2*MAXPARTS*CONV_N2, FDL_R); // RL: R in -> L out
-  rvb_mac(ACC_R, IRSPEC + 1*MAXPARTS*CONV_N2, FDL_L); // LR: L in -> R out
-  rvb_mac(ACC_R, IRSPEC + 3*MAXPARTS*CONV_N2, FDL_R); // RR: R in -> R out
-  ifft(ACC_L, CONV_N);
-  ifft(ACC_R, CONV_N);
+// End of a partition step: the next one writes the slot before this one.
+function cv_advance() (
+  cv_nx = fdl_pos > 0 ? fdl_pos - 1 : MAXPARTS - 1;
+);
+
+// dst += partition 0 of path p (store hst, hstr deep) times the newest input
+// of channel c, over every bin. The one term rvb_slice cannot precompute.
+function cv_k0(dst, hst, hstr, p, c) local(h, xa, xb, b) (
+  h = hst + p*NBIN*hstr*2;
+  xa = XHA + c*NBIN*XBSTR + fdl_pos*2;
+  xb = XHB + c*NBIN*XBSTR + fdl_pos*2;
+  b = 0;
+  loop(NBIN,
+    dst[2*b]     += h[0]*xa[0] + h[1]*xa[1];
+    dst[2*b + 1] += h[0]*xb[0] + h[1]*xb[1];
+    h += hstr*2; xa += XBSTR; xb += XBSTR;
+    b += 1;
+  );
+);
+
+// Inverse-transform a finished output spectrum in place and overlap-add it:
+// the first CONV_P samples are this period's output (ob), the second CONV_P
+// carry over into the next one (ol). acc is free again afterwards - the
+// slices of the coming period overwrite every bin of it.
+function cv_ola(acc, ob, ol) local(n) (
+  ifft_real(acc, CONV_N);
   n = 0;
   loop(CONV_P,
-    OUTB_L[n] = ACC_L[2*n]*conv_scale + OLAP_L[n];
-    OUTB_R[n] = ACC_R[2*n]*conv_scale + OLAP_R[n];
-    OLAP_L[n] = ACC_L[2*(n+CONV_P)]*conv_scale;
-    OLAP_R[n] = ACC_R[2*(n+CONV_P)]*conv_scale;
+    ob[n] = acc[n]*conv_scale + ol[n];
+    ol[n] = acc[n + CONV_P]*conv_scale;
     n += 1;
   );
+);
+
+// One bin of the NEXT step's k >= 1 terms, unmodulated: all four true-stereo
+// paths into the two output spectra.
+function rvb_slice(b) local(re, im) (
+  re = cv_dot(HSPEC, MAXPARTS, 0, 0, b, 1, ir_nparts); im = cv_im;  // LL: L in -> L out
+  re += cv_dot(HSPEC, MAXPARTS, 2, 1, b, 1, ir_nparts); im += cv_im; // RL: R in -> L out
+  PACC_L[2*b] = re; PACC_L[2*b + 1] = im;
+  re = cv_dot(HSPEC, MAXPARTS, 1, 0, b, 1, ir_nparts); im = cv_im;  // LR: L in -> R out
+  re += cv_dot(HSPEC, MAXPARTS, 3, 1, b, 1, ir_nparts); im += cv_im; // RR: R in -> R out
+  PACC_R[2*b] = re; PACC_R[2*b + 1] = im;
+);
+
+// One partition step, run inline in @sample when the input ring wraps.
+function rvb_process() (
+  cv_input();
+  cv_k0(PACC_L, HSPEC, MAXPARTS, 0, 0);
+  cv_k0(PACC_L, HSPEC, MAXPARTS, 2, 1);
+  cv_k0(PACC_R, HSPEC, MAXPARTS, 1, 0);
+  cv_k0(PACC_R, HSPEC, MAXPARTS, 3, 1);
+  cv_ola(PACC_L, OUTB_L, OLAP_L);
+  cv_ola(PACC_R, OUTB_R, OLAP_R);
+  cv_advance();
 );
 
 // ---- late-tail modulation ------------------------------------------------
@@ -908,8 +975,8 @@ function rvb_process() local(sl, n) (
 // interpolated fractional delay line whose length the LFOs move. Delaying the
 // output of a linear filter IS moving its taps, so this is the same physics as
 // the hardware's moving delay taps - and much cheaper here than rotating the
-// stored IR partitions, which would add a second convolve_c per late partition
-// per path to a plugin already at ~0.57x real time on a 5.4 s IR. It is also
+// stored IR partitions, which would double the MAC for every late partition
+// of every path. It is also
 // smoother: the delay is continuous, so there is no per-block phase step to
 // click on and no quantisation to sound steppy.
 //
@@ -919,17 +986,32 @@ function rvb_process() local(sl, n) (
 // wrong one - it smears the image instead of widening it, and shows up on a
 // mono fold as a wandering phantom centre.
 
-// acc += IR spectra convolved with input history, over partitions [ka, kb).
-// Same inner work as rvb_mac; the range is what lets the early and late halves
-// of the split read out of different stores.
-function rvb_mac_range(acc, pbase, fbase, ka, kb) local(k, fs) (
-  k = ka;
-  while(k < kb) (
-    fs = fbase + ((fdl_pos + k) % MAXPARTS)*CONV_N2;
-    memcpy(CSCR, pbase + k*CONV_N2, CONV_N2);
-    convolve_c(CSCR, fs, CONV_N);
-    rvb_acc(acc, CSCR);
-    k += 1;
+// One bin of the NEXT step's k >= 1 terms in the split structure: the early
+// half into the two output spectra, the late half into one spectrum per
+// (group, path). Same total work as rvb_slice - the partitions are only
+// divided between more accumulators - plus the call overhead of the split.
+function rvb_slice_mod(b) local(re, im, g, p, c, ka, kb, acc) (
+  re = cv_dot(EARLY, EARLYP, 0, 0, b, 1, mod_nearly); im = cv_im;
+  re += cv_dot(EARLY, EARLYP, 2, 1, b, 1, mod_nearly); im += cv_im;
+  PACC_L[2*b] = re; PACC_L[2*b + 1] = im;
+  re = cv_dot(EARLY, EARLYP, 1, 0, b, 1, mod_nearly); im = cv_im;
+  re += cv_dot(EARLY, EARLYP, 3, 1, b, 1, mod_nearly); im += cv_im;
+  PACC_R[2*b] = re; PACC_R[2*b + 1] = im;
+  g = 0;
+  loop(NGRP,
+    ka = max(MODG[g], 1); kb = MODG[g + 1];
+    p = 0;
+    loop(4,
+      // paths 0,1 (LL, LR) are fed by the left input; 2,3 (RL, RR) by the right
+      c = p < 2 ? 0 : 1;
+      // below mod_nearly the late IR lives in LATEHD, from there on in HSPEC
+      re = cv_dot(LATEHD, EARLYP, p, c, b, ka, min(kb, mod_nearly)); im = cv_im;
+      re += cv_dot(HSPEC, MAXPARTS, p, c, b, max(ka, mod_nearly), kb); im += cv_im;
+      acc = GPACC + (g*4 + p)*CONV_N;
+      acc[2*b] = re; acc[2*b + 1] = im;
+      p += 1;
+    );
+    g += 1;
   );
 );
 
@@ -1007,71 +1089,36 @@ function mod_lfo() local(g, s, i, a, sn, rw, v, tgt, mix, amp, base, dmin) (
   ) : ( mod_settled = 0; );
 );
 
-// One partition step in the split structure: early into the existing
-// accumulators, late into one accumulator per (group, path).
-function rvb_process_mod() local(sl, n, g, p, acc, ka, kb, km, ob, ol) (
-  fdl_pos = fdl_pos > 0 ? fdl_pos - 1 : MAXPARTS - 1;
-  sl = FDL_L + fdl_pos*CONV_N2;
-  memset(sl, 0, CONV_N2);
-  n = 0;
-  loop(CONV_P, sl[2*n] = INB_L[n]; n += 1; );
-  fft(sl, CONV_N);
-  sl = FDL_R + fdl_pos*CONV_N2;
-  memset(sl, 0, CONV_N2);
-  n = 0;
-  loop(CONV_P, sl[2*n] = INB_R[n]; n += 1; );
-  fft(sl, CONV_N);
-
-  // ---- early: unmodulated, through the accumulators it always used ----
-  // OLAP_L/R is NOT cleared when the structure switches in. On the first
-  // modulated block it still holds the whole IR's overlap tail from the last
-  // unmodulated block, which is exactly the late tail the groups cannot supply
-  // yet - so the changeover needs no crossfade and loses nothing.
-  memset(ACC_L, 0, CONV_N2);
-  memset(ACC_R, 0, CONV_N2);
-  rvb_mac_range(ACC_L, EARLY + 0*EARLYP*CONV_N2, FDL_L, 0, mod_nearly);
-  rvb_mac_range(ACC_L, EARLY + 2*EARLYP*CONV_N2, FDL_R, 0, mod_nearly);
-  rvb_mac_range(ACC_R, EARLY + 1*EARLYP*CONV_N2, FDL_L, 0, mod_nearly);
-  rvb_mac_range(ACC_R, EARLY + 3*EARLYP*CONV_N2, FDL_R, 0, mod_nearly);
-  ifft(ACC_L, CONV_N);
-  ifft(ACC_R, CONV_N);
-  n = 0;
-  loop(CONV_P,
-    OUTB_L[n] = ACC_L[2*n]*conv_scale + OLAP_L[n];
-    OUTB_R[n] = ACC_R[2*n]*conv_scale + OLAP_R[n];
-    OLAP_L[n] = ACC_L[2*(n+CONV_P)]*conv_scale;
-    OLAP_R[n] = ACC_R[2*(n+CONV_P)]*conv_scale;
-    n += 1;
-  );
-
-  // ---- late: one accumulator, ifft and overlap per (group, path) ----
+// One partition step in the split structure: early into the output spectra
+// it always used, late into one spectrum, inverse FFT and overlap per
+// (group, path).
+// OLAP_L/R is NOT cleared when the structure switches in. On the first
+// modulated step it still holds the whole IR's overlap tail from the last
+// unmodulated one, which is exactly the late tail the groups cannot supply
+// yet - so the changeover needs no crossfade and loses nothing.
+function rvb_process_mod() local(g, p, c, acc) (
+  cv_input();
+  cv_k0(PACC_L, EARLY, EARLYP, 0, 0);
+  cv_k0(PACC_L, EARLY, EARLYP, 2, 1);
+  cv_k0(PACC_R, EARLY, EARLYP, 1, 0);
+  cv_k0(PACC_R, EARLY, EARLYP, 3, 1);
+  cv_ola(PACC_L, OUTB_L, OLAP_L);
+  cv_ola(PACC_R, OUTB_R, OLAP_R);
   g = 0;
   loop(NGRP,
-    ka = MODG[g]; kb = MODG[g+1];
-    km = min(kb, mod_nearly);      // below this the late IR lives in LATEHD
     p = 0;
     loop(4,
-      acc = GACC + (g*4 + p)*CONV_N2;
-      memset(acc, 0, CONV_N2);
-      // paths 0,1 (LL, LR) are fed by the left input; 2,3 (RL, RR) by the right
-      sl = p < 2 ? FDL_L : FDL_R;
-      ka < km ? rvb_mac_range(acc, LATEHD + p*EARLYP*CONV_N2, sl, ka, km);
-      kb > mod_nearly ?
-        rvb_mac_range(acc, IRSPEC + p*MAXPARTS*CONV_N2, sl,
-                      max(ka, mod_nearly), kb);
-      ifft(acc, CONV_N);
-      ob = GOUT  + (g*4 + p)*CONV_P;
-      ol = GOLAP + (g*4 + p)*CONV_P;
-      n = 0;
-      loop(CONV_P,
-        ob[n] = acc[2*n]*conv_scale + ol[n];
-        ol[n] = acc[2*(n+CONV_P)]*conv_scale;
-        n += 1;
-      );
+      c = p < 2 ? 0 : 1;
+      acc = GPACC + (g*4 + p)*CONV_N;
+      // Partition 0 is late only when the onset crossfade starts inside it,
+      // and then its late half is in LATEHD (mod_nearly is always >= 1).
+      MODG[g] == 0 ? cv_k0(acc, LATEHD, EARLYP, p, c);
+      cv_ola(acc, GOUT + (g*4 + p)*CONV_P, GOLAP + (g*4 + p)*CONV_P);
       p += 1;
     );
     g += 1;
   );
+  cv_advance();
 );
 
 // Switching back OUT of the modulated structure: the unmodulated path expects
@@ -1150,9 +1197,10 @@ function biq_design() local(f, w0, cs, sn, alpha, a0, nyq) (
   );
 );
 
-// ifft() needs a 1/N scale; convolve_c adds none (verified by the unity-IR
-// render test — see tools/render_test.py)
-conv_scale = 1/CONV_N;
+// fft_real() output is twice the DFT (single-sided) and ifft_real(fft_real(x))
+// is 2N*x, so a product of two fft_real spectra comes back 4N times too big.
+// Pinned by the unity-IR render test - see tools/render_test.py.
+conv_scale = 0.25/CONV_N;
 rvb_gains();
 l_rvb_wet = rvb_wet; l_rvb_dry = rvb_dry;
 l_rvb_len = rvb_len; l_rvb_mons = rvb_mons;
@@ -1171,7 +1219,12 @@ pre_xf = 0; pre_d_old = pre_d;   // first block starts settled, no crossfade
 // those reruns; if that ever stopped holding, ir_ready would come back 0 and
 // this reloads anyway, so the guard is safe either way.
 ir_from_browser = sel_len > 0 ? ir_from_browser : 0;
-(ir_built_srate != srate || !ir_ready) ? (
+// ir_layout: the spectra in RAM were built for THIS engine. 1.5 changed the
+// layout (bin-major real-FFT spectra instead of complex ones per partition),
+// and an instance upgraded in place keeps 1.4's RAM with ir_ready still set -
+// running the new MAC over the old layout would be loud garbage. Bump the
+// number whenever the stored layout changes again.
+(ir_built_srate != srate || !ir_ready || ir_layout != 2) ? (
   idx_load();
   rvb_load();
   sel_idx = sel_index();
@@ -1378,10 +1431,14 @@ rvb_act ? (
   // wet output, then the 12 dB/oct shaping filters (transposed direct form II)
   // OUTB_L/R carries the whole wet signal unmodulated, or just the EARLY half
   // when the split is running - the late half arrives below, one moving tap
-  // per (group, path).
+  // per (group, path). mod_out, not mod_run: this is about which structure
+  // produced the block being played, see the partition step below.
   wl = OUTB_L[conv_pos]; wr = OUTB_R[conv_pos];
-  mod_run ? (
-    mod_ctr <= 0 ? ( mod_ctr = MOD_SUB; mod_lfo(); );
+  mod_out ? (
+    // No LFO in the last period before the hand-back (mod_run already 0): the
+    // delays were settled at 0 when that was decided and must still be at 0
+    // when the group tails fold back into the unmodulated overlap.
+    mod_ctr <= 0 ? ( mod_ctr = MOD_SUB; mod_run ? mod_lfo(); );
     mod_ctr -= 1;
     // mg/md/mi/mb are audio-thread names; @gfx owns g_* and gk_* and shares no
     // loop counter with this block. DO NOT UNDO - see the threading rule.
@@ -1451,16 +1508,28 @@ rvb_act ? (
 
   spl0 = dry_g * cvdl + wet_g * wl;
   spl1 = dry_g * cvdr + wet_g * wr;
+  // One bin of the next partition step's MAC (see rvb_slice).
+  mod_run ? rvb_slice_mod(conv_pos) : rvb_slice(conv_pos);
   conv_pos += 1;
   conv_pos >= CONV_P ? (
     conv_pos = 0;
-    // The structure only ever changes on a block boundary, and both directions
-    // hand the tail over exactly: on, OLAP_L/R already holds the full overlap
-    // the groups cannot supply yet; off, the group overlaps fold back into it.
-    mod_run != mod_want ? (
-      mod_want ? ( mod_run = 1; ) : ( mod_fold_olap(); mod_run = 0; );
+    // Two structure flags, one period apart, because the MAC for a step is
+    // spread across the period BEFORE it:
+    //   mod_run - the structure the slices are computing, and so the one the
+    //             next step runs;
+    //   mod_out - the structure of the step that produced the block now
+    //             playing, which is what @sample has to read out.
+    // A switch is decided here, AFTER the step, so a whole period of slices
+    // always matches the step that consumes them. Both directions hand the
+    // tail over exactly: on, OLAP_L/R already holds the full overlap the
+    // groups cannot supply yet; off, the group overlaps fold back into it
+    // before the first unmodulated step, once their last block has played.
+    mod_run ? rvb_process_mod() : (
+      mod_out ? mod_fold_olap();
+      rvb_process();
     );
-    mod_run ? rvb_process_mod() : rvb_process();
+    mod_out = mod_run;
+    mod_run = mod_want;
   );
 );
 // no valid IR: samples pass through untouched
