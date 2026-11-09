@@ -578,15 +578,25 @@ def t_modearly():
            "(must be >%.2e)" % (a, early, late, peak * 0.005))
 
 
+# Floor for the "must null" tests. REAPER does not feed the same amount of
+# audio through the plugin ahead of the render range every time (6144 samples
+# on most runs, 14336 on some, measured), and that is enough to change the
+# floating-point round-off. It surfaces only in the ~200 near-silent samples at
+# the start, at ~1e-16, and it happens with the 1.4 engine as well as 1.5, so
+# an exact 0.0 here made these tests flaky without catching anything. A real
+# modulation leak is many orders above this - modearly measures 1.5e-2.
+ROUNDOFF = 1e-12
+
+
 def t_moddet():
-    # Same render twice at full depth: bit-identical, or a bounce does not
-    # match the last bounce. EEL2's rand() cannot be seeded, which is why the
+    # Same render twice at full depth: identical to round-off (see ROUNDOFF),
+    # or a bounce does not match the last bounce. EEL2's rand() cannot be seeded, which is why the
     # random end runs off a Park-Miller LCG seeded from the IR.
     sl = slider_line(ir="test_hall4.wav", wet=0.0, dry=-60.0, mdep=100.0)
     a, _ = render("moddet_a", sl)
     b, _ = render("moddet_b", sl)
     d = max(maxdiff(a[0], b[0]), maxdiff(a[1], b[1]))
-    report("moddet", d == 0.0, "maxdiff between two identical renders = %.2e" % d)
+    report("moddet", d < ROUNDOFF, "maxdiff between two identical renders = %.2e" % d)
 
 
 def hf_rms(x, a, b):
@@ -630,7 +640,7 @@ def t_modshort():
     off, _ = render("modshort_off", slider_line(mdep=0.0, **sl))
     on, _ = render("modshort_on", slider_line(mdep=100.0, **sl))
     d = max(maxdiff(off[0], on[0]), maxdiff(off[1], on[1]))
-    report("modshort", d == 0.0, "300 ms IR, depth 0 vs 100: maxdiff %.2e" % d)
+    report("modshort", d < ROUNDOFF, "300 ms IR, depth 0 vs 100: maxdiff %.2e" % d)
 
 
 def t_modpan():
@@ -771,9 +781,12 @@ def t_cpu():
         if dep == 0.0:
             r = rms(out[0], REG0, REG1)
     over = 100.0 * (cost[100.0] / max(cost[0.0], 1e-9) - 1.0)
-    report("cpu", r > 0.001 and cost[100.0] < 1.0,
+    # 0.5, not 1.0: the 1.5 engine measures ~0.27 modulated here and 1.4's
+    # memcpy + convolve_c + EEL-accumulate MAC measured 0.66, so this is
+    # what catches a slide back to that, with margin for a slower machine.
+    report("cpu", r > 0.001 and cost[100.0] < 0.5,
            "5.4s IR: %.3f s/s unmodulated, %.3f s/s modulated (%+.0f%%, "
-           "must stay <1.0), wet rms=%.4f"
+           "must stay <0.5), wet rms=%.4f"
            % (cost[0.0], cost[100.0], over, r))
 
 
