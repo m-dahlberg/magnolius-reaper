@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="9acf9372f2c67faab4a3959ac6eda3e5d424cdd3">
+<index version="1" name="Magnolius" commit="9d0ebfed6ebd5d991dd696ab39918973cf21eaec">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -311,6 +311,40 @@ and the decay view take the extra width with it.]]></changelog>
         <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/b18f23b52f7c8d7a3b8aeecf66703617e2dfcae2/JSFX/convolution-reverb/gui_kit/value_field.png</source>
         <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/b18f23b52f7c8d7a3b8aeecf66703617e2dfcae2/JSFX/convolution-reverb/gui_kit/wave_frame_9slice.png</source>
         <source file="Magnolius_ConvolutionReverb.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/b18f23b52f7c8d7a3b8aeecf66703617e2dfcae2/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.help.txt</source>
+      </version>
+      <version name="1.5" author="Magnolius" time="2026-11-09T19:36:23Z">
+        <changelog><![CDATA[CPU: about a quarter of what 1.4 used, spread evenly instead of in bursts.
+
+1.4 spent a full CPU core on an 8 s IR (0.91 s of CPU per second of
+audio), and did all of it in one sample out of every 2048, so the audio
+block holding that sample had to absorb ~40 ms of work. That is what made
+playback stutter. Measured on the same 8.5 s IR, 1.5 runs at 0.24 with
+modulation off and 0.34 at the default depth.
+
+Three changes, none of which changes the sound - with modulation off the
+output nulls against 1.4 to float32 precision:
+- real FFTs instead of complex ones, which halves the data;
+- the IR spectra are stored so that the sum over partitions for each
+  frequency bin is one native dot product, replacing a per-partition copy,
+  complex multiply and script-level add loop;
+- that work is spread evenly across the 2048-sample period instead of
+  landing in one sample, so the worst single block drops from ~40 ms of
+  work to ~1 ms.
+
+Latency (one 2048-sample partition) and memory use are unchanged.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_ConvolutionReverb.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/4ef750c20d562d0cc32a0f911d511c6671b7883d/JSFX/convolution-reverb/Magnolius_ConvolutionReverb.help.txt</source>
       </version>
     </reapack>
   </category>
