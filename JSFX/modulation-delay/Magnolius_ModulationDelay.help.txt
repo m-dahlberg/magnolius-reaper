@@ -1,0 +1,145 @@
+MOD DELAY
+
+A stereo delay with three characters, Digital, BBD and Tape, from one
+engine. The character comes from what happens inside the feedback
+loop: the echo gets darker, thinner and a little more smeared, and the
+colour compounds with every pass. The modulation moves the read
+position inside the loop, so every repeat drifts a little further
+than the one before.
+
+Every knob: drag up/down, Shift drags finely, the wheel nudges and
+Ctrl-click resets. Click a value field to type a number (Enter
+commits, Esc cancels), or drag it like a knob.
+
+
+QUICK START
+
+The defaults are a quarter-note-ish analog echo: 375 ms, BBD, 40 %
+feedback, 30 % mix. Pick Character first. Digital is a clean
+reference, BBD is darker and noisier with a slow clock, Tape adds wow,
+flutter, a head bump and a little warmth. Character sets Time change
+(Digital crossfades, BBD and Tape glide) but nothing is locked, so you
+can still build a bright BBD or a dark digital delay.
+
+For a send, turn Wet only on: it forces 100 % wet without touching
+the Mix value. The wet signal alone is also on output pins 3/4.
+
+
+READING THE DISPLAY
+
+Left, REPEATS: every repeat as a bar, L above R, over 3.2 seconds.
+The first echo is always full level. Later bars fall with Feedback
+and Curve, and turn from cyan to orange: orange repeats have been
+through the loop more often. A bar blurs wider with Mod depth, because the
+modulation compounds with every pass. In Ping-pong the repeats
+alternate between the lanes. With Freeze on they all stay full.
+
+Right, LOOP RESPONSE: what one pass through the loop filters does
+(solid, the first echo) and what four passes do (dashed). In BBD the
+low-pass follows the delay time, and the curve shows where it sits.
+
+
+TIME
+
+  Time          1 ms to 2 s. Greyed while Sync is on; it then shows
+                the synced time. Sync follows tempo changes, including
+                automation, within one block.
+  R offset      Moves the right channel's time by up to +-50 %, for
+                width without ping-pong.
+  Cross         Only in Cross mode: how much of each loop leaks to
+                the other side, 0 to 100 %.
+  Glide         The time change slew, 20 to 500 ms (Glide only).
+  Sync          Off, or 1/1 down to 1/32. Sync type picks straight,
+                dotted or triplet. Synced times stop at 4 seconds.
+  Stereo mode   Stereo: two independent loops. Ping-pong: the input
+                is summed to mono and the repeats alternate sides.
+                Cross: independent loops with a bleed (Cross knob).
+  Time change   Glide: the read position slews, so a time change
+                bends pitch like tape. Crossfade: a second read head
+                fades in over 30 ms with no pitch change. A change
+                that arrives mid-fade waits for it to end.
+
+
+LOOP
+
+The first echo and every repeat after it go through the same chain,
+in a fixed order: filters, saturation, smear. What goes round again
+is that signal times the feedback gain, so the colour compounds with
+every pass: echo 1 has been through the chain once, echo 2 twice.
+
+  Feedback      0 to 110 %. The first echo always plays at full
+                level. Feedback sets the NUMBER of repeats: how
+                many it takes to fall 60 dB (about 3 repeats at
+                10 %, 7.5 at 40 %, 10 at 50 %, 45 at 85 %). Above
+                100 % the loop saturates instead of running away.
+  Curve         The shape of the fall, -100 to +100 %. 0 is the
+                plain feedback: the same drop on every repeat.
+                Positive holds the early repeats up and then drops
+                them faster. Negative drops the first repeats
+                quickly and leaves a long quiet tail. The repeat at
+                the -60 dB point is the same for every curve, so
+                Feedback still sets how long it lasts.
+  HPF / LPF     Thinner and darker. HPF 20 Hz-5 kHz, LPF 200 Hz-
+                20 kHz. Each is exactly off at the end of its range
+                (HPF 20 Hz, LPF 20 kHz). The slope boxes pick 6 or
+                12 dB/oct; 6 compounds more gently over many
+                repeats.
+  Drive         Soft clipping in the loop. At 0 it is clean, but a
+                hard ceiling at about +6 dBFS still holds, so a
+                runaway feedback becomes a sustained wash.
+  Smear         0 to 4 short all-pass stages that blur transients a
+                little more on each pass. It is continuous: 2.5
+                is two full stages and a half-faded third.
+  Freeze        Sets feedback to 100 %, mutes new input into the
+                loop and bypasses the loop filters, so the frozen
+                material holds its tone.
+
+A DC blocker is always on inside the loop (after the saturation).
+
+
+MODULATION
+
+Moves the read position of each delay line, inside the loop.
+
+  Rate          0.05 to 10 Hz.
+  Depth         0 to 10 ms. The panel header shows the resulting
+                peak pitch deviation in cents.
+  Phase         0 to 180 degrees between the left and right LFOs.
+  Shape         Sine, Triangle, or smoothed Random.
+  Depth scaling Fixed: depth in ms. Relative: depth grows with the
+                delay time (depth x time / 250 ms).
+  Wow, Flutter  Tape only (the knobs are grey otherwise). Wow is a
+                slow drift around 0.3-2 Hz, flutter a fast one at
+                6-20 Hz. They add to the main LFO.
+
+Every modulation source is smoothed, so moving a control never steps
+the read position. The read can never get closer to the write than 4
+samples.
+
+
+OUTPUT
+
+Applied to the wet signal after the loop, so these never change how
+the repeats evolve.
+
+  Duck          How far the wet signal is pulled down while the dry
+                input is above Threshold. The wet swells back in the
+                gaps over Release (50 to 1000 ms). Attack is 10 ms.
+  Width         M/S width of the wet signal only, 0 to 150 %.
+  Mix           Equal-power: no level jump at 50 %.
+  Output        +-12 dB trim on everything.
+  Wet only      100 % wet, for sends. The Mix value is untouched.
+  CLEAR         Empties the delay. It also happens when you change
+                Character, start playback, seek, or loop back.
+
+
+IF SOMETHING LOOKS WRONG
+
+  "images failed to load" in the header
+        The gui_kit folder is not beside the plugin. Reinstall.
+  A repeat is missing right after a seek
+        That is the clear on seek: nothing stale is replayed.
+  The delay time does not follow the Time knob
+        Sync is on. Turn Sync off.
+  Wow and Flutter do nothing
+        They are Tape only.

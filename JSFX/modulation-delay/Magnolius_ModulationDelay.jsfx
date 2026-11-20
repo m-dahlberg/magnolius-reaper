@@ -1,0 +1,1093 @@
+desc:Modulation Delay (Magnolius)
+// @description Modulation Delay (Magnolius)
+// @author Magnolius
+// @version 0.2
+// @link GitHub https://github.com/m-dahlberg/magnolius-reaper
+// @provides
+//   gui_kit/gui_kit.jsfx-inc
+//   gui_kit/*.png
+//   Magnolius_ModulationDelay.help.txt
+// @about
+//   A stereo modulation delay with three characters, Digital, BBD and Tape,
+//   from one delay engine. The character comes from what happens inside the
+//   feedback loop, not from the delay line: every repeat gets darker, thinner
+//   and a little more smeared, and the modulation moves the read position
+//   inside the loop, so each repeat drifts a little further than the last.
+//
+//   Licensed GPL-3.0-or-later.
+// @changelog
+//   v0.2.1:
+//   Removed the "ms per repeat" text from the repeat map and the legend and
+//   BBD note from the loop response.
+//
+//   v0.2:
+//   The first echo now goes through the same loop chain (filters, drive,
+//   smear) and the colour compounds from there. Decay curve: Feedback sets
+//   how many repeats it takes to fall 60 dB, Curve sets the shape of the
+//   fall. Loop HPF now 20 Hz-5 kHz and LPF 200 Hz-20 kHz, each exactly off at
+//   the end of its range. Smear is continuous (a fractional value fades the
+//   next stage in), so its knob moves smoothly.
+//
+//   v0.1:
+//   First version.
+
+//tags: delay modulation echo tape bbd
+
+// ----------------------------------------------------------------------------
+// MAP
+//   Sliders 1-29 are the brief's table in order. 30-32 (loop filter slopes,
+//   decay curve) are appended. Every slider has a leading '-' so REAPER's generic UI stays
+//   hidden; the custom panel drives them and they stay fully automatable.
+//   Character (19) is a selector: Digital 0, BBD 1, Tape 2.
+//
+// THREADS (do not undo)
+//   Audio thread (@init @block @sample): variables a*, K_*, sm/tg arrays,
+//   functions ch_*, a_*. @gfx: variables g_* and gk_*, functions g_*.
+//   Nothing is named in both. @gfx never calls an audio-side function; it
+//   only reads sliders and a few scalars that @block writes (sync_ms).
+//   The two directions of communication are scalars: g_clr_req (gfx counts
+//   Clear presses, @block compares against its own a_clr_seen) and the
+//   sliders themselves. No derived value is computed in @slider: every
+//   coefficient is rebuilt from the slider variables every 16 samples in
+//   a_ctrl(), so a GUI edit (which does not re-run @slider) always reaches
+//   the DSP.
+//
+// EEL2 identifiers are case-insensitive: constants are K_*, audio globals a*,
+// so none of them can differ from a slider or local only by case.
+//
+// MEMORY (words): ring L, ring R (each bufn, a power of two sized from srate
+//   for 4 s + margin), smear all-pass L and R, smoothers sm[] and targets
+//   tg[], GUI label table g_lbl.
+// ----------------------------------------------------------------------------
+
+slider1:time_ms=375<1,2000,0.01>-Time (ms)
+slider2:sync=0<0,6,1{Off,1/1,1/2,1/4,1/8,1/16,1/32}>-Sync
+slider3:sync_type=0<0,2,1{Straight,Dotted,Triplet}>-Sync type
+slider4:r_off=0<-50,50,0.1>-R offset (%)
+slider5:st_mode=0<0,2,1{Stereo,Ping-pong,Cross}>-Stereo mode
+slider6:cross=0<0,100,0.1>-Cross amount (%)
+slider7:fb=40<0,110,0.1>-Feedback (%)
+slider8:hpf=100<20,5000,1>-Loop HPF (Hz)
+slider9:lpf=6000<200,20000,1>-Loop LPF (Hz)
+slider10:drive=20<0,100,0.1>-Drive (%)
+slider11:smear=0<0,4,0.01>-Smear (stages)
+slider12:mod_rate=0.6<0.05,10,0.01>-Mod rate (Hz)
+slider13:mod_depth=1.5<0,10,0.01>-Mod depth (ms)
+slider14:mod_shape=0<0,2,1{Sine,Triangle,Random}>-Mod shape
+slider15:depth_scale=0<0,1,1{Fixed,Relative}>-Depth scaling
+slider16:st_phase=90<0,180,1>-Stereo phase (deg)
+slider17:wow=0<0,100,0.1>-Wow (%)
+slider18:flutter=0<0,100,0.1>-Flutter (%)
+slider19:character=1<0,2,1{Digital,BBD,Tape}>-Character
+slider20:time_change=0<0,1,1{Glide,Crossfade}>-Time change
+slider21:glide_ms=120<20,500,1>-Glide time (ms)
+slider22:duck_amt=0<0,24,0.1>-Duck amount (dB)
+slider23:duck_thr=-24<-60,0,0.1>-Duck threshold (dB)
+slider24:duck_rel=250<50,1000,1>-Duck release (ms)
+slider25:width=100<0,150,1>-Width (%)
+slider26:mix=30<0,100,0.1>-Mix (%)
+slider27:wet_only=0<0,1,1{Off,On}>-Wet only
+slider28:freeze=0<0,1,1{Off,On}>-Freeze
+slider29:out_db=0<-12,12,0.1>-Output (dB)
+slider30:hpf_slope=0<0,1,1{6 dB/oct,12 dB/oct}>-Loop HPF slope
+slider31:lpf_slope=0<0,1,1{6 dB/oct,12 dB/oct}>-Loop LPF slope
+slider32:decay_curve=0<-100,100,1>-Decay curve (%)
+
+// Shared memory, namespaced to the vendor. Every Magnolius plugin shares this
+// slot map:
+//   gmem[0]  interface scale, as index+1 (0 = not set yet)
+options:gmem=Magnolius
+
+in_pin:left input
+in_pin:right input
+out_pin:left output
+out_pin:right output
+out_pin:wet left
+out_pin:wet right
+
+import gui_kit/gui_kit.jsfx-inc
+
+// A filename: line takes the WHOLE rest of the line as the path, so a trailing
+// // comment becomes part of the filename and the image silently fails to load
+// (the slot just reports 0 x 0). Keep these lines bare.
+//   0 cyan knobs (Time, Modulation)   1 orange knobs (Loop)
+//   2 yellow knobs (Output)           3 grey knobs (disabled)
+//   13 orange bipolar knob (Decay curve)
+//   14 help text (last, after every image)
+filename:0,gui_kit/knob_cyan_grid.png
+filename:1,gui_kit/knob_orange_grid.png
+filename:2,gui_kit/knob_yellow_grid.png
+filename:3,gui_kit/knob_grey_grid.png
+filename:4,gui_kit/value_field.png
+filename:5,gui_kit/header_bar.png
+filename:6,gui_kit/panel_tile.png
+filename:7,gui_kit/dropdown.png
+filename:8,gui_kit/button_cyan.png
+filename:9,gui_kit/toggle_orange.png
+filename:10,gui_kit/toggle_yellow.png
+filename:11,gui_kit/wave_frame_9slice.png
+filename:12,gui_kit/logo_magnolius_grey.png
+filename:13,gui_kit/knob_orange_bipolar_grid.png
+filename:14,Magnolius_ModulationDelay.help.txt
+
+// ============================================================================
+@init
+// ---- version label (bump on every change; REAPER caches compiled JSFX) ----
+G_VERSION = "v0.2.1";
+
+// ---- constants ----
+K_PI2     = 6.283185307179586;
+K_SQ2     = 1.4142135623730951;
+K_MAXD_S  = 4.0;           // longest delay in seconds (free time stops at 2 s)
+K_MIND    = 4;             // closest the read may get to the write, samples
+K_CTRL    = 16;            // control-rate step, samples
+K_DEN     = 10^(-18);      // flush level (no scientific notation in EEL2)
+K_CEIL    = 1.8;           // soft-clip ceiling; x1.1 feedback = about +6 dBFS in the loop
+K_APG     = -0.6;          // smear all-pass coefficient; negative so a half-faded stage adds to the dry instead of cancelling it
+K_CA      = 0.25;          // BBD companding: output level = input level ^ (1 - K_CA)
+K_CEPS    = 0.003;         // compander regulariser
+K_EXPN    = K_CA/(1 - K_CA);
+K_BBD_FC  = 1200;          // Hz * s : BBD loop LPF corner = K_BBD_FC / delay seconds
+K_BBD_NZ  = 0.0004;        // BBD hiss: -70 dBFS at full level, about -86 in silence (tune by ear)
+K_WOW_S   = 0.002;         // wow depth at 100 %, seconds
+K_FLT_S   = 0.00015;       // flutter depth at 100 %, seconds
+
+// ---- smoothed-parameter indices (sm[] current, tg[] target) ----
+I_FB = 0;  I_FRZ = 1;  I_DEP = 2;  I_RATE = 3; I_PHS = 4;  I_WOW = 5;  I_FLT = 6;
+I_MIX = 7; I_WID = 8;  I_OUT = 9;  I_TAPE = 10;
+I_WSIN = 11; I_WTRI = 12; I_WRND = 13; I_HS = 14; I_LS = 15;
+I_ILL = 16; I_ILR = 17; I_IRL = 18; I_IRR = 19;       // input matrix
+I_MLL = 20; I_MLR = 21; I_MRL = 22; I_MRR = 23;       // loop matrix
+I_S1 = 24; I_S2 = 25; I_S3 = 26; I_S4 = 27;           // smear stage mixes
+I_HON = 28; I_LON = 29;                               // loop HPF / LPF in (0 = bypassed)
+I_CRV = 30;                                           // decay curve, percent
+NSM = 31;
+
+// ---- sample-rate dependent sizes ----
+bufn = 1024;
+while (bufn < srate*(K_MAXD_S + 0.06)) ( bufn *= 2; );
+bufmask = bufn - 1;
+a_maxd   = bufn - 12;               // read distance ceiling
+a_maxmod = 0.05*srate;              // modulation peak ceiling
+a_isr    = 1/srate;
+a_sc     = 1 - exp(-1/(0.020*srate));              // 20 ms smoother, per sample
+a_c16    = 1 - exp(-K_CTRL/(0.020*srate));         // same, per control step
+a_dcr    = 1 - K_PI2*5/srate;                      // DC blocker, ~5 Hz
+a_gstep  = 1/(0.005*srate);                        // clear fade, 5 ms
+a_xfstep = 1/(0.030*srate);                        // crossfade time change, 30 ms
+a_cea    = 1 - exp(-1/(0.002*srate));              // compander attack
+a_cer    = 1 - exp(-1/(0.030*srate));              // compander release
+a_ea     = 1 - exp(-1/(0.010*srate));              // duck detector attack, fixed 10 ms
+a_dsm    = 1 - exp(-1/(0.002*srate));              // duck gain smoothing, 2 ms
+a_fsc    = 1 - exp(-1/(0.003*srate));              // per-repeat feedback gain smoothing, 3 ms
+a_fk     = 1 - exp(-1/(0.004*srate));              // repeat-count energy followers, 4 ms
+a_kn     = bufn/16; a_kmask = a_kn - 1;            // repeat-count ring: one entry per control step
+a_tdec   = exp(-1/(0.050*srate));                  // wet level meter decay, 50 ms
+a_cdr    = 1 - exp(-K_CTRL/(1.0*srate));           // wow/flutter drift smoother, 1 s
+a_relk   = 1/(0.25*srate);                         // Relative depth reference, 250 ms
+a_wowS   = K_WOW_S*srate;  a_fltS = K_FLT_S*srate;
+a_n1 = max(8, floor(0.0013*srate + 0.5));          // smear all-pass lengths, 1.3-4.7 ms
+a_n2 = max(8, floor(0.0021*srate + 0.5));
+a_n3 = max(8, floor(0.0031*srate + 0.5));
+a_n4 = max(8, floor(0.0047*srate + 0.5));
+a_aplen = a_n1 + a_n2 + a_n3 + a_n4 + 4;
+
+// head bump (Tape): +2.5 dB bell at 110 Hz
+a_bg  = tan($pi*110/srate);
+a_bk  = 1/0.9;
+a_ba1 = 1/(1 + a_bg*(a_bg + a_bk)); a_ba2 = a_bg*a_ba1; a_ba3 = a_bg*a_ba2;
+a_bgain = 10^(2.5/20) - 1;
+
+// ---- memory map ----
+mpos = 0;
+a_bufL = mpos; mpos += bufn;
+a_bufR = mpos; mpos += bufn;
+a_krL  = mpos; mpos += a_kn;
+a_krR  = mpos; mpos += a_kn;
+a_apL  = mpos; mpos += a_aplen;
+a_apR  = mpos; mpos += a_aplen;
+sm = mpos; mpos += NSM;
+tg = mpos; mpos += NSM;
+g_lbl = mpos; mpos += 64;
+
+// ---------------------------------------------------------------- delay engine
+// One instance per channel (L., R.). Every state variable of a channel is an
+// instance variable, so the two channels cannot share state by accident.
+
+function ch_setup(bufp, apb, krp) instance(buf, wi, ap1, ap2, ap3, ap4, kr)
+(
+  buf = bufp; wi = 0; kr = krp;
+  ap1 = apb; ap2 = ap1 + a_n1 + 1; ap3 = ap2 + a_n2 + 1; ap4 = ap3 + a_n3 + 1;
+);
+
+// Empties the channel without touching the ring: age = 0 makes every read
+// that reaches back past the write position return silence.
+function ch_reset() instance(age, hs1, hi1, hi2, ls1, li1, li2, bi1, bi2, dcx, dcy,
+                             ce, ee, nr, rv, rt, rlast, tapv, lo, wo, ap1, kr)
+(
+  age = 0;
+  hs1 = hi1 = hi2 = ls1 = li1 = li2 = bi1 = bi2 = 0;
+  dcx = dcy = ce = ee = nr = rv = rt = rlast = tapv = lo = wo = 0;
+  memset(ap1, 0, a_aplen);
+  memset(kr, 0, a_kn);
+);
+
+// Tiny values flushed to zero so a decaying tail ends in true silence, not
+// denormals. Called every control step.
+function ch_flush() instance(hs1, hi1, hi2, ls1, li1, li2, bi1, bi2, dcx, dcy, ce, ee, rv, nr)
+(
+  abs(hs1) < K_DEN ? hs1 = 0; abs(hi1) < K_DEN ? hi1 = 0; abs(hi2) < K_DEN ? hi2 = 0;
+  abs(ls1) < K_DEN ? ls1 = 0; abs(li1) < K_DEN ? li1 = 0; abs(li2) < K_DEN ? li2 = 0;
+  abs(bi1) < K_DEN ? bi1 = 0; abs(bi2) < K_DEN ? bi2 = 0;
+  abs(dcx) < K_DEN ? dcx = 0; abs(dcy) < K_DEN ? dcy = 0;
+  abs(ce) < K_DEN ? ce = 0; abs(ee) < K_DEN ? ee = 0;
+  abs(rv) < K_DEN ? rv = 0; abs(nr) < K_DEN ? nr = 0;
+);
+
+// Repeat index of the audio sitting at the read position. Each control step
+// (every 16 samples, aligned with the write index) stores the energy-weighted
+// repeat count of what is being written, so the loop can apply a gain that
+// depends on how many times a signal has been round it (the decay curve).
+function ch_kread() instance(kr, wi, age, da) local(pr, i0, fr)
+(
+  age < da + 40 ? 0 : (
+    pr = (wi + bufn - da)*0.0625;
+    i0 = floor(pr); fr = pr - i0;
+    i0 = i0 & a_kmask;
+    kr[i0]*(1 - fr) + kr[(i0 + 1) & a_kmask]*fr;
+  );
+);
+
+function ch_kwrite(k) instance(kr, wi)
+(
+  kr[floor(wi*0.0625) & a_kmask] = k;
+);
+
+// Read the ring d samples behind the write position. d is already clamped to
+// [K_MIND, a_maxd]. Cubic Hermite, or linear for the BBD. An integer d returns
+// the stored sample exactly. Reads that reach back past the data written since
+// the last clear return 0.
+function ch_rd(d) instance(buf, wi, age) local(p, i0, f, ym, y0, y1, y2, c1, c2, c3)
+(
+  age < d + 3 ? 0 : (
+    p  = wi + bufn - d;
+    i0 = floor(p); f = p - i0;
+    i0 = i0 & bufmask;
+    y0 = buf[i0];
+    y1 = buf[(i0 + 1) & bufmask];
+    a_lin ? (
+      y0 + f*(y1 - y0);
+    ) : (
+      ym = buf[(i0 + bufmask) & bufmask];
+      y2 = buf[(i0 + 2) & bufmask];
+      c1 = 0.5*(y1 - ym);
+      c2 = ym - 2.5*y0 + 2*y1 - 0.5*y2;
+      c3 = 0.5*(y2 - ym) + 1.5*(y0 - y1);
+      ((c3*f + c2)*f + c1)*f + y0;
+    );
+  );
+);
+
+// One modulated tap. tgt = base delay in samples, phoff = LFO phase offset
+// (turns). Handles the time change (glide or crossfade), the LFO, the read and
+// the BBD expander. Result in tapv.
+function ch_tap(tgt, phoff) instance(buf, wi, age, da, db, xf, xact, rv, rt, rlast, ee, tapv, dd1)
+                            local(p, m, dpk, dm, d2, y, y2, dif)
+(
+  a_first ? ( da = tgt; db = tgt; xf = 0; xact = 0; );
+
+  a_xfm ? (
+    // Crossfade: a second head fades in at the new time. A change that
+    // arrives mid-fade is held (tgt is re-read) and starts when this ends.
+    xact ? (
+      xf += a_xfstep;
+      xf >= 1 ? ( da = db; xf = 0; xact = 0; );
+    );
+    !xact && abs(tgt - da) > 1 ? ( db = tgt; xf = 0; xact = 1; );
+  ) : (
+    // Glide: one-pole slew of the read position, limited to one octave of
+    // pitch change (-1 .. +0.5 samples per sample) so a huge jump bends
+    // rather than reverses.
+    xact ? ( da = db; xact = 0; xf = 0; );
+    dif = (tgt - da)*a_gc;
+    dif > 0.5 ? ( dif = 0.5; );
+    dif < -1 ? ( dif = -1; );
+    da += dif;
+  );
+
+  // main LFO (smoothed rate, depth and shape weights)
+  p = a_ph + phoff; p -= floor(p);
+  m = 0;
+  sm[I_WSIN] > 0.0001 ? ( m += sm[I_WSIN]*sin(K_PI2*p); );
+  sm[I_WTRI] > 0.0001 ? ( m += sm[I_WTRI]*(1 - 4*abs(p + 0.25 - floor(p + 0.25) - 0.5)); );
+  p < rlast ? ( rt = rand(2) - 1; );
+  rlast = p;
+  sm[I_WRND] > 0.0001 ? ( rv += (rt - rv)*a_rc; m += sm[I_WRND]*rv; );
+
+  dpk = sm[I_DEP];
+  a_rel ? ( dpk *= da*a_relk; );
+  dpk = min(dpk, min(0.4*da, a_maxmod));
+  dm  = m*dpk + a_wf;
+
+  dd1 = max(K_MIND, min(a_maxd, da + dm));      // dd1 is kept so a debug build can read it
+  y  = this.ch_rd(dd1);    // 'this.' - a bare call would use a different (empty) instance
+  xact ? (
+    d2 = max(K_MIND, min(a_maxd, db + dm));
+    y2 = this.ch_rd(d2);
+    y  = y*sqrt(1 - xf) + y2*sqrt(xf);
+  );
+  a_bbd ? (
+    ee += (abs(y) - ee)*(abs(y) > ee ? a_cea : a_cer);
+    y *= (ee + K_CEPS)^K_EXPN;
+  );
+  tapv = y*a_gate;
+);
+
+// All-pass stage with its index stored in the word after the buffer.
+function ap_run(x, base, n) local(i, d, v, r)
+(
+  i = base[n]; d = base[i];
+  v = x + K_APG*d;
+  abs(v) < K_DEN ? ( v = 0; );
+  base[i] = v;
+  r = d - K_APG*v;
+  i += 1; i >= n ? ( i = 0; );
+  base[n] = i;
+  r;
+);
+
+// The feedback loop. Fixed order: filters, saturation (+ DC blocker), smear,
+// then the feedback gain. The same chain colours the first echo (wo, the wet
+// output) and the repeats: what goes round again is that same signal times
+// the feedback gain (lo), so the colour compounds with every pass.
+function ch_loop(x) instance(hs1, hi1, hi2, ls1, li1, li2, bi1, bi2, dcx, dcy, ap1, ap2, ap3, ap4, lo, wo, fg, fgt)
+                    local(v, v1, v2, v3, lp6, hp6, h12, y, yh, u, au, z, e, t)
+(
+  // loop high-pass: 6 dB/oct one-pole and 12 dB/oct SVF, blended by the
+  // smoothed slope switch so changing it never clicks
+  v = (x - hs1)*a_hg; lp6 = v + hs1; hs1 = lp6 + v; hp6 = x - lp6;
+  v3 = x - hi2; v1 = a_ha1*hi1 + a_ha2*v3; v2 = hi2 + a_ha2*hi1 + a_ha3*v3;
+  hi1 = 2*v1 - hi1; hi2 = 2*v2 - hi2;
+  h12 = x - K_SQ2*v1 - v2;
+  y = hp6 + sm[I_HS]*(h12 - hp6);
+  y = x + sm[I_HON]*(y - x);          // exactly off at the bottom of its range
+  // loop low-pass
+  yh = y;
+  v = (y - ls1)*a_lg; lp6 = v + ls1; ls1 = lp6 + v;
+  v3 = y - li2; v1 = a_la1*li1 + a_la2*v3; v2 = li2 + a_la2*li1 + a_la3*v3;
+  li1 = 2*v1 - li1; li2 = 2*v2 - li2;
+  y = lp6 + sm[I_LS]*(v2 - lp6);
+  y = yh + sm[I_LON]*(y - yh);        // exactly off at the top of its range
+  // Freeze bypasses the filters so the frozen material holds its tone
+  y += sm[I_FRZ]*(x - y);
+  // Tape head bump
+  a_tape ? (
+    v3 = y - bi2; v1 = a_ba1*bi1 + a_ba2*v3; v2 = bi2 + a_ba2*bi1 + a_ba3*v3;
+    bi1 = 2*v1 - bi1; bi2 = 2*v2 - bi2;
+    y += a_bgain*a_bk*v1;
+  );
+  // soft clip: linear below the knee, tanh-shaped above, hard ceiling at +6 dBFS
+  u = y + a_bias; au = abs(u);
+  au > a_knee ? (
+    z = (au - a_knee)*a_invr; z > 20 ? ( z = 20; );
+    e = exp(2*z); t = a_knee + a_rng*(1 - 2/(e + 1));
+    u = u < 0 ? -t : t;
+  );
+  y = u - a_bias;
+  // DC blocker, always on, after the saturation
+  v = y - dcx + a_dcr*dcy; dcx = y; dcy = v; y = v;
+  // smear
+  a_smrun ? (
+    v = ap_run(y, ap1, a_n1); y += sm[I_S1]*(v - y);
+    v = ap_run(y, ap2, a_n2); y += sm[I_S2]*(v - y);
+    v = ap_run(y, ap3, a_n3); y += sm[I_S3]*(v - y);
+    v = ap_run(y, ap4, a_n4); y += sm[I_S4]*(v - y);
+  );
+  abs(y) < K_DEN ? ( y = 0; );
+  wo = y;                              // the wet output: the echo AFTER the loop chain
+  fg += (fgt - fg)*a_fsc;              // per-repeat feedback gain (decay curve)
+  lo = y*fg;
+  abs(lo) < K_DEN ? ( lo = 0; );
+);
+
+function ch_write(v) instance(buf, wi, age, ce, nr) local(av, r)
+(
+  v != v ? ( v = 0; );
+  v = max(-1000, min(1000, v));
+  a_bbd ? (
+    // BBD: compress on the way in, hiss added after the compressor, so the
+    // expander on the way out pulls the hiss down under loud signal
+    av = abs(v);
+    ce += (av - ce)*(av > ce ? a_cea : a_cer);
+    v *= (ce + K_CEPS)^(-K_CA);
+    r = rand(2) - 1;
+    v += (r - nr)*K_BBD_NZ; nr = r;
+  );
+  abs(v) < K_DEN ? ( v = 0; );
+  buf[wi] = v;
+  wi = (wi + 1) & bufmask;
+  age < bufn ? ( age += 1; );
+);
+
+// ---------------------------------------------------------------- control
+
+// Everything derived from the sliders that the per-sample code smooths towards.
+function a_targets()
+(
+  tg[I_FB]   = fb*0.01;
+  tg[I_FRZ]  = freeze;
+  tg[I_DEP]  = mod_depth*0.001*srate;
+  tg[I_RATE] = mod_rate;
+  tg[I_PHS]  = st_phase/360;
+  tg[I_WOW]  = wow*0.01;
+  tg[I_FLT]  = flutter*0.01;
+  tg[I_MIX]  = wet_only ? 1 : mix*0.01;
+  tg[I_WID]  = width*0.01;
+  tg[I_OUT]  = 10^(out_db/20);
+  tg[I_TAPE] = a_tape;
+  tg[I_WSIN] = mod_shape == 0;
+  tg[I_WTRI] = mod_shape == 1;
+  tg[I_WRND] = mod_shape == 2;
+  tg[I_HS]   = hpf_slope;
+  tg[I_LS]   = lpf_slope;
+  // stereo topology as two 2x2 matrices (input -> line, loop -> line)
+  st_mode == 1 ? (
+    // ping-pong: mono-summed input goes into the left line, the loop crosses
+    tg[I_ILL] = 0.5; tg[I_ILR] = 0.5; tg[I_IRL] = 0;   tg[I_IRR] = 0;
+    tg[I_MLL] = 0;   tg[I_MLR] = 1;   tg[I_MRL] = 1;   tg[I_MRR] = 0;
+  ) : st_mode == 2 ? (
+    // cross: continuous L/R bleed in the loop
+    tg[I_ILL] = 1;   tg[I_ILR] = 0;   tg[I_IRL] = 0;   tg[I_IRR] = 1;
+    tg[I_MLL] = 1 - cross*0.01; tg[I_MLR] = cross*0.01;
+    tg[I_MRL] = cross*0.01;     tg[I_MRR] = 1 - cross*0.01;
+  ) : (
+    tg[I_ILL] = 1;   tg[I_ILR] = 0;   tg[I_IRL] = 0;   tg[I_IRR] = 1;
+    tg[I_MLL] = 1;   tg[I_MLR] = 0;   tg[I_MRL] = 0;   tg[I_MRR] = 1;
+  );
+  // smear is continuous: a fractional value fades the next stage in
+  tg[I_S1] = max(0, min(1, smear));     tg[I_S2] = max(0, min(1, smear - 1));
+  tg[I_S3] = max(0, min(1, smear - 2)); tg[I_S4] = max(0, min(1, smear - 3));
+  // loop filters are exactly off at the end of their ranges
+  tg[I_HON] = hpf > 20.5;
+  tg[I_LON] = lpf < 19999.5 || a_bbd;
+  tg[I_CRV] = decay_curve;
+);
+
+// Feedback gain for a signal that has been round the loop k times. Feedback
+// sets how many repeats it takes to fall 60 dB (N = 3 / -log10(fb)); the curve
+// sets the shape of the fall: level(k) = -60 dB * (k/N)^p. p = 1 is a constant
+// gain per repeat (the plain feedback); p > 1 holds the level up then drops it
+// faster; p < 1 drops it fast then leaves a long tail. Freeze pulls it to 1.
+function a_cg(k) local(g, kk)
+(
+  kk = max(0, k);
+  g = a_crvon ? 10^(-3*((kk + 1)^a_pp - kk^a_pp)*a_iNp) : sm[I_FB];
+  g + (1 - g)*sm[I_FRZ];
+);
+
+// Base delay times, from the Time slider or the tempo. Runs every block, so a
+// tempo change (including automation) is followed within one block. While Sync
+// is on, the Time slider is overwritten and the host told (sliderchange).
+function a_time(notify) local(beats, t, tm)
+(
+  sync > 0 ? (
+    beats = sync == 1 ? 4 : sync == 2 ? 2 : sync == 3 ? 1 : sync == 4 ? 0.5 : sync == 5 ? 0.25 : 0.125;
+    sync_type == 1 ? ( beats *= 1.5; ) : sync_type == 2 ? ( beats *= 2/3; );
+    t = 60000/(tempo > 0 ? tempo : 120)*beats;
+    t = max(1, min(K_MAXD_S*1000, t));
+    a_tms = t;
+    tm = min(t, 2000);       // the slider itself only spans 2 s
+    abs(tm - time_ms) > 0.0005 ? (
+      time_ms = tm;
+      notify ? sliderchange(time_ms);
+    );
+  ) : (
+    a_tms = time_ms;
+  );
+  sync_ms = a_tms;
+  a_tgtL = max(K_MIND, min(K_MAXD_S*srate, a_tms*0.001*srate));
+  a_tgtR = max(K_MIND, min(K_MAXD_S*srate, a_tgtL*(1 + r_off*0.01)));
+);
+
+function a_do_reset()
+(
+  L.ch_reset(); R.ch_reset();
+  a_mode = character;
+  a_bbd = a_mode == 1; a_tape = a_mode == 2; a_lin = a_bbd;
+  a_env = 0; a_duck_s = 1;
+  a_fiL = a_f1L = a_f2L = a_fiR = a_f3R = a_f4R = 0;
+);
+
+// Ask for a clear. If the wet is audible fade it out first (the reset then
+// happens in @sample at the bottom of the fade); if it is silent, reset now so
+// no input is lost at a transport start.
+function a_request_clear()
+(
+  a_tapl > 0.0001 ? ( a_clr = 1; ) : ( a_do_reset(); a_clr = 0; a_gate = 1; );
+);
+
+function a_ctrl() local(f, g, t, tsec, lpe, edb, gg, dt, i, k, fbu, ktL, ktR, dl, dr)
+(
+  a_targets();
+  a_xfm = time_change;
+  a_rel = depth_scale;
+  a_gc  = 1 - exp(-1/(max(20, glide_ms)*0.001*srate));
+  a_rc  = 1 - exp(-4*sm[I_RATE]*a_isr);
+  a_er  = 1 - exp(-1/(max(50, duck_rel)*0.001*srate));
+
+  // loop filter corners: smoothed in the log domain, clamped below Nyquist
+  t = hpf;
+  a_lhpf += (log(t) - a_lhpf)*a_c16;
+  tsec = max(0.001, (L.da + R.da)*0.5*a_isr);
+  lpe = lpf;
+  a_bbd ? ( lpe = max(200, min(lpf, K_BBD_FC/tsec)); );
+  a_llpf += (log(lpe) - a_llpf)*a_c16;
+  f = min(exp(a_lhpf), srate*0.45);
+  g = tan($pi*f*a_isr);
+  a_hg = g/(1 + g);
+  a_ha1 = 1/(1 + g*(g + K_SQ2)); a_ha2 = g*a_ha1; a_ha3 = g*a_ha2;
+  f = min(exp(a_llpf), srate*0.45);
+  a_lpf_eff = f;
+  g = tan($pi*f*a_isr);
+  a_lg = g/(1 + g);
+  a_la1 = 1/(1 + g*(g + K_SQ2)); a_la2 = g*a_la1; a_la3 = g*a_la2;
+
+  // saturation knee from Drive; bias only in Tape
+  a_cdrv += (drive*0.01 - a_cdrv)*a_c16;
+  a_knee = 0.05 + 1.45*(1 - a_cdrv)^4;
+  a_rng  = K_CEIL - a_knee;
+  a_invr = 1/a_rng;
+  a_bias = a_tape ? 0.5*a_knee : 0;
+
+  // decay curve: how many repeats (from Feedback) and what shape (from Curve)
+  fbu = sm[I_FB];
+  a_crvon = abs(sm[I_CRV]) > 0.5 && fbu > 0.0001 && fbu < 0.9999;
+  a_crvon ? (
+    a_pp  = 2^(sm[I_CRV]*0.02);                 // -100..+100 % -> p 0.25..4
+    a_iNp = (3/(-log10(fbu)))^(-a_pp);
+  );
+  // repeat count of what is at the read position, and of what is written now
+  ktL = L.ch_kread(); ktR = R.ch_kread();
+  dl = a_fiL + a_f1L + a_f2L + 0.000000001;
+  dr = a_fiR + a_f3R + a_f4R + 0.000000001;
+  L.ch_kwrite((a_f1L*(ktL + 1) + a_f2L*(ktR + 1))/dl);
+  R.ch_kwrite((a_f3R*(ktL + 1) + a_f4R*(ktR + 1))/dr);
+  L.fgt = a_cg(ktL); R.fgt = a_cg(ktR);
+  abs(a_fiL) < K_DEN ? ( a_fiL = 0; ); abs(a_f1L) < K_DEN ? ( a_f1L = 0; ); abs(a_f2L) < K_DEN ? ( a_f2L = 0; );
+  abs(a_fiR) < K_DEN ? ( a_fiR = 0; ); abs(a_f3R) < K_DEN ? ( a_f3R = 0; ); abs(a_f4R) < K_DEN ? ( a_f4R = 0; );
+
+  // ducking: gain target from the dry input's envelope
+  duck_amt > 0.01 ? (
+    edb = 20*log10(a_env + 0.000000001);
+    gg = max(0, min(1, (edb - duck_thr)/6 + 0.5));
+    a_duck_t = 10^(-duck_amt*gg/20);
+  ) : ( a_duck_t = 1; );
+  abs(a_env) < K_DEN ? ( a_env = 0; );
+
+  // wow / flutter drift targets, one new random every ~2 s
+  a_wcnt -= 1;
+  a_wcnt < 0 ? (
+    a_wdt = rand(2) - 1; a_fdt = rand(2) - 1;
+    a_wcnt = floor(2*srate/K_CTRL);
+  );
+  a_wdr += (a_wdt - a_wdr)*a_cdr;
+  a_fdr += (a_fdt - a_fdr)*a_cdr;
+
+  // snap the smoothers when they are within rounding of the target, so they
+  // reach exactly the target (and never decay into denormals)
+  i = 0;
+  loop(NSM, abs(tg[i] - sm[i]) < 0.0000001 ? ( sm[i] = tg[i]; ); i += 1; );
+  L.ch_flush(); R.ch_flush();
+
+  // smear: run the all-passes only while some stage is in use or fading
+  k = sm[I_S1] + sm[I_S2] + sm[I_S3] + sm[I_S4] + tg[I_S1] + tg[I_S2] + tg[I_S3] + tg[I_S4];
+  a_smrun = k > 0.0001;
+  !a_smrun && a_smwas ? ( memset(L.ap1, 0, a_aplen); memset(R.ap1, 0, a_aplen); );
+  a_smwas = a_smrun;
+);
+
+// ---- state ----
+L.ch_setup(a_bufL, a_apL, a_krL);
+R.ch_setup(a_bufR, a_apR, a_krR);
+a_mode = character; a_bbd = a_mode == 1; a_tape = a_mode == 2; a_lin = a_bbd;
+a_modecmd = character;
+g_clr_req = 0;
+a_clr = 0; a_gate = 1; a_clr_seen = 0; a_tapl = 0;
+a_first = 1;
+a_ph = 0; a_wph = 0; a_fph = 0; a_wf = 0;
+a_wdr = a_fdr = a_wdt = a_fdt = 0; a_wcnt = 0;
+a_env = 0; a_duck_s = 1; a_duck_t = 1;
+a_cnt = 0; a_smwas = 0; a_smrun = 0;
+a_lhpf = log(hpf); a_llpf = log(lpf); a_cdrv = drive*0.01;
+a_lastpos = 0; a_lastplaying = 0;
+a_time(0);
+L.ch_reset(); R.ch_reset();
+a_targets();
+i0 = 0; loop(NSM, sm[i0] = tg[i0]; i0 += 1;);
+L.fg = L.fgt = fb*0.01; R.fg = R.fgt = fb*0.01;
+a_crvon = 0; a_pp = 1; a_iNp = 1;
+a_fiL = a_f1L = a_f2L = a_fiR = a_f3R = a_f4R = 0;
+
+// ---- GUI (design size and scale; the @gfx line below must match) ----
+UI_W = 906; UI_H = 514;
+GM_UI_SCALE = 0;
+UI_SCALE_DEFAULT = 0;       // 0 = Fit
+gui_scale_idx = UI_SCALE_DEFAULT;
+function ui_scale(idx) ( idx == 1 ? 1 : idx == 2 ? 1.25 : idx == 3 ? 1.5 : idx == 4 ? 2 : 0; );
+
+gk_init();
+gk_img_field = 4; gk_img_header = 5; gk_img_panel = 6;
+gk_img_dropdown = 7; gk_img_button = 8; gk_img_wave_frame = 11;
+IMG_COUNT = 14; LOGO_IMG = 12; LOGO_ASPECT = 512/101;
+gk_knob_cols = 8; gk_knob_frames = 64;
+HELP_FILE = 14; HELP_BASE = 300; HELP_MAX = 600;
+help_open = 0; help_lines = 0;
+
+// accent colours (match the knob art)
+G_CY_R = 0.149; G_CY_G = 0.784; G_CY_B = 0.902;
+G_OR_R = 0.941; G_OR_G = 0.588; G_OR_B = 0.157;
+G_YE_R = 0.941; G_YE_G = 0.784; G_YE_B = 0.235;
+
+// label table: string literals are slot numbers, so these arrays hold string
+// handles that the dropdowns index by value.
+g_lbl[0]  = "Off"; g_lbl[1] = "1/1"; g_lbl[2] = "1/2"; g_lbl[3] = "1/4";
+g_lbl[4]  = "1/8"; g_lbl[5] = "1/16"; g_lbl[6] = "1/32";
+g_lbl[7]  = "Straight"; g_lbl[8] = "Dotted"; g_lbl[9] = "Triplet";
+g_lbl[10] = "Stereo"; g_lbl[11] = "Ping-pong"; g_lbl[12] = "Cross";
+g_lbl[13] = "Glide"; g_lbl[14] = "Crossfade";
+g_lbl[15] = "6 dB/oct"; g_lbl[16] = "12 dB/oct";
+g_lbl[17] = "Sine"; g_lbl[18] = "Triangle"; g_lbl[19] = "Random";
+g_lbl[20] = "Fixed"; g_lbl[21] = "Relative";
+g_lbl[22] = "Digital"; g_lbl[23] = "BBD"; g_lbl[24] = "Tape";
+
+// Reports image slots REAPER would not load. It returns a zero-size image and
+// no error, and widgets quietly fall back to vector drawing, so say it out loud.
+function g_count_missing(n) local(i, w, h, bad)
+(
+  i = 0; bad = 0;
+  loop(n, gfx_getimgdim(i, w, h); w <= 0 ? ( bad += 1; ); i += 1;);
+  bad;
+);
+
+function g_accent(r, g, b) ( gk_ac_r = r; gk_ac_g = g; gk_ac_b = b; );
+
+function g_text_r(xr, y, h, str, wd) ( gfx_x = (xr - wd)*gk_S; gfx_y = y*gk_S; gfx_drawstr(str, 2|4, xr*gk_S, (y + h)*gk_S); );
+
+// Knob bound to a slider with an optional log mapping. curve 0 linear, 1 log.
+// step > 0 quantises. Returns 1 when the value changed.
+function g_knob(id, img, cx, y, sidx, lo, hi, def, curve, step)
+  local(v, t, td, nt, nv)
+(
+  v = slider(sidx);
+  curve ? ( t = log(max(v, lo)/lo)/log(hi/lo); td = log(def/lo)/log(hi/lo); )
+        : ( t = (v - lo)/(hi - lo);            td = (def - lo)/(hi - lo); );
+  nt = gk_knob(id, img, cx - 32, y, 64, t, 0, 1, td);
+  nt != t ? (
+    nv = curve ? lo*exp(nt*log(hi/lo)) : lo + nt*(hi - lo);
+    step > 0 ? ( nv = floor(nv/step + 0.5)*step; );
+    nv = max(lo, min(hi, nv));
+    nv != v ? ( slider(sidx) = nv; slider_automate(2^(sidx - 1)); 1; ) : 0;
+  ) : 0;
+);
+
+// Knob drawn but not editable (Time while Sync is on).
+function g_knob_static(img, cx, y, sidx, lo, hi, curve) local(t)
+(
+  t = curve ? log(max(slider(sidx), lo)/lo)/log(hi/lo) : (slider(sidx) - lo)/(hi - lo);
+  gk_strip_grid(img, gk_knob_frames, gk_knob_cols, max(0, min(1, t))*(gk_knob_frames - 1), cx - 32, y, 64, 64);
+);
+
+function g_dd(id, x, y, w, sidx, cap, menu, base) local(v, nv)
+(
+  gfx_setfont(3);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = (x + 2)*gk_S; gfx_y = (y - 11)*gk_S;
+  gfx_drawstr(cap);
+  gfx_setfont(1);
+  v = slider(sidx);
+  nv = gk_dropdown(id, x, y, w, 18, v, menu, base[v]);
+  nv != v ? ( slider(sidx) = nv; slider_automate(2^(sidx - 1)); 1; ) : 0;
+);
+
+// ---------------------------------------------------------------- display
+// Repeat map: every repeat as a bar, L and R lanes, over a fixed 3.2 s window.
+// Level falls with feedback, colour goes cyan -> orange with each pass, and the
+// bar blurs wider with the modulation depth. Right: the loop's frequency
+// response for one pass (solid) and four passes (dashed).
+function g_display(x, y, w, h)
+  local(px0, px1, ly, lh, lane, k, tt, tl, tr, amp, db1, hh, m, bw, bx, r_, g_, b_, fbv, mk, lbl,
+        ix0, ix1, iy0, iy1, fq, rs, pxp, pyp, pxn, pyn, hf, lf, tk, pp, pyp4)
+(
+  gk_nine(gk_img_wave_frame, 16, 8, x, y, w, h);
+  px0 = x + 36; px1 = x + 590;
+  fbv = fb*0.01;
+  tl = max(0.001, sync_ms*0.001);
+  tr = max(0.001, tl*(1 + r_off*0.01));
+  gfx_setfont(3);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = (x + 10)*gk_S; gfx_y = (y + 8)*gk_S; gfx_drawstr("REPEATS");
+
+  lane = 0;
+  loop(2,
+    ly = y + 20 + lane*46; lh = 36;
+    gfx_setfont(1);
+    gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+    gfx_x = (x + 16)*gk_S; gfx_y = (ly + lh*0.5 - 6)*gk_S; gfx_drawstr(lane ? "R" : "L");
+    gfx_set(0.27, 0.29, 0.31, 1);
+    gfx_rect(px0*gk_S, (ly + lh)*gk_S, (px1 - px0)*gk_S, max(1, gk_S*0.5));
+    gfx_set(0.47, 0.49, 0.51, 1);
+    gfx_rect(px0*gk_S, (ly + 6)*gk_S, 2*gk_S, (lh - 6)*gk_S);       // the dry hit
+    k = 1;
+    while (k <= 40) (
+      // time of repeat k on this lane
+      tt = st_mode == 1 ? ceil(k*0.5)*tl + floor(k*0.5)*tr : k*(lane ? tr : tl);
+      (st_mode == 1 && ((k % 2) == 1) == (lane == 1)) ? ( tt = 99; );   // ping-pong: odd repeats L, even R
+      tt <= 3.2 ? (
+        // level of echo k: -60 dB * ((k-1)/N)^p, N = repeats to -60 dB (from Feedback)
+        db1 = (freeze || fbv >= 1) ? 0 : fbv < 0.0001 ? (k == 1 ? 0 : -90)
+            : -60*((k - 1)/(3/(-log10(fbv))))^(2^(decay_curve*0.02));
+        db1 = max(-90, db1);
+        hh = lh*max(0.06, min(1, (db1 + 40)/40));
+        m = min(1, (k - 1)/7);
+        r_ = G_CY_R*(1 - m) + G_OR_R*m; g_ = G_CY_G*(1 - m) + G_OR_G*m; b_ = G_CY_B*(1 - m) + G_OR_B*m;
+        bw = 1 + (k - 1)*mod_depth*0.25*(depth_scale ? min(2, tl*4) : 1);
+        bw = min(bw, 14);
+        bx = px0 + (px1 - px0)*tt/3.2;
+        gfx_set(r_, g_, b_, 0.28);
+        gfx_rect((bx - bw)*gk_S, (ly + lh - hh)*gk_S, 2*bw*gk_S, hh*gk_S);
+        gfx_set(r_, g_, b_, 1);
+        gfx_rect((bx - 1)*gk_S, (ly + lh - hh)*gk_S, 2*gk_S, hh*gk_S);
+      );
+      k += 1;
+    );
+    lane += 1;
+  );
+  // time axis
+  gfx_setfont(3);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  tk = 0;
+  while (tk <= 3.01) (
+    sprintf(#g_s, tk == 0 ? "dry" : "%.1f s", tk);
+    gfx_x = (px0 + (px1 - px0)*tk/3.2 - 8)*gk_S; gfx_y = (y + h - 17)*gk_S; gfx_drawstr(#g_s);
+    tk += 0.5;
+  );
+
+  // loop response inset
+  gfx_set(0.27, 0.29, 0.31, 1);
+  gfx_rect((x + 605)*gk_S, (y + 12)*gk_S, max(1, gk_S*0.5), (h - 24)*gk_S);
+  gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+  gfx_x = (x + 616)*gk_S; gfx_y = (y + 8)*gk_S;
+  gfx_drawstr("LOOP RESPONSE");
+  ix0 = x + 640; ix1 = x + w - 20; iy0 = y + 22; iy1 = y + h - 22;
+  lf = (character == 1) ? max(200, min(lpf, K_BBD_FC/tl)) : lpf;
+  gfx_set(0.235, 0.25, 0.275, 1);
+  fq = 0;
+  loop(3, pyp = iy1 - (iy1 - iy0)*(fq*(-12) + 0 + 36)/42; fq += 1;
+          gfx_rect(ix0*gk_S, pyp*gk_S, (ix1 - ix0)*gk_S, max(1, gk_S*0.5)); );
+  fq = 100;
+  loop(3, pxp = ix0 + (ix1 - ix0)*(log10(fq) - log10(20))/3;
+          gfx_rect(pxp*gk_S, iy0*gk_S, max(1, gk_S*0.5), (iy1 - iy0)*gk_S);
+          sprintf(#g_s, fq >= 1000 ? "%.0fk" : "%.0f", fq >= 1000 ? fq*0.001 : fq);
+          gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+          gfx_x = (pxp - 7)*gk_S; gfx_y = (iy1 + 3)*gk_S; gfx_drawstr(#g_s);
+          gfx_set(0.235, 0.25, 0.275, 1);
+          fq *= 10; );
+  pp = 0;
+  loop(160,
+    fq = 20*10^(3*pp/160);
+    rs = freeze ? 0 :
+         (hpf <= 20.5 ? 0 : hpf_slope ? -10*log10(1 + (hpf/fq)^4) : -10*log10(1 + (hpf/fq)^2))
+       + ((lpf >= 19999.5 && character != 1) ? 0 : lpf_slope ? -10*log10(1 + (fq/lf)^4)  : -10*log10(1 + (fq/lf)^2));
+    (character == 2 && !freeze) ? ( rs += 2.5*exp(-(log(fq/110)/0.8)^2); );
+    pxn = ix0 + (ix1 - ix0)*pp/160;
+    pyn = iy1 - (iy1 - iy0)*(max(-36, min(6, rs)) + 36)/42;
+    pp > 0 ? (
+      gfx_set(G_OR_R, G_OR_G, G_OR_B, 1);
+      gfx_line(pxp*gk_S, pyp*gk_S, pxn*gk_S, pyn*gk_S, 1);
+      gfx_line(pxp*gk_S, (pyp + 0.7)*gk_S, pxn*gk_S, (pyn + 0.7)*gk_S, 1);
+      (pp % 2) == 0 ? (
+        hf = iy1 - (iy1 - iy0)*(max(-36, min(6, 4*rs)) + 36)/42;
+        gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+        gfx_line(pxp*gk_S, pyp4*gk_S, pxn*gk_S, hf*gk_S, 1);
+        pyp4 = hf;
+      ) : ( pyp4 = iy1 - (iy1 - iy0)*(max(-36, min(6, 4*rs)) + 36)/42; );
+    ) : ( pyp4 = iy1 - (iy1 - iy0)*(max(-36, min(6, 4*rs)) + 36)/42; );
+    pxp = pxn; pyp = pyn;
+    pp += 1;
+  );
+  gfx_setfont(1);
+);
+
+// ============================================================================
+@slider
+// Nothing is derived here on purpose: a_ctrl() rebuilds everything from the
+// slider variables every 16 samples, because a GUI edit does not re-run @slider.
+
+@serialize
+// GUI-only state: serialised rather than made a slider, so it saves with the
+// project but never shows up in automation. APPEND new values, never insert.
+file_var(0, gui_scale_idx);
+
+// ============================================================================
+@block
+a_time(1);
+
+// Character change: clear (the fade-out / reset / fade-in runs in @sample)
+character != a_modecmd ? ( a_modecmd = character; a_request_clear(); );
+// Clear button
+g_clr_req != a_clr_seen ? ( a_clr_seen = g_clr_req; a_request_clear(); );
+
+// Stale audio: transport start, a seek, a loop wrap, or the host having
+// bypassed the effect all show up as a break in the play position. play_state
+// bit 0 is "playing". Playback rates up to 4x are not mistaken for a jump.
+a_playing = play_state & 1;
+a_bt = samplesblock*a_isr;
+a_dp = play_position - a_lastpos;
+(a_playing && !a_lastplaying) ? ( a_request_clear(); );
+(a_playing && a_lastplaying && (a_dp < -0.02 || a_dp > 4*a_bt + 0.05)) ? ( a_request_clear(); );
+a_lastpos = play_position; a_lastplaying = a_playing;
+
+// ============================================================================
+@sample
+a_cnt < 1 ? ( a_ctrl(); a_cnt = K_CTRL; );
+a_cnt -= 1;
+
+// one-pole smoothing of every continuous parameter (~20 ms)
+ai = 0;
+loop(NSM, sm[ai] += (tg[ai] - sm[ai])*a_sc; ai += 1; );
+
+// Clear: fade the wet out, empty, fade back in
+a_clr == 1 ? (
+  a_gate -= a_gstep;
+  a_gate <= 0 ? ( a_gate = 0; a_do_reset(); a_clr = 2; );
+) : a_clr == 2 ? (
+  a_gate += a_gstep;
+  a_gate >= 1 ? ( a_gate = 1; a_clr = 0; );
+);
+
+// main LFO phase; wow and flutter (Tape)
+a_ph += sm[I_RATE]*a_isr; a_ph >= 1 ? ( a_ph -= 1; );
+a_wf = 0;
+(sm[I_TAPE] > 0.001 && (sm[I_WOW] > 0.0005 || sm[I_FLT] > 0.0005)) ? (
+  a_wph += (0.3 + 0.85*(1 + a_wdr))*a_isr; a_wph >= 1 ? ( a_wph -= 1; );
+  a_fph += (6 + 7*(1 + a_fdr))*a_isr;      a_fph >= 1 ? ( a_fph -= 1; );
+  a_wf = sm[I_TAPE]*(sm[I_WOW]*a_wowS*sin(K_PI2*a_wph) + sm[I_FLT]*a_fltS*sin(K_PI2*a_fph));
+);
+
+ainL = spl0; ainR = spl1;
+
+L.ch_tap(a_tgtL, 0);
+R.ch_tap(a_tgtR, sm[I_PHS]);
+L.ch_loop(L.tapv);
+R.ch_loop(R.tapv);       // L.wo / R.wo: the echo after the chain; L.lo / R.lo: what goes round again
+
+// Freeze mutes new input into the loop
+a_ig = 1 - sm[I_FRZ];
+axl = ainL*a_ig; axr = ainR*a_ig;
+awl = sm[I_ILL]*axl + sm[I_ILR]*axr + sm[I_MLL]*L.lo + sm[I_MLR]*R.lo;
+awr = sm[I_IRL]*axl + sm[I_IRR]*axr + sm[I_MRL]*L.lo + sm[I_MRR]*R.lo;
+// energy of each source feeding each line, for the repeat count (decay curve)
+a_fiL += (abs(sm[I_ILL]*axl + sm[I_ILR]*axr) - a_fiL)*a_fk;
+a_f1L += (abs(sm[I_MLL]*L.lo) - a_f1L)*a_fk;
+a_f2L += (abs(sm[I_MLR]*R.lo) - a_f2L)*a_fk;
+a_fiR += (abs(sm[I_IRL]*axl + sm[I_IRR]*axr) - a_fiR)*a_fk;
+a_f3R += (abs(sm[I_MRL]*L.lo) - a_f3R)*a_fk;
+a_f4R += (abs(sm[I_MRR]*R.lo) - a_f4R)*a_fk;
+L.ch_write(awl);
+R.ch_write(awr);
+
+// ---- output stage (after the loop: never changes how the repeats evolve) ----
+// ducking: the detector listens to the dry input
+ae = max(abs(ainL), abs(ainR));
+a_env += (ae - a_env)*(ae > a_env ? a_ea : a_er);
+a_duck_s += (a_duck_t - a_duck_s)*a_dsm;
+a_tapl = max(abs(L.wo) + abs(R.wo), a_tapl*a_tdec);
+awl = L.wo*a_duck_s; awr = R.wo*a_duck_s;
+// width: M/S on the wet only
+am = (awl + awr)*0.5; as = (awl - awr)*0.5*sm[I_WID];
+awl = (am + as)*sm[I_OUT]; awr = (am - as)*sm[I_OUT];
+// equal-power mix; the dry bypasses everything
+ath = sm[I_MIX]*1.5707963267948966;
+agw = sin(ath); agd = cos(ath);
+spl0 = ainL*agd*sm[I_OUT] + awl*agw;
+spl1 = ainR*agd*sm[I_OUT] + awr*agw;
+spl2 = awl; spl3 = awr;
+a_first = 0;
+
+// ============================================================================
+@gfx 906 514
+gk_begin();
+g_chg = 0;
+
+// Shared scale: read it, or seed it if nothing has yet.
+gmem[GM_UI_SCALE] > 0 ? gui_scale_idx = gmem[GM_UI_SCALE] - 1
+                      : gmem[GM_UI_SCALE] = gui_scale_idx + 1;
+
+g_ret = gk_S;
+g_sc = ui_scale(gui_scale_idx);
+gk_S = max(0.5, g_sc > 0 ? g_ret*g_sc : min(gfx_w/UI_W, gfx_h/UI_H));
+gfx_setfont(1, gk_font, 11*gk_S);
+gfx_setfont(2, gk_font, 13*gk_S, 'b');
+gfx_setfont(3, gk_font, 9*gk_S);
+gfx_setfont(1);
+
+// ---------------------------------------------------------------- header
+gk_header(0, 10, 10, UI_W - 20, 22, "MOD DELAY", -1, 0);
+g_r  = min(UI_W - 20, gfx_w/gk_S - 10);
+g_sx = g_r - 86;
+g_i = gk_dropdown(40, g_sx, 13, 64, 16, gui_scale_idx, "Fit|100%|125%|150%|200%",
+      gui_scale_idx == 0 ? "Fit"  : gui_scale_idx == 1 ? "100%" :
+      gui_scale_idx == 2 ? "125%" : gui_scale_idx == 3 ? "150%" : "200%");
+g_i != gui_scale_idx ? ( gui_scale_idx = g_i; gmem[GM_UI_SCALE] = g_i + 1; );
+
+gk_button(41, g_r - 18, 13, 18, 16, help_open, "?") ? (
+  help_open = !help_open;
+  help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, HELP_MAX);
+);
+help_open ? gk_help_input(40, 41);
+
+// Character: its default Time change goes with it (Digital crossfades, BBD and
+// Tape glide) but nothing is locked.
+gfx_setfont(3);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = (g_sx - 8 - 90 - 52)*gk_S; gfx_y = 17*gk_S; gfx_drawstr("CHARACTER");
+gfx_setfont(1);
+g_i = gk_dropdown(42, g_sx - 8 - 90, 13, 90, 16, character, "Digital|BBD|Tape", g_lbl[22 + character]);
+g_i != character ? (
+  character = g_i; time_change = (g_i == 0);
+  slider_automate(2^18 + 2^19);
+  g_chg = 1;
+);
+
+// ---------------------------------------------------------------- display
+g_display(10, 40, UI_W - 20, 124);
+
+// ---------------------------------------------------------------- panels
+// layout (logical px): knob cell 72 wide, knob 64, label +68, field +84
+G_PY = 172; G_PH = 308;
+G_R1 = G_PY + 30; G_R2 = G_R1 + 104;
+G_D1 = G_R2 + 116; G_D2 = G_D1 + 32;
+G_XT = 10; G_XL = 180; G_XM = 422; G_XO = 664;
+
+gk_panel(G_XT, G_PY, 160, G_PH);  gk_header(0, G_XT, G_PY, 160, 22, "TIME", -1, 0);
+gk_panel(G_XL, G_PY, 232, G_PH);  gk_header(0, G_XL, G_PY, 232, 22, "LOOP", -1, 0);
+gk_panel(G_XM, G_PY, 232, G_PH);  gk_header(0, G_XM, G_PY, 232, 22, "MODULATION", -1, 0);
+gk_panel(G_XO, G_PY, 232, G_PH);  gk_header(0, G_XO, G_PY, 232, 22, "OUTPUT", -1, 0);
+
+// peak pitch deviation of the main LFO, in cents (shape-aware slope)
+g_dk = depth_scale ? min(0.4*sync_ms*0.001, mod_depth*0.001*sync_ms/250) : mod_depth*0.001;
+g_fac = mod_shape == 0 ? K_PI2 : mod_shape == 1 ? 4 : 3.5;
+g_cents = 1200*log(1 + g_fac*mod_rate*g_dk)/log(2);
+sprintf(#g_s, "+/-%.1f cents", g_cents);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+g_text_r(G_XM + 232 - 8, G_PY, 22, #g_s, 120);
+
+// ---- TIME (cyan) ----
+g_cx = G_XT + 8 + 36;
+g_cx2 = g_cx + 72;
+gk_text_c(g_cx, G_R1 + 68, "Time", 1);   gk_text_c(g_cx2, G_R1 + 68, "R offset", 1);
+gk_text_c(g_cx, G_R2 + 68, "Cross", 1);  gk_text_c(g_cx2, G_R2 + 68, "Glide", 1);
+sync > 0 ? g_knob_static(3, g_cx, G_R1, 1, 1, 2000, 1)
+         : ( g_chg |= g_knob(10, 0, g_cx, G_R1, 1, 1, 2000, 375, 1, 0); );
+g_chg |= g_knob(11, 0, g_cx2, G_R1, 4, -50, 50, 0, 0, 0);
+g_chg |= g_knob(12, st_mode == 2 ? 0 : 3, g_cx, G_R2, 6, 0, 100, 0, 0, 0);
+g_chg |= g_knob(13, time_change ? 3 : 0, g_cx2, G_R2, 21, 20, 500, 120, 0, 0);
+sprintf(#g_s, sync_ms >= 1000 ? "%.2f s" : "%.1f ms", sync_ms >= 1000 ? sync_ms*0.001 : sync_ms);
+sync > 0 ? gk_field(g_cx - 32, G_R1 + 84, 64, 16, #g_s)
+         : ( g_chg |= gk_field_edit_slider(50, g_cx - 32, G_R1 + 84, 64, 16, 1, 1, 2000, 375, #g_s); );
+sprintf(#g_s, "%+.1f %%", r_off);
+g_chg |= gk_field_edit_slider(51, g_cx2 - 32, G_R1 + 84, 64, 16, 4, -50, 50, 0, #g_s);
+sprintf(#g_s, "%.0f %%", cross);
+g_chg |= gk_field_edit_slider(52, g_cx - 32, G_R2 + 84, 64, 16, 6, 0, 100, 0, #g_s);
+sprintf(#g_s, "%.0f ms", glide_ms);
+g_chg |= gk_field_edit_slider(53, g_cx2 - 32, G_R2 + 84, 64, 16, 21, 20, 500, 120, #g_s);
+g_chg |= g_dd(43, G_XT + 8, G_D1, 68, 2, "Sync", "Off|1/1|1/2|1/4|1/8|1/16|1/32", g_lbl);
+g_chg |= g_dd(44, G_XT + 84, G_D1, 68, 3, "Sync type", "Straight|Dotted|Triplet", g_lbl + 7);
+g_chg |= g_dd(45, G_XT + 8, G_D2, 68, 5, "Stereo mode", "Stereo|Ping-pong|Cross", g_lbl + 10);
+g_chg |= g_dd(46, G_XT + 84, G_D2, 68, 20, "Time change", "Glide|Crossfade", g_lbl + 13);
+
+// ---- LOOP (orange) ----
+g_cx = G_XL + 8 + 36; g_cx2 = g_cx + 72; g_cx3 = g_cx2 + 72;
+gk_text_c(g_cx, G_R1 + 68, "Feedback", 1); gk_text_c(g_cx2, G_R1 + 68, "HPF", 1);
+gk_text_c(g_cx3, G_R1 + 68, "LPF", 1);
+gk_text_c(g_cx, G_R2 + 68, "Drive", 1);    gk_text_c(g_cx2, G_R2 + 68, "Smear", 1);
+gk_text_c(g_cx3, G_R2 + 68, "Curve", 1);
+g_chg |= g_knob(14, 1, g_cx,  G_R1, 7, 0, 110, 40, 0, 0);
+g_chg |= g_knob(15, 1, g_cx2, G_R1, 8, 20, 5000, 100, 1, 0);
+g_chg |= g_knob(16, 1, g_cx3, G_R1, 9, 200, 20000, 6000, 1, 0);
+g_chg |= g_knob(17, 1, g_cx,  G_R2, 10, 0, 100, 20, 0, 0);
+g_chg |= g_knob(18, 1, g_cx2, G_R2, 11, 0, 4, 0, 0, 0);
+g_chg |= g_knob(33, 13, g_cx3, G_R2, 32, -100, 100, 0, 0, 0);
+sprintf(#g_s, "%.0f %%", fb);   g_chg |= gk_field_edit_slider(54, g_cx - 32,  G_R1 + 84, 64, 16, 7, 0, 110, 40, #g_s);
+sprintf(#g_s, hpf >= 1000 ? "%.2f kHz" : "%.0f Hz", hpf >= 1000 ? hpf*0.001 : hpf);
+g_chg |= gk_field_edit_slider(55, g_cx2 - 32, G_R1 + 84, 64, 16, 8, 20, 5000, 100, #g_s);
+sprintf(#g_s, lpf >= 1000 ? "%.1f kHz" : "%.0f Hz", lpf >= 1000 ? lpf*0.001 : lpf);
+g_chg |= gk_field_edit_slider(56, g_cx3 - 32, G_R1 + 84, 64, 16, 9, 200, 20000, 6000, #g_s);
+sprintf(#g_s, "%.0f %%", drive); g_chg |= gk_field_edit_slider(57, g_cx - 32, G_R2 + 84, 64, 16, 10, 0, 100, 20, #g_s);
+sprintf(#g_s, "%.2f", smear);   g_chg |= gk_field_edit_slider(58, g_cx2 - 32, G_R2 + 84, 64, 16, 11, 0, 4, 0, #g_s);
+sprintf(#g_s, "%+.0f %%", decay_curve); g_chg |= gk_field_edit_slider(71, g_cx3 - 32, G_R2 + 84, 64, 16, 32, -100, 100, 0, #g_s);
+g_chg |= gk_toggle_slider(19, 9, G_XL + 12, G_D2 + 1, 28, 16, 28);
+gk_text(G_XL + 46, G_D2 + 2, "FREEZE");
+g_chg |= g_dd(47, G_XL + 8, G_D1, 110, 30, "HPF slope", "6 dB/oct|12 dB/oct", g_lbl + 15);
+g_chg |= g_dd(48, G_XL + 122, G_D1, 102, 31, "LPF slope", "6 dB/oct|12 dB/oct", g_lbl + 15);
+
+// ---- MODULATION (cyan) ----
+g_cx = G_XM + 8 + 36; g_cx2 = g_cx + 72; g_cx3 = g_cx2 + 72;
+gk_text_c(g_cx, G_R1 + 68, "Rate", 1);  gk_text_c(g_cx2, G_R1 + 68, "Depth", 1);
+gk_text_c(g_cx3, G_R1 + 68, "Phase", 1);
+gk_text_c(g_cx, G_R2 + 68, "Wow", 1);   gk_text_c(g_cx2, G_R2 + 68, "Flutter", 1);
+g_chg |= g_knob(20, 0, g_cx,  G_R1, 12, 0.05, 10, 0.6, 1, 0);
+g_chg |= g_knob(21, 0, g_cx2, G_R1, 13, 0, 10, 1.5, 0, 0);
+g_chg |= g_knob(22, 0, g_cx3, G_R1, 16, 0, 180, 90, 0, 1);
+g_chg |= g_knob(23, character == 2 ? 0 : 3, g_cx,  G_R2, 17, 0, 100, 0, 0, 0);
+g_chg |= g_knob(24, character == 2 ? 0 : 3, g_cx2, G_R2, 18, 0, 100, 0, 0, 0);
+sprintf(#g_s, "%.2f Hz", mod_rate); g_chg |= gk_field_edit_slider(59, g_cx - 32,  G_R1 + 84, 64, 16, 12, 0.05, 10, 0.6, #g_s);
+sprintf(#g_s, "%.2f ms", mod_depth); g_chg |= gk_field_edit_slider(60, g_cx2 - 32, G_R1 + 84, 64, 16, 13, 0, 10, 1.5, #g_s);
+sprintf(#g_s, "%.0f deg", st_phase); g_chg |= gk_field_edit_slider(61, g_cx3 - 32, G_R1 + 84, 64, 16, 16, 0, 180, 90, #g_s);
+sprintf(#g_s, "%.0f %%", wow);     g_chg |= gk_field_edit_slider(62, g_cx - 32,  G_R2 + 84, 64, 16, 17, 0, 100, 0, #g_s);
+sprintf(#g_s, "%.0f %%", flutter); g_chg |= gk_field_edit_slider(63, g_cx2 - 32, G_R2 + 84, 64, 16, 18, 0, 100, 0, #g_s);
+g_chg |= g_dd(49, G_XM + 8, G_D1, 110, 14, "Shape", "Sine|Triangle|Random", g_lbl + 17);
+g_chg |= g_dd(64, G_XM + 122, G_D1, 102, 15, "Depth scaling", "Fixed|Relative", g_lbl + 20);
+
+// ---- OUTPUT (yellow) ----
+g_cx = G_XO + 8 + 36; g_cx2 = g_cx + 72; g_cx3 = g_cx2 + 72;
+gk_text_c(g_cx, G_R1 + 68, "Duck", 1);   gk_text_c(g_cx2, G_R1 + 68, "Threshold", 1);
+gk_text_c(g_cx3, G_R1 + 68, "Release", 1);
+gk_text_c(g_cx, G_R2 + 68, "Width", 1);  gk_text_c(g_cx2, G_R2 + 68, "Mix", 1);
+gk_text_c(g_cx3, G_R2 + 68, "Output", 1);
+g_chg |= g_knob(25, 2, g_cx,  G_R1, 22, 0, 24, 0, 0, 0);
+g_chg |= g_knob(26, 2, g_cx2, G_R1, 23, -60, 0, -24, 0, 0);
+g_chg |= g_knob(27, 2, g_cx3, G_R1, 24, 50, 1000, 250, 1, 0);
+g_chg |= g_knob(28, 2, g_cx,  G_R2, 25, 0, 150, 100, 0, 0);
+g_chg |= g_knob(29, 2, g_cx2, G_R2, 26, 0, 100, 30, 0, 0);
+g_chg |= g_knob(30, 2, g_cx3, G_R2, 29, -12, 12, 0, 0, 0);
+sprintf(#g_s, "%.1f dB", duck_amt); g_chg |= gk_field_edit_slider(65, g_cx - 32,  G_R1 + 84, 64, 16, 22, 0, 24, 0, #g_s);
+sprintf(#g_s, "%.0f dB", duck_thr); g_chg |= gk_field_edit_slider(66, g_cx2 - 32, G_R1 + 84, 64, 16, 23, -60, 0, -24, #g_s);
+sprintf(#g_s, "%.0f ms", duck_rel); g_chg |= gk_field_edit_slider(67, g_cx3 - 32, G_R1 + 84, 64, 16, 24, 50, 1000, 250, #g_s);
+sprintf(#g_s, "%.0f %%", width);    g_chg |= gk_field_edit_slider(68, g_cx - 32,  G_R2 + 84, 64, 16, 25, 0, 150, 100, #g_s);
+sprintf(#g_s, "%.0f %%", mix);      g_chg |= gk_field_edit_slider(69, g_cx2 - 32, G_R2 + 84, 64, 16, 26, 0, 100, 30, #g_s);
+sprintf(#g_s, "%+.1f dB", out_db);  g_chg |= gk_field_edit_slider(70, g_cx3 - 32, G_R2 + 84, 64, 16, 29, -12, 12, 0, #g_s);
+g_chg |= gk_toggle_slider(31, 10, G_XO + 12, G_D1 + 1, 28, 16, 27);
+gk_text(G_XO + 46, G_D1 + 2, "WET ONLY");
+gk_button(32, G_XO + 232 - 8 - 84, G_D1, 84, 18, -1, "CLEAR") ? ( g_clr_req += 1; );
+
+// ---------------------------------------------------------------- help
+help_open ? gk_help_draw(10, 40, UI_W - 20, UI_H - 64, "Help  -  Mod Delay",
+                         HELP_BASE, help_lines);
+
+// ---------------------------------------------------------------- footer
+gfx_setfont(3);
+gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1);
+gfx_x = 10*gk_S; gfx_y = (UI_H - 22)*gk_S; gfx_drawstr(G_VERSION);
+gfx_setfont(1);
+gk_strip(LOGO_IMG, 1, 0, UI_W - 10 - 14*LOGO_ASPECT, UI_H - 24, 14*LOGO_ASPECT, 14);
+
+g_bad = g_count_missing(IMG_COUNT);
+g_bad > 0 ? (
+  gfx_set(1, 0.42, 0.38, 1);
+  gfx_x = 300*gk_S; gfx_y = 15*gk_S;
+  gfx_drawstr("images failed to load: ");
+  gfx_drawnumber(g_bad, 0);
+);
+
+gk_end();
