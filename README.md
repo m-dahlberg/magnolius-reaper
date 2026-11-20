@@ -31,7 +31,6 @@ Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
 | Plugin | What it does |
 | --- | --- |
 | Adaptive Compressor | Compressor whose threshold follows programme loudness, so one setting fits any input level. |
-| Auto Tilt | Tilt EQ that measures the incoming spectral slope and corrects it continuously. |
 | Channel EQ | Channel-strip EQ: 18 dB/oct high-pass, 12 dB/oct low-pass, two shelves and two bells, modelled from circuit transfer functions, with a live response curve. |
 | Convolution Reverb | True-stereo partitioned-FFT convolution from 4-channel IRs. |
 | DeClick | Multiband click and mouth-noise repair, with lookahead as PDC. |
@@ -39,10 +38,9 @@ Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
 | Loudness Simulator | Makes quiet monitoring sound like loud monitoring. Monitoring only. |
 | LUFS Limiter | LUFS-S leveler into a true peak limiter. |
 | Match EQ | Pulls the input spectrum toward a pink-noise reference. |
-| Mix Reference | Six reference slots, tonal and per-band dynamics comparison. |
+| Modulation Delay | Stereo modulation delay with three characters, Digital, BBD and Tape, from one delay engine. |
 | Saturator | Odd and even harmonics dialled separately, with slew softening, a Knee switch and anti-aliased oversampling. |
 | Upward Compressor | Lifts what is below the threshold and leaves the peaks alone. |
-| Vari-Mu Compressor | F670-style variable-mu compressor/limiter. |
 | Variable Ratio Compressor | Solves for the ratio each passage needs, instead of being told one. |
 | Variable Ratio Compressor MB | The same core in four bands, with a ceiling that tilts across frequency. |
 | Vocal Rider | Automatic gain riding with sidechain ducking. |
@@ -60,8 +58,8 @@ Each appears in REAPER's FX browser with a `(Magnolius)` suffix, so typing
 | Vocal Normalizer | Normalises through the melody's fundamental range, not K-weighted. |
 | Vocal Splitter | Segments a take into phrases, breaths, consonants and sibilance. |
 
-Four of these exist as both a plugin and a script — **Auto Tilt**, **DeClick**,
-**DeNoise** and **Vocal Splitter**. The plugin is real-time; the script is
+Two of these exist as both a plugin and a script — **DeClick** and
+**DeNoise**. The plugin is real-time; the script is
 offline and can analyse the whole file before deciding anything, which usually
 means less tuning. ReaPack's Type column tells them apart.
 

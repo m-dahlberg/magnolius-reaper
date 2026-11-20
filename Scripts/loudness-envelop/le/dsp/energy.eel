@@ -1,0 +1,94 @@
+// @noindex
+// Loudness Envelope -- the measurement kernel.
+//
+// Reduces a take to one number per frame, in the Vocal Rider's own units:
+//
+//   _OUT_E   the sum over the frame of max over channels of x^2
+//   _OUT_N   samples actually accumulated into the frame
+//
+// The LOUDER CHANNEL, not a sum and not a mean, because that is what the
+// rider's detector does (e_v = max(spl0^2, spl1^2)). A target in any other
+// units would sit a fixed 3 dB off on a centred stereo vocal.
+//
+// No filtering: the rider measures broadband, so this does too. The rider's
+// one-pole is run in Lua over these frame means, which is what lets the
+// detector window be a live control rather than a re-read.
+//
+// Frames sit on a grid defined in TIME: frame f begins at exactly f * hop
+// seconds. _HOPF is that hop in samples and is FRACTIONAL -- 10 ms at 44100 is
+// 441 exactly, but at 44056 it is not an integer at all -- so every frame
+// rounds its own start from its absolute frame number. _FOFF and _SOFF carry
+// the block's origin so the rounding cannot restart per block and drift
+// against the audio.
+//
+// Runs under ReaImGui's CreateFunctionFromEEL: standard EEL2 plus
+// memcpy/memset. Globals persist between Execute calls.
+//
+// Tasks (set _TASK, then Execute):
+//   0  setup     record the channel count, probe the heap
+//   1  measure   consume a block of interleaved samples -> the two outputs
+//
+// Lua sets these before Execute:
+//   _IN                     interleaved input buffer (address)
+//   _OUT_E _OUT_N           output arrays (addresses)
+//   _HEAP                   first heap slot the kernel may use
+//   _NCHAN                  channels in _IN (setup only)
+//   _NSAMP _NFRAMES _HOPF _FOFF _SOFF
+//
+// Lua reads back with Function_GetValue:
+//   memtop heap_ok nch_echo
+
+function ksetup() local(top) (
+  nch = max(_NCHAN, 1);
+  nch_echo = nch;
+  memtop = _HEAP + 4;
+
+  // EEL does not fail loudly when it runs out of heap: every access past the
+  // limit lands in one shared scratch slot. Two ADJACENT slots at the very
+  // top catch that -- if that end is unallocated both writes hit the one
+  // slot, so the first reads back the second's value. There is no kernel
+  // state to speak of here, but the probe also proves the Lua-owned region
+  // below _HEAP (the input buffer) is addressable to its end.
+  _IN[0] = 1;
+  top = memtop - 2;
+  top[0] = 2;
+  top[1] = 3;
+  heap_ok = _IN[0] == 1 && top[0] == 2 && top[1] == 3;
+  _IN[0] = 0;
+  top[0] = 0;
+  top[1] = 0;
+);
+
+function kmeasure() local(f, i, n, s0, base, c, x, e, m) (
+  f = 0;
+  while (f < _NFRAMES) (
+    // Absolute frame number, so the rounding is the same one Lua does when it
+    // decides how many samples to read.
+    s0 = floor((_FOFF + f) * _HOPF + 0.5) - _SOFF;
+    n  = floor((_FOFF + f + 1) * _HOPF + 0.5) - _SOFF - s0;
+    n > _NSAMP - s0 ? n = _NSAMP - s0;
+    n < 0 ? n = 0;
+
+    e = 0;
+    i = 0;
+    while (i < n) (
+      base = (s0 + i) * nch;
+      m = 0;
+      c = 0;
+      while (c < nch) (
+        x = _IN[base + c];
+        x * x > m ? m = x * x;
+        c += 1;
+      );
+      e += m;
+      i += 1;
+    );
+
+    _OUT_E[f] = e;
+    _OUT_N[f] = n;
+    f += 1;
+  );
+);
+
+_TASK == 0 ? ksetup() :
+_TASK == 1 ? kmeasure() : 0;
