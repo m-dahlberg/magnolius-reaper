@@ -1,0 +1,697 @@
+// gui_kit.jsfx-inc — widget library for the gui_kit PNG assets
+//
+// Usage (in the plugin's @init):   import gui_kit/gui_kit.jsfx-inc
+//   Declare filename:N lines for the PNGs you use in the main .jsfx (0-based, contiguous),
+//   call gk_init() in @init, then assign gk_img_* for any fixed-slot parts you use.
+//
+// Coordinates: every widget takes LOGICAL pixels. The kit multiplies by gk_S
+// (1 on normal displays, 2 on HiDPI). Logical window size = gfx_w/gk_S, gfx_h/gk_S.
+// All assets are authored at 2x, so blits are exact on HiDPI and downscaled otherwise.
+//
+// Frame per @gfx:   gk_begin();  ...widgets...;  gk_end();
+// Widget ids: any unique non-zero number per interactive widget.
+
+@init
+
+function gk_init()
+(
+  gfx_ext_retina = 1;
+  gk_S = 1;
+  gk_active = 0; gk_prev_cap = 0; gk_lasty = 0;
+  gk_clicked = 0; gk_released = 0;
+  gk_bar_frames = 64;
+  // Filmstrip layout: 0 columns = a plain vertical strip, otherwise the frames
+  // are packed as a grid (cols x rows, reading order). A grid keeps the image
+  // compact and compresses far better than one tall column - a 101-frame knob
+  // strip is 1.2 MB vertical against 284 KB as an 11-column grid.
+  gk_knob_cols = 0; gk_knob_frames = 0; gk_bar_cols = 0;
+  // fixed-slot parts: -1 = not loaded (widget falls back to plain gfx drawing)
+  gk_img_button = -1; gk_img_field = -1; gk_img_dropdown = -1;
+  gk_img_header = -1; gk_img_panel = -1;
+  gk_img_hs_track = -1; gk_img_hs_fill = -1; gk_img_hs_thumb = -1;
+  gk_img_wave_frame = -1; gk_img_playhead_line = -1; gk_img_playhead_marker = -1;
+  // palette (0..1) for anything drawn with gfx primitives
+  gk_bg_r = 0.149; gk_bg_g = 0.157; gk_bg_b = 0.169;      // window background #26282B
+  gk_fg_r = 0.851; gk_fg_g = 0.863; gk_fg_b = 0.878;      // primary text
+  gk_dim_r = 0.60; gk_dim_g = 0.62; gk_dim_b = 0.66;      // secondary text
+  gk_ac_r = 0.149; gk_ac_g = 0.784; gk_ac_b = 0.902;      // accent cyan #26C8E6
+  gk_font = "Arial";
+  gk_help_font = "Courier New";   // help text is laid out in columns
+  gk_help_px = 14;                // help text size, logical px
+  gk_edit_id = 0; gk_edit_moved = 0;   // value field being typed into
+  gk_help_scroll = 0;
+);
+
+// ------------------------------------------------------------------ frame bracket
+function gk_begin()
+(
+  gk_S = gfx_ext_retina;
+  gk_clicked  =  (mouse_cap & 1) && !(gk_prev_cap & 1);
+  gk_released = !(mouse_cap & 1) &&  (gk_prev_cap & 1);
+  gfx_set(gk_bg_r, gk_bg_g, gk_bg_b, 1);
+  gfx_rect(0, 0, gfx_w, gfx_h);
+  gfx_setfont(1, gk_font, 11*gk_S);
+  gfx_setfont(2, gk_font, 13*gk_S, 'b');
+  gfx_setfont(1);
+);
+
+function gk_end()
+(
+  gk_released ? gk_active = 0;
+  gk_prev_cap = mouse_cap;
+  mouse_wheel = 0;
+);
+
+// ------------------------------------------------------------------ helpers
+function gk_hit(x, y, w, h)  // logical coords
+(
+  mouse_x >= x*gk_S && mouse_x < (x+w)*gk_S && mouse_y >= y*gk_S && mouse_y < (y+h)*gk_S;
+);
+
+function gk_clamp(v, lo, hi) ( max(lo, min(hi, v)); );
+
+function gk_text(x, y, str)  // left aligned, primary colour
+(
+  gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = x*gk_S; gfx_y = y*gk_S;
+  gfx_drawstr(str);
+);
+
+function gk_text_c(cx, y, str, dim) local(tw, th)  // centred on cx
+(
+  dim ? gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 1) : gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_measurestr(str, tw, th);
+  gfx_x = cx*gk_S - tw*0.5; gfx_y = y*gk_S;
+  gfx_drawstr(str);
+);
+
+// 9-slice blit. b = source border (image px), bl = dest border (LOGICAL px)
+// Destination edges are snapped to whole device pixels and the middle pieces
+// stretch to exactly fill what is left. Without that, a fractional gk_S puts
+// the nine pieces on fractional boundaries and they no longer abut, which
+// shows up as a faint 3x3 grid of hairlines across panels and value fields.
+function gk_nine(img, b, bl, x, y, w, h)
+  local(sw, sh, X0, Y0, X3, Y3, X1, X2, Y1, Y2, D, mw, mh)
+(
+  gfx_getimgdim(img, sw, sh);
+  X0 = floor(x*gk_S + 0.5);       Y0 = floor(y*gk_S + 0.5);
+  X3 = floor((x + w)*gk_S + 0.5); Y3 = floor((y + h)*gk_S + 0.5);
+  D = max(1, floor(bl*gk_S + 0.5));
+  D = max(1, min(D, min(floor((X3 - X0)*0.5), floor((Y3 - Y0)*0.5))));
+  X1 = X0 + D; X2 = X3 - D; Y1 = Y0 + D; Y2 = Y3 - D;
+  mw = X2 - X1; mh = Y2 - Y1;
+  gfx_blit(img,1,0, 0,0,b,b,                             X0,Y0,D,D);
+  gfx_blit(img,1,0, sw-b,0,b,b,                          X2,Y0,D,D);
+  gfx_blit(img,1,0, 0,sh-b,b,b,                          X0,Y2,D,D);
+  gfx_blit(img,1,0, sw-b,sh-b,b,b,                       X2,Y2,D,D);
+  mw > 0 ? (
+    gfx_blit(img,1,0, b,0,sw-2*b,b,                      X1,Y0,mw,D);
+    gfx_blit(img,1,0, b,sh-b,sw-2*b,b,                   X1,Y2,mw,D);
+  );
+  mh > 0 ? (
+    gfx_blit(img,1,0, 0,b,b,sh-2*b,                      X0,Y1,D,mh);
+    gfx_blit(img,1,0, sw-b,b,b,sh-2*b,                   X2,Y1,D,mh);
+  );
+  mw > 0 && mh > 0 ? gfx_blit(img,1,0, b,b,sw-2*b,sh-2*b, X1,Y1,mw,mh);
+);
+
+// Blit frame n of a vertical filmstrip with nframes frames into a logical box
+// Returns 1 if it drew, 0 if the image is not loaded. REAPER hands back a
+// zero-size image for any file it could not load, with no error reported
+// anywhere, so callers fall back to drawing the widget themselves.
+function gk_strip(img, nframes, n, x, y, w, h) local(sw, sh, fh)
+(
+  gfx_getimgdim(img, sw, sh);
+  sw > 0 && sh > 0 && nframes > 0 ? (
+    fh = sh / nframes;
+    n = gk_clamp(floor(n + 0.5), 0, nframes - 1);
+    gfx_blit(img,1,0, 0,n*fh,sw,fh, x*gk_S,y*gk_S,w*gk_S,h*gk_S);
+    1;
+  ) : 0;
+);
+
+// Grid-packed filmstrip: frame n counted left-to-right, top-to-bottom.
+// Same return convention as gk_strip.
+function gk_strip_grid(img, nframes, cols, n, x, y, w, h) local(sw, sh, rows, fw, fh)
+(
+  gfx_getimgdim(img, sw, sh);
+  sw > 0 && sh > 0 && nframes > 0 && cols > 0 ? (
+    rows = ceil(nframes / cols);
+    fw = sw / cols; fh = sh / rows;
+    n = gk_clamp(floor(n + 0.5), 0, nframes - 1);
+    gfx_blit(img,1,0, (n % cols)*fw, floor(n / cols)*fh, fw, fh,
+             x*gk_S,y*gk_S,w*gk_S,h*gk_S);
+    1;
+  ) : 0;
+);
+
+// ---------------------------------------------------- vector fallbacks
+// Drawn with gfx primitives in the current accent, for when an image slot is
+// empty. t is the value as 0..1.
+// gfx_arc draws each quadrant separately, so stacking concentric arcs to make
+// a thick ring leaves visible seams at the quarter positions. Sweeping radial
+// segments along the angle instead gives a solid, seam-free band.
+function gk_arc_band(cx, cy, ri, ro, a0, a1) local(ang, st)
+(
+  st = 0.4 / max(ro, 1);                 // ~0.4 px of arc per step at ro
+  ang = a0;
+  while (ang < a1) (
+    gfx_line(cx + sin(ang)*ri, cy - cos(ang)*ri,
+             cx + sin(ang)*ro, cy - cos(ang)*ro, 1);
+    ang += st;
+  );
+);
+
+function gk_knob_vector(x, y, size, t) local(cx, cy, r, a0, a1, a)
+(
+  cx = (x + size*0.5)*gk_S; cy = (y + size*0.5)*gk_S; r = size*0.5*gk_S;
+  a0 = -2.35619449; a1 = 2.35619449;      // -135deg .. +135deg, 0 = up
+  a = a0 + (a1 - a0) * gk_clamp(t, 0, 1);
+
+  gfx_set(0.10, 0.106, 0.118, 1); gfx_circle(cx, cy, r*0.74, 1, 1);
+  gfx_set(0.22, 0.23, 0.25, 1);   gfx_circle(cx, cy, r*0.74, 0, 1);
+
+  gfx_set(0.24, 0.25, 0.27, 1);                              // unlit track
+  gk_arc_band(cx, cy, r*0.86, r*0.95, a0, a1);
+
+  t > 0.001 ? (
+    gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.14);                // glow
+    gk_arc_band(cx, cy, r*0.79, r*1.02, a0, a);
+    gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);                   // lit arc
+    gk_arc_band(cx, cy, r*0.86, r*0.95, a0, a);
+  );
+
+  gfx_set(0.88, 0.90, 0.92, 1);                              // pointer
+  gk_arc_band(cx, cy, r*0.20, r*0.58, a - 0.045, a + 0.045);
+);
+
+function gk_vbar_vector(x, y, w, h, t) local(X, Y, W, H, fh)
+(
+  X = x*gk_S; Y = y*gk_S; W = w*gk_S; H = h*gk_S;
+  fh = H * gk_clamp(t, 0, 1);
+  gfx_set(0.10, 0.106, 0.118, 1); gfx_rect(X, Y, W, H);
+  gfx_set(0.22, 0.23, 0.25, 1);   gfx_rect(X, Y, W, 1); gfx_rect(X, Y+H-1, W, 1);
+  gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.25); gfx_rect(X-gk_S, Y+H-fh-gk_S, W+2*gk_S, fh+2*gk_S);
+  gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);    gfx_rect(X, Y+H-fh, W, fh);
+);
+
+// ------------------------------------------------------------------ knob
+// Vertical drag (Shift = fine), mouse wheel, Ctrl-click = reset to vdef.
+// Filmstrip frames must be square; frame count is derived from the image.
+function gk_knob(id, img, x, y, size, val, vmin, vmax, vdef) local(sw, sh, n, range, ok)
+(
+  range = vmax - vmin;
+  gk_clicked && gk_hit(x, y, size, size) ? (
+    mouse_cap & 4 ? val = vdef : ( gk_active = id; gk_lasty = mouse_y; );
+  );
+  gk_active == id && (mouse_cap & 1) ? (
+    val += (gk_lasty - mouse_y) / gk_S * ((mouse_cap & 8) ? 0.001 : 0.005) * range;
+    gk_lasty = mouse_y;
+  );
+  mouse_wheel != 0 && gk_hit(x, y, size, size) ? (
+    val += mouse_wheel / 120 * ((mouse_cap & 8) ? 0.002 : 0.02) * range;
+    mouse_wheel = 0;
+  );
+  val = gk_clamp(val, vmin, vmax);
+  gfx_getimgdim(img, sw, sh);
+  gk_knob_cols > 0 ? (
+    n = gk_knob_frames;
+    ok = gk_strip_grid(img, n, gk_knob_cols, (val - vmin) / range * (n - 1), x, y, size, size);
+  ) : (
+    n = (sw > 0 && sh > 0) ? sh / sw : 0;
+    ok = gk_strip(img, n, (val - vmin) / range * (n - 1), x, y, size, size);
+  );
+  ok ? 0 : gk_knob_vector(x, y, size, (val - vmin) / range);
+  val;
+);
+
+// Knob bound directly to slider index sidx (1-based): writes + automates on change.
+// Returns 1 if the value changed this frame, so the caller can recompute DSP state.
+function gk_knob_slider(id, img, x, y, size, sidx, vmin, vmax, vdef) local(v)
+(
+  v = gk_knob(id, img, x, y, size, slider(sidx), vmin, vmax, vdef);
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// ------------------------------------------------------------------ toggle / led
+function gk_toggle(id, img, x, y, w, h, state)  // 2-frame strip, toggles on press
+(
+  gk_clicked && gk_hit(x, y, w, h) ? ( state = !state; gk_active = id; );
+  gk_strip(img, 2, state ? 1 : 0, x, y, w, h);
+  state;
+);
+
+function gk_toggle_slider(id, img, x, y, w, h, sidx) local(v)
+(
+  v = gk_toggle(id, img, x, y, w, h, slider(sidx));
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+function gk_led(img, x, y, size, on)
+(
+  gk_strip(img, 2, on ? 1 : 0, x, y, size, size);
+);
+
+// ------------------------------------------------------------------ button
+// 3 frames: off / hover / on. Returns 1 on release inside the button.
+// Pass on = -1 for a momentary button that shows "on" while pressed.
+function gk_button(id, x, y, w, h, on, label) local(hover, fired, frame)
+(
+  hover = gk_hit(x, y, w, h);
+  gk_clicked && hover ? gk_active = id;
+  fired = gk_released && gk_active == id && hover;
+  on < 0 ? on = (gk_active == id && (mouse_cap & 1));
+  frame = on ? 2 : (hover ? 1 : 0);
+  gk_img_button >= 0 ? (
+    gk_strip(gk_img_button, 3, frame, x, y, w, h);
+  ) : (
+    gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, on ? 1 : 0.25);
+    gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S);
+  );
+  on ? gfx_set(0.08, 0.09, 0.10, 1) : gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = x*gk_S; gfx_y = y*gk_S;
+  gfx_drawstr(label, 1|4, (x+w)*gk_S, (y+h)*gk_S);
+  fired;
+);
+
+// ------------------------------------------------------------------ value field
+function gk_field(x, y, w, h, str)
+(
+  gk_img_field >= 0 ? gk_nine(gk_img_field, 8, 4, x, y, w, h) : (
+    gfx_set(0.10, 0.106, 0.118, 1); gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S);
+  );
+  gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = x*gk_S; gfx_y = y*gk_S;
+  gfx_drawstr(str, 1|4, (x+w)*gk_S, (y+h)*gk_S);
+);
+
+// Editable numeric field: vertical drag like a knob, Ctrl-click resets.
+function gk_field_drag(id, x, y, w, h, val, vmin, vmax, vdef, fmt)
+(
+  gk_clicked && gk_hit(x, y, w, h) ? (
+    mouse_cap & 4 ? val = vdef : ( gk_active = id; gk_lasty = mouse_y; );
+  );
+  gk_active == id && (mouse_cap & 1) ? (
+    val += (gk_lasty - mouse_y) / gk_S * ((mouse_cap & 8) ? 0.001 : 0.005) * (vmax - vmin);
+    gk_lasty = mouse_y;
+  );
+  val = gk_clamp(val, vmin, vmax);
+  sprintf(#gk_fieldstr, fmt, val);
+  gk_field(x, y, w, h, #gk_fieldstr);
+  val;
+);
+
+// Editable numeric field: drag vertically to scrub (Shift = fine, Ctrl-click
+// resets), or click without dragging to type a value. Enter commits, Esc
+// cancels, clicking anywhere else commits. `dispstr` is what the field shows
+// when it is not being edited, so the caller keeps control of units and of
+// special cases like "Peak" or "Off".
+//
+// Typing needs the FX window focused, since it reads gfx_getchar.
+function gk_edit_apply(val, vmin, vmax) local(v)
+(
+  match("%f", #gk_edit_buf, v) || match("%d", #gk_edit_buf, v) ?
+    val = gk_clamp(v, vmin, vmax);
+  val;
+);
+
+function gk_field_edit(id, x, y, w, h, val, vmin, vmax, vdef, dispstr)
+  local(ch, n, tw, th, hit)
+(
+  hit = gk_hit(x, y, w, h);
+  gk_edit_id == id ? (
+    while (ch = gfx_getchar()) (
+      ch == 13 ? ( val = gk_edit_apply(val, vmin, vmax); gk_edit_id = 0; ) :
+      ch == 27 ? gk_edit_id = 0 :
+      ch == 8 ? (
+        (n = strlen(#gk_edit_buf)) > 0 ? (
+          strcpy_substr(#gk_edit_tmp, #gk_edit_buf, 0, n - 1);
+          strcpy(#gk_edit_buf, #gk_edit_tmp);
+        );
+      ) :
+      (ch >= 32 && ch < 127 && strlen(#gk_edit_buf) < 15) ? (
+        sprintf(#gk_edit_tmp, "%c", ch);
+        strcat(#gk_edit_buf, #gk_edit_tmp);
+      );
+    );
+    gk_clicked && !hit ? ( val = gk_edit_apply(val, vmin, vmax); gk_edit_id = 0; );
+  ) : (
+    gk_clicked && hit ? (
+      mouse_cap & 4 ? val = vdef :
+        ( gk_active = id; gk_lasty = mouse_y; gk_edit_moved = 0; );
+    );
+    gk_active == id && (mouse_cap & 1) ? (
+      gk_edit_moved += abs(gk_lasty - mouse_y);
+      val += (gk_lasty - mouse_y) / gk_S * ((mouse_cap & 8) ? 0.001 : 0.005) * (vmax - vmin);
+      gk_lasty = mouse_y;
+    );
+    // released roughly where it was pressed = a click, not a scrub: start typing
+    gk_released && gk_active == id && hit && gk_edit_moved < 3*gk_S ? (
+      gk_edit_id = id;
+      sprintf(#gk_edit_buf, "%g", val);
+    );
+  );
+  val = gk_clamp(val, vmin, vmax);
+
+  gk_img_field >= 0 ? gk_nine(gk_img_field, 8, 4, x, y, w, h) : (
+    gfx_set(0.10, 0.106, 0.118, 1); gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S);
+  );
+  gk_edit_id == id ? (
+    gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+    gfx_rect(x*gk_S, y*gk_S, w*gk_S, max(1, gk_S));
+    gfx_rect(x*gk_S, (y + h)*gk_S - max(1, gk_S), w*gk_S, max(1, gk_S));
+    gfx_measurestr(#gk_edit_buf, tw, th);
+    gfx_x = x*gk_S + (w*gk_S - tw)*0.5;
+    gfx_y = y*gk_S + (h*gk_S - th)*0.5;
+    gfx_drawstr(#gk_edit_buf);
+    gfx_rect(gfx_x + gk_S, y*gk_S + 3*gk_S, max(1, gk_S), h*gk_S - 6*gk_S);
+  ) : (
+    gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+    gfx_x = x*gk_S; gfx_y = y*gk_S;
+    gfx_drawstr(dispstr, 1|4, (x + w)*gk_S, (y + h)*gk_S);
+  );
+  val;
+);
+
+// Bound to slider sidx (1-based). Returns 1 when the value changed.
+function gk_field_edit_slider(id, x, y, w, h, sidx, vmin, vmax, vdef, dispstr) local(v)
+(
+  v = gk_field_edit(id, x, y, w, h, slider(sidx), vmin, vmax, vdef, dispstr);
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// ------------------------------------------------------------------ dropdown
+// menu: gfx_showmenu string, e.g. "Tube|Tape|Transistor". label: current item text.
+// Returns the new 0-based index.
+function gk_dropdown(id, x, y, w, h, idx, menu, label) local(sw, sh, L, R, r)
+(
+  gk_img_dropdown >= 0 ? (
+    gfx_getimgdim(gk_img_dropdown, sw, sh);
+    L = 12; R = 32;   // source px: left cap, right cap containing the arrow
+    gfx_blit(gk_img_dropdown,1,0, 0,0,L,sh,        x*gk_S,y*gk_S,L/2*gk_S,h*gk_S);
+    gfx_blit(gk_img_dropdown,1,0, L,0,sw-L-R,sh,   (x+L/2)*gk_S,y*gk_S,(w-L/2-R/2)*gk_S,h*gk_S);
+    gfx_blit(gk_img_dropdown,1,0, sw-R,0,R,sh,     (x+w-R/2)*gk_S,y*gk_S,R/2*gk_S,h*gk_S);
+  ) : (
+    gfx_set(0.24, 0.255, 0.275, 1); gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S);
+  );
+  gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = (x+6)*gk_S; gfx_y = y*gk_S;
+  gfx_drawstr(label, 4, (x+w-16)*gk_S, (y+h)*gk_S);
+  gk_clicked && gk_hit(x, y, w, h) ? (
+    gfx_x = x*gk_S; gfx_y = (y+h)*gk_S;
+    r = gfx_showmenu(menu);
+    r > 0 ? idx = r - 1;
+    gk_clicked = 0;   // menu consumed this click
+  );
+  idx;
+);
+
+// ------------------------------------------------------------------ horizontal slider
+function gk_hslider(id, x, y, w, h, val, vmin, vmax, vdef) local(t, sw, sh, fw, tsz)
+(
+  gk_clicked && gk_hit(x, y - h*0.5, w, h*2) ? (
+    mouse_cap & 4 ? val = vdef : gk_active = id;
+  );
+  gk_active == id && (mouse_cap & 1) ? (
+    val = vmin + gk_clamp((mouse_x/gk_S - x) / w, 0, 1) * (vmax - vmin);
+  );
+  val = gk_clamp(val, vmin, vmax);
+  t = (val - vmin) / (vmax - vmin);
+  gk_img_hs_track >= 0 ? (
+    gfx_getimgdim(gk_img_hs_track, sw, sh);
+    gfx_blit(gk_img_hs_track,1,0, 0,0,sw,sh, x*gk_S,y*gk_S,w*gk_S,h*gk_S);
+  );
+  gk_img_hs_fill >= 0 ? (
+    gfx_getimgdim(gk_img_hs_fill, sw, sh);
+    fw = w * t;
+    fw > 0 ? gfx_blit(gk_img_hs_fill,1,0, 0,0,sw*t,sh, x*gk_S,y*gk_S,fw*gk_S,h*gk_S);
+  ) : (
+    gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 1);
+    gfx_rect(x*gk_S, (y+h*0.4)*gk_S, w*t*gk_S, h*0.2*gk_S);
+  );
+  tsz = h * 2;
+  gk_img_hs_thumb >= 0 ? (
+    gfx_getimgdim(gk_img_hs_thumb, sw, sh);
+    gfx_blit(gk_img_hs_thumb,1,0, 0,0,sw,sh, (x+w*t-tsz*0.5)*gk_S,(y+h*0.5-tsz*0.5)*gk_S,tsz*gk_S,tsz*gk_S);
+  );
+  val;
+);
+
+function gk_hslider_slider(id, x, y, w, h, sidx, vmin, vmax, vdef) local(v)
+(
+  v = gk_hslider(id, x, y, w, h, slider(sidx), vmin, vmax, vdef);
+  v != slider(sidx) ? ( slider(sidx) = v; slider_automate(2^(sidx-1)); 1; ) : 0;
+);
+
+// ------------------------------------------------------------------ vertical bar (EQ band / meter)
+// Display-only when id == 0. Interactive: click/drag sets value from mouse y.
+function gk_vbar(id, img, x, y, w, h, val, vmin, vmax) local(ok)
+(
+  id != 0 ? (
+    gk_clicked && gk_hit(x, y, w, h) ? gk_active = id;
+    gk_active == id && (mouse_cap & 1) ? (
+      val = vmin + gk_clamp(1 - (mouse_y/gk_S - y) / h, 0, 1) * (vmax - vmin);
+    );
+  );
+  val = gk_clamp(val, vmin, vmax);
+  gk_bar_cols > 0 ?
+    ok = gk_strip_grid(img, gk_bar_frames, gk_bar_cols,
+                       (val - vmin) / (vmax - vmin) * (gk_bar_frames - 1), x, y, w, h) :
+    ok = gk_strip(img, gk_bar_frames,
+                  (val - vmin) / (vmax - vmin) * (gk_bar_frames - 1), x, y, w, h);
+  ok ? 0 : gk_vbar_vector(x, y, w, h, (val - vmin) / (vmax - vmin));
+  val;
+);
+
+// Row of draggable bars stored in memory at buf[0..count-1]. Dragging across bars paints them.
+function gk_vbar_row(id, img, x, y, w, h, count, gap, buf, vmin, vmax) local(bw, i, hit_i, v)
+(
+  bw = (w - gap*(count-1)) / count;
+  gk_clicked && gk_hit(x, y, w, h) ? gk_active = id;
+  gk_active == id && (mouse_cap & 1) ? (
+    hit_i = floor((mouse_x/gk_S - x) / (bw + gap));
+    hit_i >= 0 && hit_i < count ? (
+      buf[hit_i] = vmin + gk_clamp(1 - (mouse_y/gk_S - y) / h, 0, 1) * (vmax - vmin);
+    );
+  );
+  i = 0;
+  loop(count,
+    v = gk_clamp(buf[i], vmin, vmax);
+    gk_strip(img, gk_bar_frames, (v - vmin) / (vmax - vmin) * (gk_bar_frames - 1), x + i*(bw+gap), y, bw, h);
+    i += 1;
+  );
+  gk_active == id;
+);
+
+// ------------------------------------------------------------------ panel + section header
+function gk_panel(x, y, w, h)
+(
+  gk_img_panel >= 0 ? gk_nine(gk_img_panel, 8, 4, x, y, w, h) : (
+    gfx_set(0.18, 0.188, 0.204, 1); gfx_rect(x*gk_S, y*gk_S, w*gk_S, h*gk_S);
+  );
+);
+
+// Header strip with optional LED (led_img < 0 to omit). Returns led state (click LED area toggles).
+function gk_header(id, x, y, w, h, title, led_img, led_on) local(sw, sh, tx)
+(
+  gk_img_header >= 0 ? (
+    gfx_getimgdim(gk_img_header, sw, sh);
+    gfx_blit(gk_img_header,1,0, 0,0,sw,sh, x*gk_S,y*gk_S,w*gk_S,h*gk_S);
+  );
+  tx = x + 8;
+  led_img >= 0 ? (
+    gk_clicked && gk_hit(x, y, h + 8, h) ? led_on = !led_on;
+    gk_led(led_img, x + 6, y + (h-10)*0.5, 10, led_on);
+    tx = x + 22;
+  );
+  gfx_setfont(2);
+  gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+  gfx_x = tx*gk_S; gfx_y = y*gk_S;
+  gfx_drawstr(title, 4, (x+w)*gk_S, (y+h)*gk_S);
+  gfx_setfont(1);
+  led_on;
+);
+
+// ------------------------------------------------------------------ scrolling waveform (instance)
+// Memory: reserve 3*ncols slots at mem_base, not overlapping anything else.
+//   @init:   wv.gk_wave_init(10000, 1024); wv.gk_wave_window(4);
+//   @slider: wv.gk_wave_window(window_s);           (also after srate changes)
+//   @sample: wv.gk_wave_push(spl0, spl1);           (skip the call to freeze)
+//   @gfx:    wv.gk_wave_draw(x, y, w, h, gain_db, frozen);
+function gk_wave_init(mem_base, ncols) instance(mem cols wpos cnt cmin cmax csq spc)
+(
+  mem = mem_base; cols = ncols;
+  memset(mem, 0, cols*3);
+  wpos = 0; cnt = 0; cmin = 1; cmax = -1; csq = 0; spc = 1;
+);
+
+function gk_wave_window(seconds) instance(cols spc)
+(
+  spc = max(1, floor(seconds * srate / cols));
+);
+
+function gk_wave_push(l, r) instance(mem cols wpos cnt cmin cmax csq spc)
+(
+  cmin = min(cmin, min(l, r));
+  cmax = max(cmax, max(l, r));
+  csq += 0.5 * (l*l + r*r);
+  (cnt += 1) >= spc ? (
+    mem[wpos] = cmin;
+    mem[cols + wpos] = cmax;
+    mem[2*cols + wpos] = sqrt(csq / cnt);
+    wpos = (wpos + 1) % cols;
+    cnt = 0; cmin = 1; cmax = -1; csq = 0;
+  );
+);
+
+// Inner plot geometry of gk_wave_draw, in device px, published as globals so a
+// plugin can draw its own overlay (threshold lines, traces) in exact register
+// with the waveform. Call it with the same x/y/w/h you pass to gk_wave_draw.
+function gk_wave_geom(x, y, w, h) local(S)
+(
+  S = gk_S;
+  gk_wv_ix = (x + 6)*S; gk_wv_iy = (y + 6)*S;
+  gk_wv_iw = (w - 12)*S; gk_wv_ih = (h - 14)*S;
+  gk_wv_cy = gk_wv_iy + gk_wv_ih*0.5;
+  gk_wv_half = gk_wv_ih*0.46;
+);
+
+function gk_wave_draw(x, y, w, h, gain_db, frozen)
+  instance(mem cols wpos)
+  local(S, ix, iy, iw, ih, cy, half, gain, w0, iwi, px, c0, c1, lo, hi, rr, c, k, fade, yt, yb, X, sw, sh)
+(
+  S = gk_S;
+  gk_img_wave_frame >= 0 ? gk_nine(gk_img_wave_frame, 16, 8, x, y, w, h) : (
+    gfx_set(0.10, 0.106, 0.118, 1); gfx_rect(x*S, y*S, w*S, h*S);
+  );
+  gk_wave_geom(x, y, w, h);
+  ix = gk_wv_ix; iy = gk_wv_iy; iw = gk_wv_iw; ih = gk_wv_ih;
+  cy = gk_wv_cy; half = gk_wv_half;
+  gain = 10^(gain_db/20);
+
+  gfx_set(1, 1, 1, 0.06); gfx_line(ix, cy, ix+iw, cy);
+  gfx_set(1, 1, 1, 0.03);
+  gfx_line(ix, cy-half*0.5, ix+iw, cy-half*0.5);
+  gfx_line(ix, cy+half*0.5, ix+iw, cy+half*0.5);
+
+  w0 = wpos; iwi = floor(iw); px = 0;
+  loop(iwi,
+    c0 = floor(px * cols / iwi);
+    c1 = max(c0 + 1, floor((px + 1) * cols / iwi));
+    lo = 1; hi = -1; rr = 0; c = c0;
+    while (c < c1) (
+      k = (w0 + c) % cols;
+      lo = min(lo, mem[k]); hi = max(hi, mem[cols + k]); rr = max(rr, mem[2*cols + k]);
+      c += 1;
+    );
+    hi >= lo ? (
+      fade = 0.35 + 0.65 * px / iwi;
+      yt = cy - min(1, hi*gain) * half;
+      yb = cy - max(-1, lo*gain) * half;
+      rr = min(1, rr*gain) * half;
+      X = ix + px;
+      gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.10*fade); gfx_rect(X-S, yt-S, 1+2*S, yb-yt+1+2*S);
+      gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.55*fade); gfx_rect(X, yt, 1, yb-yt+1);
+      gfx_set(0.62, 0.93, 0.98, 0.9*fade);           gfx_rect(X, cy-rr, 1, 2*rr+1);
+    );
+    px += 1;
+  );
+
+  gfx_a = frozen ? 0.35 : 1;
+  gk_img_playhead_line >= 0 ? (
+    gfx_getimgdim(gk_img_playhead_line, sw, sh);
+    gfx_blit(gk_img_playhead_line,1,0, 0,0,sw,sh, ix+iw-3*S, iy, 6*S, ih);
+  );
+  gk_img_playhead_marker >= 0 ? (
+    gfx_getimgdim(gk_img_playhead_marker, sw, sh);
+    gfx_blit(gk_img_playhead_marker,1,0, 0,0,sw,sh, ix+iw-7*S, iy+ih-6*S, 14*S, 10*S);
+  );
+  gfx_a = 1;
+);
+
+
+// ------------------------------------------------------------------ help panel
+// Shows a plain-text file (a per-plugin .help.txt next to the .jsfx) in a
+// scrollable overlay. Declare the file as the LAST filename: slot, after the
+// images, so an image-slot count is not thrown off by it.
+//
+//   @init   HELP_FILE = 13; HELP_BASE = 300; help_open = 0; help_lines = 0;
+//   @gfx    gk_button(41, x, y, 18, 16, help_open, "?") ? (
+//             help_open = !help_open;
+//             help_open && !help_lines ? help_lines = gk_help_load(HELP_FILE, HELP_BASE, 600);
+//           );
+//           help_open ? gk_help_input(40, 41);      // before any other widget
+//           ...widgets...
+//           help_open ? gk_help_draw(10, 40, 700, 416, "Help", HELP_BASE, help_lines);
+//
+// Text goes into string slots base..base+maxlines-1. Slots 0-1023 belong to the
+// script, so pick a base clear of the named strings the plugin and this library
+// allocate. Returns the number of lines read, 0 if the file could not be read.
+function gk_help_load(file_slot, base, maxlines) local(h, n)
+(
+  n = 0;
+  h = file_open(file_slot);
+  h >= 0 ? (
+    // bounded, and gated on file_avail rather than the return of file_string,
+    // so a blank line in the file does not end the read early
+    loop(maxlines,
+      file_avail(h) > 0 ? ( file_string(h, base + n); n += 1; );
+    );
+    file_close(h);
+  );
+  gk_help_scroll = 0;
+  n;
+);
+
+// Call once the help toggle has been drawn and before any other widget: takes
+// the wheel for scrolling and stops clicks and drags reaching the controls
+// underneath. The two ids passed stay live (the toggle, and e.g. a menu).
+function gk_help_input(keep_a, keep_b)
+(
+  gk_edit_id = 0;              // a field must not keep eating gfx_getchar
+  mouse_wheel != 0 ? (
+    gk_help_scroll -= (mouse_wheel / 120) * 3;
+    mouse_wheel = 0;
+  );
+  gk_clicked = 0;
+  gk_active != keep_a && gk_active != keep_b ? gk_active = 0;
+);
+
+function gk_help_draw(x, y, w, h, title, base, nlines)
+  local(i, ln, lh, vis, maxs, ty, tb, trk, thumb)
+(
+  gk_panel(x, y, w, h);
+  gk_header(0, x, y, w, 22, title, -1, 0);
+  lh = gk_help_px + 3;
+  vis = floor((h - 34) / lh);
+  maxs = max(0, nlines - vis);
+  gk_help_scroll = gk_clamp(floor(gk_help_scroll), 0, maxs);
+
+  nlines < 1 ? (
+    gk_text_c(x + w*0.5, y + h*0.5 - 6, "help file not found next to the plugin", 1);
+  ) : (
+    gfx_setfont(3, gk_help_font, gk_help_px*gk_S);
+    gfx_set(gk_fg_r, gk_fg_g, gk_fg_b, 1);
+    i = 0;
+    loop(vis,
+      ln = gk_help_scroll + i;
+      ln < nlines ? (
+        ty = (y + 28 + i*lh)*gk_S; tb = ty + lh*gk_S;
+        gfx_x = (x + 12)*gk_S; gfx_y = ty;
+        gfx_drawstr(base + ln, 0, (x + w - 18)*gk_S, tb);
+      );
+      i += 1;
+    );
+    gfx_setfont(1);
+    maxs > 0 ? (
+      trk = h - 36;
+      thumb = max(10, trk * vis / nlines);
+      gfx_set(gk_dim_r, gk_dim_g, gk_dim_b, 0.22);
+      gfx_rect((x + w - 8)*gk_S, (y + 28)*gk_S, 3*gk_S, trk*gk_S);
+      gfx_set(gk_ac_r, gk_ac_g, gk_ac_b, 0.9);
+      gfx_rect((x + w - 8)*gk_S,
+               (y + 28 + (trk - thumb) * gk_help_scroll / maxs)*gk_S,
+               3*gk_S, thumb*gk_S);
+    );
+  );
+);
