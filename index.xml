@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
-<index version="1" name="Magnolius" commit="9d0ebfed6ebd5d991dd696ab39918973cf21eaec">
+<index version="1" name="Magnolius" commit="f0185f6d31787f20adb7b7a7f6a406461246298d">
   <category name="JSFX/adaptive-compressor">
     <reapack name="Magnolius_AdaptiveCompressor.jsfx" type="effect" desc="Adaptive Compressor (Magnolius)">
       <metadata>
@@ -571,6 +571,58 @@ still receives the side chain]]></changelog>
       <version name="1.1" author="Magnolius" time="2026-09-16T11:32:23Z">
         <changelog><![CDATA[Name now ends with (Magnolius) so the plugins are easy to find in the FX browser]]></changelog>
         <source>https://github.com/m-dahlberg/magnolius-reaper/raw/6b56a2ae94d8ad567d309e76b0c95ce80d3dbc1c/JSFX/mix-reference/Magnolius_MixReference.jsfx</source>
+      </version>
+    </reapack>
+  </category>
+  <category name="JSFX/modulation-delay">
+    <reapack name="Magnolius_ModulationDelay.jsfx" type="effect" desc="Modulation Delay (Magnolius)">
+      <metadata>
+        <description><![CDATA[{\rtf1\ansi\deff0{\fonttbl{\f0 \fswiss Helvetica;}{\f1 \fmodern Courier;}}
+{\colortbl;\red255\green0\blue0;\red0\green0\blue255;}
+\widowctrl\hyphauto
+
+{\pard \ql \f0 \sa180 \li0 \fi0 A stereo modulation delay with three characters, Digital, BBD and Tape, from one delay engine. The character comes from what happens inside the feedback loop, not from the delay line: every repeat gets darker, thinner and a little more smeared, and the modulation moves the read position inside the loop, so each repeat drifts a little further than the last.\par}
+{\pard \ql \f0 \sa180 \li0 \fi0 Licensed GPL-3.0-or-later.\par}
+}
+]]></description>
+        <link rel="website" href="https://github.com/m-dahlberg/magnolius-reaper">GitHub</link>
+      </metadata>
+      <version name="0.2" author="Magnolius" time="2026-11-20T12:28:22Z">
+        <changelog><![CDATA[v0.2.1:
+Removed the "ms per repeat" text from the repeat map and the legend and
+BBD note from the loop response.
+
+v0.2:
+The first echo now goes through the same loop chain (filters, drive,
+smear) and the colour compounds from there. Decay curve: Feedback sets
+how many repeats it takes to fall 60 dB, Curve sets the shape of the
+fall. Loop HPF now 20 Hz-5 kHz and LPF 200 Hz-20 kHz, each exactly off at
+the end of its range. Smear is continuous (a fractional value fades the
+next stage in), so its knob moves smoothly.
+
+v0.1:
+First version.]]></changelog>
+        <source>https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/Magnolius_ModulationDelay.jsfx</source>
+        <source file="gui_kit/gui_kit.jsfx-inc">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/gui_kit.jsfx-inc</source>
+        <source file="gui_kit/button_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/button_cyan.png</source>
+        <source file="gui_kit/dropdown.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/dropdown.png</source>
+        <source file="gui_kit/header_bar.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/header_bar.png</source>
+        <source file="gui_kit/knob_cyan_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/knob_cyan_grid.png</source>
+        <source file="gui_kit/knob_grey_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/knob_grey_grid.png</source>
+        <source file="gui_kit/knob_orange_bipolar_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/knob_orange_bipolar_grid.png</source>
+        <source file="gui_kit/knob_orange_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/knob_orange_grid.png</source>
+        <source file="gui_kit/knob_yellow_grid.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/knob_yellow_grid.png</source>
+        <source file="gui_kit/led_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/led_cyan.png</source>
+        <source file="gui_kit/led_orange.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/led_orange.png</source>
+        <source file="gui_kit/led_yellow.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/led_yellow.png</source>
+        <source file="gui_kit/logo_magnolius_grey.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/logo_magnolius_grey.png</source>
+        <source file="gui_kit/panel_tile.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/panel_tile.png</source>
+        <source file="gui_kit/toggle_cyan.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/toggle_cyan.png</source>
+        <source file="gui_kit/toggle_orange.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/toggle_orange.png</source>
+        <source file="gui_kit/toggle_yellow.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/toggle_yellow.png</source>
+        <source file="gui_kit/value_field.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/value_field.png</source>
+        <source file="gui_kit/wave_frame_9slice.png">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/gui_kit/wave_frame_9slice.png</source>
+        <source file="Magnolius_ModulationDelay.help.txt">https://github.com/m-dahlberg/magnolius-reaper/raw/0a21e1b1994576ce5a3e64d27678426732254e37/JSFX/modulation-delay/Magnolius_ModulationDelay.help.txt</source>
       </version>
     </reapack>
   </category>
