@@ -41,11 +41,10 @@ Then in REAPER: FX browser → refresh (F5) → "Convolution Reverb".
    the project rate on load). **Subfolders are supported** and are the
    recommended way to organize a library.
 2. Pick an IR either way — the last one you touch wins:
-   - the **Reverb IR** file slider. REAPER recurses into subfolders on its own
-     and lists them as `Bricasti M7/1 Halls 01 Large Hall, 48K`. This slider is
-     automatable and needs no setup.
    - the **built-in browser** in the graphics pane: a search box, a folder
      list with per-folder counts, and a scrollable result list.
+   - the **Reverb IR** file slider, which is hidden from the generic controls
+     but still automatable and still restores a file saved in an older project.
 3. Balance *wet*/*dry* (−60 dB = fully off). The reverb is active whenever a
    valid IR is loaded.
 
@@ -125,10 +124,10 @@ on a single click. The filter knobs run a logarithmic taper so the low end is
 not squeezed into the first tenth of the travel — the sliders themselves stay
 linear in Hz, so automation and saved projects are unaffected.
 
-Sliders 2–10 carry a leading `-`, so REAPER's generic controls stay hidden while
-the parameters remain automatable. **Slider 1 deliberately does not**: a file
-slider can only be driven by the host, so hiding it would remove the one IR
-source that needs no index file.
+All sliders carry a leading `-`, so REAPER's generic controls stay hidden while
+the parameters remain automatable. That includes the Reverb IR file slider: the
+IR is picked in the built-in browser (which needs the index file), and a file
+set by automation or stored in an existing project still loads.
 
 ## Controls
 

@@ -20,8 +20,9 @@ SETUP - DO THIS FIRST
 
    - The Reverb IR parameter in REAPER's parameter list. It is a file
      slider: REAPER owns it, it recurses into subfolders on its own,
-     it is automatable, and it needs no setup. It stays visible on
-     purpose - only the host can drive a file slider.
+     it is automatable, and it needs no setup. It is hidden from the
+     generic controls, so it is only reached through automation or an
+     older project that already stores a file in it.
 
    - The browser in this window. It needs an index file (see below),
      but it gives you search, folders and counts.

@@ -89,10 +89,12 @@ options:maxmem=16777216
 // the whole vendor. gmem[0] is the interface scale (index+1).
 options:gmem=Magnolius
 
-// slider1 keeps NO leading '-': a file slider can only be driven by the
-// host, so hiding it would take away the one IR source that works without
-// the index file. Sliders 2-7 are hidden - the GUI owns them.
-slider1:/ReverbIRs:none:Reverb IR wav - 4ch order LL LR RL RR
+// Sliders 1-10 are all hidden (leading '-') - the GUI owns them, so REAPER's
+// generic control strip no longer shows above it. Slider 1 is a file slider
+// that only the host can write; hidden, it still loads a file that is set by
+// automation or saved in a project, but the browser (index file) is the way to
+// pick an IR.
+slider1:/ReverbIRs:none:-Reverb IR wav - 4ch order LL LR RL RR
 slider2:rvb_wet=-12<-60,12,0.1>-Reverb wet (dB, -60=off)
 slider3:rvb_dry=0<-60,12,0.1>-Reverb dry (dB, -60=off)
 slider4:rvb_pre=0<0,500,0.1>-Pre-delay (ms, wet only)
