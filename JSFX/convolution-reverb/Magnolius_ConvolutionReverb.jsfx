@@ -1,7 +1,7 @@
 desc:Convolution Reverb (Magnolius)
 // @description Convolution Reverb (Magnolius)
 // @author Magnolius
-// @version 1.5
+// @version 1.5.1
 // @link GitHub https://github.com/m-dahlberg/magnolius-reaper
 // @provides
 //   gui_kit/gui_kit.jsfx-inc
@@ -32,6 +32,11 @@ desc:Convolution Reverb (Magnolius)
 //
 //   Licensed GPL-3.0-or-later.
 // @changelog
+//   1.5.1: the generic REAPER file-slider strip above the interface is hidden.
+//   Pick an IR in the built-in browser (it needs Data/ConvReverbIRs.idx - see
+//   the README); a file set by automation or stored in a project still loads.
+//
+//   1.5:
 //   CPU: about a quarter of what 1.4 used, spread evenly instead of in bursts.
 //
 //   1.4 spent a full CPU core on an 8 s IR (0.91 s of CPU per second of
